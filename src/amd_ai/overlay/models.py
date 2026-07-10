@@ -112,3 +112,31 @@ class ProtectedProfile:
             if component.name == canonical:
                 return component.version
         raise OverlayError(f"distribution is not protected: {name}")
+
+
+@dataclass(frozen=True)
+class OverlayState:
+    generation_id: str
+    input_digest: str
+    lock_digest: str
+    profile_id: str
+    parent_config_digest: str
+    created_at: str
+    healthy: bool = False
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        if GENERATION_PATTERN.fullmatch(self.generation_id) is None:
+            raise OverlayError("overlay state generation ID is invalid")
+        for label, value in (
+            ("input", self.input_digest),
+            ("lock", self.lock_digest),
+        ):
+            if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise OverlayError(f"overlay state {label} digest is invalid")
+        if not self.profile_id:
+            raise OverlayError("overlay state profile ID is empty")
+        if DIGEST_PATTERN.fullmatch(self.parent_config_digest) is None:
+            raise OverlayError("overlay state parent config digest is invalid")
+        if not self.created_at.endswith("Z"):
+            raise OverlayError("overlay state timestamp is not UTC")
