@@ -128,6 +128,11 @@ class TerminalPrompts:
 
 
 class NonInteractivePrompts:
+    def __init__(
+        self, *, output_fn: Callable[[str], None] = print
+    ) -> None:
+        self._output_fn = output_fn
+
     def choose_mode(self) -> InstallMode | None:
         raise PromptRequired("install mode must be supplied non-interactively")
 
@@ -152,7 +157,7 @@ class NonInteractivePrompts:
         )
 
     def status(self, prefix: str, message: str) -> None:
-        render_status(prefix, message)
+        self._output_fn(render_status(prefix, message))
 
 
 def render_status(prefix: str, message: str) -> str:

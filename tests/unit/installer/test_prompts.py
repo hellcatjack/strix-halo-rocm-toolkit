@@ -81,3 +81,16 @@ def test_status_renderer_accepts_only_approved_prefixes() -> None:
     assert render_status("BLOCKED", "不允许继续") == "BLOCKED  不允许继续"
     with pytest.raises(ValueError):
         render_status("INFO", "not approved")
+
+
+def test_noninteractive_prompts_render_status_without_answering(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    prompt = NonInteractivePrompts()
+
+    prompt.status("ACTION", "dry-run IMAGE_PULL_OR_BUILD")
+
+    assert (
+        capsys.readouterr().out
+        == "ACTION   dry-run IMAGE_PULL_OR_BUILD\n"
+    )
