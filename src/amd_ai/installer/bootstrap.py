@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -81,6 +82,11 @@ def install_user_runtime(
     staging.chmod(0o700)
     try:
         _copy_payload(source_root, staging)
+        _write_runtime_identity(
+            staging,
+            version=version,
+            installer_source_revision=installer_source_revision,
+        )
         _fsync_tree(staging)
         if _lexists(runtime):
             if runtime.is_symlink() or not runtime.is_dir():
@@ -325,6 +331,30 @@ def _install_launcher(path: Path) -> None:
         if descriptor >= 0:
             os.close(descriptor)
         temporary.unlink(missing_ok=True)
+
+
+def _write_runtime_identity(
+    runtime: Path, *, version: str, installer_source_revision: str
+) -> None:
+    path = runtime / ".installer-runtime.json"
+    payload = {
+        "installer_source_revision": installer_source_revision,
+        "schema_version": 1,
+        "version": version,
+    }
+    encoded = (
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("ascii")
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        os.write(descriptor, encoded)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _payload_manifest(root: Path) -> tuple[tuple[str, str, str], ...]:

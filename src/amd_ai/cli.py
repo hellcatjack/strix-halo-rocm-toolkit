@@ -55,11 +55,24 @@ from amd_ai.image.publish import (
     verify_publish_candidate_local_images,
     write_observed_release,
 )
+from amd_ai.installer.actions import ProductionInstallerActions
+from amd_ai.installer.models import (
+    InstallMode,
+    InstallOptions,
+    InstallerModelError,
+    default_state_path,
+)
+from amd_ai.installer.prompts import (
+    NonInteractivePrompts,
+    PromptError,
+    TerminalPrompts,
+)
 from amd_ai.installer.release import (
     ReleaseError,
     load_stable_release,
     pull_and_verify_release,
 )
+from amd_ai.installer.workflow import InstallerWorkflow
 from amd_ai.overlay.models import (
     PROTECTED_DISTRIBUTIONS,
     OverlayError,
@@ -108,6 +121,19 @@ def build_parser() -> argparse.ArgumentParser:
         version=f"amd-ai {__version__}",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+    install = subparsers.add_parser("install")
+    install.add_argument("--mode", choices=("full", "container"))
+    install.add_argument("--non-interactive", action="store_true")
+    install.add_argument("--dry-run", action="store_true")
+    install.add_argument("--project-dir", type=Path)
+    install.add_argument("--project-name", default="amd-ai-project")
+    install.add_argument("--image-source", choices=("pull", "build"))
+    install.add_argument("--target-user")
+    install.add_argument("--accept-host-plan-digest")
+    install.add_argument("--accept-docker-group", action="store_true")
+    install.add_argument("--manifest", type=Path)
+    install.add_argument("--source-root", type=Path)
+    install.add_argument("--state-path", type=Path)
     preflight = subparsers.add_parser("host-preflight")
     preflight.add_argument("--json", type=Path, dest="json_path")
     preflight.add_argument(
@@ -174,21 +200,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     project_init = subparsers.add_parser("project-init")
-    project_init.add_argument("name")
-    project_init.add_argument("--directory", type=Path)
-    project_init.add_argument("--base-profile", default="stable")
+    _add_project_init_arguments(project_init)
 
     project_lock = subparsers.add_parser("project-lock")
-    project_lock.add_argument("project", type=Path)
+    _add_project_lock_arguments(project_lock)
 
     project_run = subparsers.add_parser("project-run")
-    project_run.add_argument("project", type=Path)
-    build_mode = project_run.add_mutually_exclusive_group()
-    build_mode.add_argument("--build", action="store_true")
-    build_mode.add_argument("--no-build", action="store_true")
-    project_run.add_argument("--dry-run", action="store_true")
-    project_run.add_argument("--debug", action="store_true")
-    project_run.add_argument("--shm-size-gib", type=_shm_gib)
+    _add_project_run_arguments(project_run)
+
+    project = subparsers.add_parser("project")
+    project_modes = project.add_subparsers(
+        dest="project_command", required=True
+    )
+    _add_project_init_arguments(project_modes.add_parser("init"))
+    _add_project_lock_arguments(project_modes.add_parser("lock"))
+    _add_project_run_arguments(project_modes.add_parser("run"))
 
     gpu_release = subparsers.add_parser("gpu-release")
     gpu_release.add_argument("--qualification", type=Path, required=True)
@@ -251,6 +277,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "install":
+        try:
+            return _install_command(args)
+        except (
+            InstallerModelError,
+            OSError,
+            PromptError,
+            ValueError,
+        ) as error:
+            print(f"install: {error}", file=sys.stderr)
+            return 2
     if args.command == "host-preflight":
         return _host_preflight(args.fixture_root, args.json_path)
     if args.command == "host-prepare":
@@ -283,11 +320,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         ) as error:
             print(f"container-check: {error}", file=sys.stderr)
             return 2
-    if args.command in {"project-init", "project-lock", "project-run"}:
+    if args.command in {"project", "project-init", "project-lock", "project-run"}:
         try:
-            if args.command == "project-init":
+            project_command = (
+                args.project_command
+                if args.command == "project"
+                else args.command.removeprefix("project-")
+            )
+            if project_command == "init":
                 return _project_init(args)
-            if args.command == "project-lock":
+            if project_command == "lock":
                 return _project_lock(args)
             return _project_run(args)
         except (
@@ -374,6 +416,149 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 2
     raise AssertionError(f"unhandled command: {args.command}")
+
+
+def _add_project_init_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("name")
+    parser.add_argument("--directory", type=Path)
+    parser.add_argument("--base-profile", default="stable")
+
+
+def _add_project_lock_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("project", type=Path)
+
+
+def _add_project_run_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("project", type=Path)
+    build_mode = parser.add_mutually_exclusive_group()
+    build_mode.add_argument("--build", action="store_true")
+    build_mode.add_argument("--no-build", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--shm-size-gib", type=_shm_gib)
+
+
+def _install_command(args: argparse.Namespace) -> int:
+    prompts = (
+        NonInteractivePrompts()
+        if args.non_interactive
+        else TerminalPrompts()
+    )
+    mode = InstallMode(args.mode) if args.mode is not None else None
+    if mode is None:
+        if args.non_interactive:
+            raise InstallerModelError(
+                "--mode is required with --non-interactive"
+            )
+        selected = prompts.choose_mode()
+        if selected is None:
+            return 0
+        if selected is InstallMode.DOCTOR:
+            return _interactive_doctor(args, prompts)
+        mode = selected
+
+    source_root = (
+        args.source_root
+        or Path(os.environ.get("AMD_AI_TOOLKIT_ROOT", ""))
+        or Path(__file__).resolve().parents[2]
+    )
+    if str(source_root) == ".":
+        source_root = Path(__file__).resolve().parents[2]
+    manifest = args.manifest or source_root / "profiles/releases/stable.json"
+    state_path = args.state_path or default_state_path()
+    options = InstallOptions(
+        mode=mode,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+        project_dir=args.project_dir,
+        project_name=args.project_name,
+        image_source=args.image_source,
+        target_user=args.target_user,
+        accepted_host_plan_digest=args.accept_host_plan_digest,
+        accept_docker_group=args.accept_docker_group,
+        stable_manifest_path=manifest,
+        source_root=source_root,
+        state_path=state_path,
+    )
+    revision = _installer_source_revision(source_root)
+    workflow = InstallerWorkflow(
+        options=options,
+        actions=ProductionInstallerActions(),
+        installer_version=__version__,
+        installer_source_revision=revision,
+        prompts=prompts,
+    )
+    result = workflow.run()
+    if result.message:
+        stream = sys.stderr if result.exit_code == 2 else sys.stdout
+        print(result.message, file=stream)
+    return result.exit_code
+
+
+def _interactive_doctor(
+    args: argparse.Namespace, prompts: TerminalPrompts
+) -> int:
+    source_root = args.source_root or Path(__file__).resolve().parents[2]
+    manifest = args.manifest or source_root / "profiles/releases/stable.json"
+    report = run_doctor(args.project_dir, manifest)
+    for diagnostic in report.diagnostics:
+        if diagnostic.disposition != DiagnosticDisposition.PASS:
+            print(
+                f"{diagnostic.code} [{diagnostic.disposition.value}]: "
+                f"{diagnostic.summary}"
+            )
+    if (
+        report.status == "repairable"
+        and args.project_dir is not None
+        and prompts.confirm_exact("REPAIR")
+    ):
+        return _repair_command(
+            argparse.Namespace(
+                project=args.project_dir,
+                manifest=manifest,
+                yes=True,
+                json_path=None,
+            )
+        )
+    if report.status in {"pass", "warning"}:
+        return 0
+    return 1 if report.status == "repairable" else 2
+
+
+def _installer_source_revision(source_root: Path) -> str:
+    environment_value = os.environ.get("AMD_AI_INSTALLER_SOURCE_REVISION", "")
+    if re.fullmatch(r"[0-9a-f]{40}", environment_value):
+        return environment_value
+    runtime_root = Path(os.environ.get("AMD_AI_TOOLKIT_ROOT", source_root))
+    metadata = runtime_root / ".installer-runtime.json"
+    if metadata.is_file() and not metadata.is_symlink():
+        try:
+            payload = json.loads(metadata.read_text(encoding="ascii"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise InstallerModelError(
+                f"cannot read installer runtime identity: {error}"
+            ) from error
+        revision = payload.get("installer_source_revision")
+        if isinstance(revision, str) and re.fullmatch(
+            r"[0-9a-f]{40}", revision
+        ):
+            return revision
+        raise InstallerModelError("installer runtime identity is invalid")
+    completed = subprocess.run(
+        ("git", "-C", str(source_root), "rev-parse", "HEAD"),
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    revision = completed.stdout.strip()
+    if completed.returncode != 0 or re.fullmatch(
+        r"[0-9a-f]{40}", revision
+    ) is None:
+        raise InstallerModelError(
+            "cannot determine installer source revision"
+        )
+    return revision
 
 
 def _repair_command(args: argparse.Namespace) -> int:

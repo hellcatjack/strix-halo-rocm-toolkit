@@ -53,6 +53,13 @@ def test_install_runtime_copies_required_payload_and_switches_current(
     assert os.access(home / ".local/bin/strix-halo-rocm", os.X_OK)
     assert result.launcher.read_text(encoding="ascii") == LAUNCHER_CONTENT
     assert result.launcher.stat().st_mode & 0o777 == 0o755
+    assert (result.runtime / ".installer-runtime.json").read_text(
+        encoding="ascii"
+    ) == (
+        '{"installer_source_revision":"'
+        + "a" * 40
+        + '","schema_version":1,"version":"0.2.0"}\n'
+    )
 
 
 def test_source_payload_symlink_is_rejected(tmp_path: Path) -> None:
