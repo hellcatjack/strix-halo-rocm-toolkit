@@ -410,13 +410,13 @@ new installer with container mode, a different project, and no `--state-path`.
 Verify the selected state is under `projects/`, the copied legacy digest is
 unchanged, and no full-host action is called.
 
-- [ ] **Step 4: Review and publish**
+- [x] **Step 4: Review and publish**
 
 Review `git diff v0.2.1...HEAD`, fast-forward `main`, create annotated tag
 `v0.2.2`, and atomically push `main` plus the tag. Verify anonymous HTTPS refs
 and raw `__version__` content.
 
-- [ ] **Step 5: Run the user's original command on `v0.2.2`**
+- [x] **Step 5: Run the user's original command on `v0.2.2`**
 
 Update `/app/test/strix-halo-rocm-toolkit` to detached tag `v0.2.2`, then run:
 
