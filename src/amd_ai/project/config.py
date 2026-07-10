@@ -33,6 +33,7 @@ RESERVED_ENVIRONMENT = frozenset(
         "ROCM_PATH",
         "HIP_PATH",
         "HOME",
+        "ALLOW_UNVERIFIED",
         "AMD_AI_PROFILE_ID",
         "AMD_AI_PROFILE_STATUS",
     }
@@ -99,8 +100,14 @@ def load_project_config(path: str | Path) -> ProjectConfig:
     name = _matching_string(project, "name", NAME_PATTERN)
     base_profile = _matching_string(project, "base_profile", PROFILE_PATTERN)
     image = _string(project, "image")
-    if any(character.isspace() for character in image) or "\0" in image:
-        raise ConfigError("project image must not contain whitespace or NUL")
+    if (
+        image.startswith("-")
+        or any(character.isspace() for character in image)
+        or "\0" in image
+    ):
+        raise ConfigError(
+            "project image must not start with '-' or contain whitespace or NUL"
+        )
     base_image = _matching_string(project, "base_image", IMAGE_ID_PATTERN)
     base_digest = _matching_string(project, "base_digest", IMAGE_ID_PATTERN)
     if base_image != base_digest:

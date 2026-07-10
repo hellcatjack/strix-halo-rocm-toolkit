@@ -65,6 +65,7 @@ def test_explicit_environment_and_relative_mount_are_preserved(tmp_path):
     [
         ('[project]\nunknown="value"\n', "unknown"),
         ('[environment]\nPATH="/tmp"\n', "reserved"),
+        ('[environment]\nALLOW_UNVERIFIED="1"\n', "reserved"),
     ],
 )
 def test_unknown_project_key_or_reserved_environment_is_rejected(
@@ -86,6 +87,17 @@ def test_parent_ids_must_match(tmp_path):
     path.write_text(text, encoding="utf-8")
 
     with pytest.raises(ConfigError, match="must match"):
+        load_project_config(path)
+
+
+def test_project_image_cannot_be_parsed_as_a_docker_option(tmp_path):
+    path = tmp_path / "amd-ai-project.toml"
+    path.write_text(
+        base_config().replace('image="demo:runtime"', 'image="--privileged"'),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="image"):
         load_project_config(path)
 
 
