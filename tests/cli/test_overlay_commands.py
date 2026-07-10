@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -35,8 +36,36 @@ class RecordingRunner:
     ) -> CommandResult:
         command = tuple(args)
         self.calls.append((command, dict(environment), cwd))
+        stdout = self.stdout
+        if command[-2:] == ("-m", "amd_ai.overlay.effective_probe"):
+            versions = {
+                "torch": "2.9.1+rocm7.2.1.build1",
+                "torchvision": "0.24.0+rocm7.2.1.build1",
+                "torchaudio": "2.9.0+rocm7.2.1.build1",
+                "triton": "3.5.1+rocm7.2.1.build1",
+            }
+            stdout = json.dumps(
+                {
+                    "schema_version": 1,
+                    "components": {
+                        name: {
+                            "distribution_path": (
+                                "/opt/venv/lib/python3.12/site-packages/"
+                                f"{name}-x.dist-info"
+                            ),
+                            "module_path": (
+                                "/opt/venv/lib/python3.12/site-packages/"
+                                f"{name}/__init__.py"
+                            ),
+                            "version": version,
+                        }
+                        for name, version in versions.items()
+                    },
+                    "torch_hip_version": "7.2.1",
+                }
+            )
         return CommandResult(
-            command, self.returncode, self.stdout, self.stderr
+            command, self.returncode, stdout, self.stderr
         )
 
 

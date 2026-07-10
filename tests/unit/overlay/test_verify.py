@@ -6,11 +6,14 @@ from pathlib import Path
 import pytest
 
 from amd_ai.overlay.verify import (
+    EffectiveProbeResult,
     OverlayVerificationError,
     load_protected_profile,
     scan_protected_entries,
     verify_base_manifest,
     verify_current_generation,
+    validate_effective_probe,
+    verify_effective_stack,
     verify_overlay_dependencies,
 )
 from amd_ai.overlay.models import (
@@ -176,12 +179,86 @@ def test_current_generation_returns_verified_metadata(tmp_path: Path) -> None:
     current = verify_current_generation(
         paths,
         profile=profile,
-        runner=CheckRunner(returncode=0),
+        runner=ProbeRunner(_valid_probe(profile)),
     )
 
     assert current.generation.name == "20260710T120000Z-a1b2c3d4"
     assert current.input_text == ""
     assert current.lock_text == ""
+
+
+def test_effective_identity_requires_base_distribution_and_module_paths() -> None:
+    profile = _profile()
+    payload = _valid_probe(profile)
+
+    result = validate_effective_probe(payload, profile=profile)
+
+    assert isinstance(result, EffectiveProbeResult)
+    assert result.torch_hip_version == "7.2.1"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        (
+            "distribution_path",
+            "/workspace/.amd-ai/current/site-packages/torch.dist-info",
+        ),
+        ("module_path", "/workspace/torch.py"),
+        ("version", "2.9.1"),
+    ),
+)
+def test_effective_identity_rejects_shadow_or_public_only_version(
+    field: str, value: str
+) -> None:
+    profile = _profile()
+    payload = _valid_probe(profile)
+    payload["components"]["torch"][field] = value
+
+    with pytest.raises(OverlayVerificationError):
+        validate_effective_probe(payload, profile=profile)
+
+
+@pytest.mark.parametrize("hip", ("6.4", "7.2.4", None))
+def test_effective_identity_rejects_wrong_hip_version(hip: object) -> None:
+    profile = _profile()
+    payload = _valid_probe(profile)
+    payload["torch_hip_version"] = hip
+
+    with pytest.raises(OverlayVerificationError, match="HIP"):
+        validate_effective_probe(payload, profile=profile)
+
+
+def test_effective_identity_accepts_verified_rocm_build_version() -> None:
+    profile = _profile()
+    payload = _valid_probe(profile)
+    payload["torch_hip_version"] = "7.2.53211-e1a6bc5663"
+
+    result = validate_effective_probe(payload, profile=profile)
+
+    assert result.torch_hip_version == "7.2.53211-e1a6bc5663"
+
+
+def test_effective_probe_runs_with_candidate_first(tmp_path: Path) -> None:
+    profile = _profile()
+    runner = ProbeRunner(_valid_probe(profile))
+
+    result = verify_effective_stack(
+        profile,
+        tmp_path,
+        runner=runner,
+    )
+
+    command, environment, cwd = runner.calls[0]
+    assert result.torch_hip_version == "7.2.1"
+    assert command == (
+        "/opt/venv/bin/python",
+        "-m",
+        "amd_ai.overlay.effective_probe",
+    )
+    assert environment["PYTHONPATH"] == f"{tmp_path}:/opt/amd-ai/src"
+    assert environment["PYTHONNOUSERSITE"] == "1"
+    assert cwd == Path("/workspace")
 
 
 def _profile() -> ProtectedProfile:
@@ -195,3 +272,38 @@ def _profile() -> ProtectedProfile:
             ProtectedComponent("triton", "3.5.1+rocm7.2.1.d"),
         ),
     )
+
+
+def _valid_probe(profile: ProtectedProfile) -> dict:
+    return {
+        "schema_version": 1,
+        "components": {
+            name: {
+                "distribution_path": (
+                    f"/opt/venv/lib/python3.12/site-packages/{name}-x.dist-info"
+                ),
+                "module_path": (
+                    f"/opt/venv/lib/python3.12/site-packages/{name}/__init__.py"
+                ),
+                "version": profile.version_for(name),
+            }
+            for name in ("torch", "torchvision", "torchaudio", "triton")
+        },
+        "torch_hip_version": "7.2.1",
+    }
+
+
+class ProbeRunner(CheckRunner):
+    def __init__(self, payload: dict) -> None:
+        super().__init__(returncode=0)
+        self.payload = payload
+
+    def run(
+        self,
+        args: list[str],
+        *,
+        environment: dict[str, str],
+        cwd: Path | None = None,
+    ) -> CommandResult:
+        self.calls.append((tuple(args), environment, cwd))
+        return CommandResult(tuple(args), 0, json.dumps(self.payload), "")

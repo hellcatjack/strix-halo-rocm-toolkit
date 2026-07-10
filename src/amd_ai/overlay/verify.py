@@ -7,6 +7,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 from amd_ai.overlay.lock import parse_lock, validate_lock_artifacts
 from amd_ai.overlay.models import (
@@ -35,6 +36,24 @@ class VerifiedGeneration:
     generation: Path
     input_text: str
     lock_text: str
+
+
+@dataclass(frozen=True)
+class EffectiveProbeResult:
+    components: Mapping[str, Mapping[str, str]]
+    torch_hip_version: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "components",
+            MappingProxyType(
+                {
+                    name: MappingProxyType(dict(component))
+                    for name, component in self.components.items()
+                }
+            ),
+        )
 
 
 def verify_base_manifest(
@@ -175,6 +194,7 @@ def verify_candidate_overlay(
     site_packages: Path,
     *,
     runner: ProcessRunner,
+    profile: ProtectedProfile | None = None,
     base_environment: Mapping[str, str] | None = None,
 ) -> None:
     scan_protected_entries(site_packages)
@@ -183,6 +203,116 @@ def verify_candidate_overlay(
         runner=runner,
         base_environment=base_environment,
     )
+    if profile is not None:
+        verify_effective_stack(
+            profile,
+            site_packages,
+            runner=runner,
+            base_environment=base_environment,
+        )
+
+
+def verify_effective_stack(
+    profile: ProtectedProfile,
+    site_packages: Path,
+    *,
+    runner: ProcessRunner,
+    base_environment: Mapping[str, str] | None = None,
+) -> EffectiveProbeResult:
+    scan_protected_entries(site_packages)
+    environment = dict(os.environ if base_environment is None else base_environment)
+    environment.update(
+        {
+            "PYTHONPATH": f"{site_packages}:/opt/amd-ai/src",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+    )
+    command = (
+        "/opt/venv/bin/python",
+        "-m",
+        "amd_ai.overlay.effective_probe",
+    )
+    result = runner.run(
+        list(command),
+        environment=environment,
+        cwd=Path("/workspace"),
+    )
+    if result.returncode != 0:
+        evidence = result.stderr.strip() or result.stdout.strip() or "no output"
+        raise OverlayVerificationError(
+            f"effective protected import probe failed: {evidence}"
+        )
+    try:
+        payload = json.loads(result.stdout, object_pairs_hook=_unique_json_object)
+    except json.JSONDecodeError as error:
+        raise OverlayVerificationError(
+            f"cannot parse effective protected import probe: {error}"
+        ) from error
+    return validate_effective_probe(payload, profile=profile)
+
+
+def validate_effective_probe(
+    payload: object,
+    *,
+    profile: ProtectedProfile,
+    base_root: Path = Path("/opt/venv"),
+) -> EffectiveProbeResult:
+    if not isinstance(payload, dict) or set(payload) != {
+        "schema_version",
+        "components",
+        "torch_hip_version",
+    }:
+        raise OverlayVerificationError("effective protected probe schema is invalid")
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        raise OverlayVerificationError("effective protected probe version is invalid")
+    components = payload["components"]
+    if not isinstance(components, dict) or set(components) != PROTECTED_DISTRIBUTIONS:
+        raise OverlayVerificationError(
+            "effective protected probe component set is invalid"
+        )
+    parsed: dict[str, dict[str, str]] = {}
+    for name in sorted(PROTECTED_DISTRIBUTIONS):
+        component = components[name]
+        if not isinstance(component, dict):
+            raise OverlayVerificationError(
+                f"effective protected component is invalid: {name}"
+            )
+        if "error" in component:
+            raise OverlayVerificationError(
+                f"effective protected import failed for {name}: {component['error']}"
+            )
+        if set(component) != {"distribution_path", "module_path", "version"}:
+            raise OverlayVerificationError(
+                f"effective protected component schema is invalid: {name}"
+            )
+        values = {
+            field: component[field]
+            for field in ("distribution_path", "module_path", "version")
+        }
+        if any(not isinstance(value, str) or not value for value in values.values()):
+            raise OverlayVerificationError(
+                f"effective protected component identity is invalid: {name}"
+            )
+        if values["version"] != profile.version_for(name):
+            raise OverlayVerificationError(
+                f"effective protected version differs for {name}: {values['version']}"
+            )
+        for field in ("distribution_path", "module_path"):
+            _require_path_below_base(
+                values[field],
+                base_root=base_root,
+                label=f"{name} {field}",
+            )
+        parsed[name] = values
+    hip = payload["torch_hip_version"]
+    if not isinstance(hip, str) or re.fullmatch(
+        r"7\.2\.(?:1|53211)(?:-[0-9A-Za-z.-]+)?", hip
+    ) is None:
+        raise OverlayVerificationError(
+            f"effective Torch HIP version is not ROCm 7.2.1: {hip}"
+        )
+    return EffectiveProbeResult(parsed, hip)
 
 
 def verify_current_generation(
@@ -224,6 +354,7 @@ def verify_current_generation(
         verify_candidate_overlay(
             generation / "site-packages",
             runner=runner,
+            profile=profile,
             base_environment=base_environment,
         )
     except Exception as error:
@@ -263,6 +394,31 @@ def _read_regular_text(path: Path) -> str:
 
 def _text_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _require_path_below_base(
+    value: str, *, base_root: Path, label: str
+) -> None:
+    path = Path(value)
+    if not path.is_absolute() or "\0" in value:
+        raise OverlayVerificationError(f"effective {label} path is invalid")
+    resolved_base = base_root.resolve(strict=False)
+    resolved = path.resolve(strict=False)
+    if resolved != resolved_base and not resolved.is_relative_to(resolved_base):
+        raise OverlayVerificationError(
+            f"effective {label} is outside verified base: {resolved}"
+        )
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    values: dict[str, object] = {}
+    for name, value in pairs:
+        if name in values:
+            raise OverlayVerificationError(
+                f"duplicate key in effective protected probe: {name}"
+            )
+        values[name] = value
+    return values
 
 
 def _read_profile_id(path: Path) -> str:

@@ -329,6 +329,7 @@ def _resolve_and_build(
             verifier=lambda site_packages: verify_candidate_overlay(
                 site_packages,
                 runner=runner,
+                profile=profile,
                 base_environment=base_environment,
             ),
             transaction_id=transaction_id,
