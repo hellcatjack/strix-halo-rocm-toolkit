@@ -28,6 +28,11 @@ class FakeRunner:
         values = {
             ("uname", "-m"): (0, "x86_64\n", ""),
             ("uname", "-r"): (0, "6.17.0-1025-oem\n", ""),
+            ("uname", "-a"): (
+                0,
+                "Linux fixture 6.17.0-1025-oem #25-Ubuntu SMP x86_64 GNU/Linux\n",
+                "",
+            ),
             ("lspci", "-Dnnk", "-d", "1002:1586"): (
                 0,
                 "0000:c5:00.0 VGA compatible controller [0300]: AMD Device [1002:1586]\n"
@@ -42,6 +47,7 @@ class FakeRunner:
             ),
             ("dkms", "status"): (0, "", ""),
             ("docker", "version", "--format", "{{.Server.Version}}"): (0, "27.5.1\n", ""),
+            ("docker", "version"): (0, "Docker version 27.5.1\n", ""),
             ("dmesg", "--color=never"): (
                 0,
                 "amdgpu: 512M of VRAM memory ready\n",
@@ -66,6 +72,24 @@ class FakeRunner:
             for args, (returncode, stdout, stderr) in values.items()
         }
         return cls(responses)
+
+    @classmethod
+    def backup_only(cls) -> "FakeRunner":
+        healthy = cls.healthy_target()
+        backup_commands = {
+            ("dpkg-query", "-W", "-f=${binary:Package}\\t${Version}\\n"),
+            ("dkms", "status"),
+            ("uname", "-a"),
+            ("lspci", "-Dnnk", "-d", "1002:1586"),
+            ("docker", "version"),
+        }
+        return cls(
+            {
+                args: result
+                for args, result in healthy.responses.items()
+                if args in backup_commands
+            }
+        )
 
     @classmethod
     def image_digest(cls, image: str, digest: str) -> "FakeRunner":

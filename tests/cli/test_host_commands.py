@@ -32,3 +32,44 @@ def test_preflight_fixture_option_is_hidden_from_help(capsys):
 
     assert "--fixture-root" not in capsys.readouterr().out
 
+
+def test_prepare_plan_fixture_writes_actions_without_applying(tmp_path, capsys):
+    output = tmp_path / "prepare.json"
+
+    code = main(
+        [
+            "host-prepare",
+            "plan",
+            "--target-user",
+            "customer",
+            "--fixture-root",
+            "tests/fixtures/host/healthy",
+            "--json",
+            str(output),
+        ]
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert code == 0
+    assert payload["command"] == "host-prepare"
+    assert payload["facts"]["mode"] == "plan"
+    assert payload["facts"]["actions"][0]["code"] == "BACKUP.SNAPSHOT"
+    assert "APT.INSTALL_OEM_KERNEL" in capsys.readouterr().out
+
+
+def test_prepare_apply_rejects_any_confirmation_except_apply(monkeypatch, capsys):
+    monkeypatch.setattr("builtins.input", lambda _: "yes")
+
+    code = main(
+        [
+            "host-prepare",
+            "apply",
+            "--target-user",
+            "customer",
+            "--fixture-root",
+            "tests/fixtures/host/healthy",
+        ]
+    )
+
+    assert code == 2
+    assert "confirmation" in capsys.readouterr().err.lower()
