@@ -18,7 +18,13 @@ class FakeRunner:
     def healthy_target(cls, *, with_rocm64: bool = False) -> "FakeRunner":
         package_output = "linux-firmware\t20240318.git3b128b60-0ubuntu2\n"
         if with_rocm64:
-            package_output += "rocm-core:amd64\t6.4.43483-1\n"
+            package_output += (
+                "rocm-core:amd64\t6.4.43483-1\n"
+                "hip-runtime-amd:amd64\t6.4.43483-1\n"
+                "amdgpu-dkms\t6.12.12.60402-1\n"
+                "dkms\t3.0.11-1ubuntu13\n"
+                "zfs-dkms\t2.2.2-0ubuntu9\n"
+            )
         values = {
             ("uname", "-m"): (0, "x86_64\n", ""),
             ("uname", "-r"): (0, "6.17.0-1025-oem\n", ""),
@@ -44,9 +50,15 @@ class FakeRunner:
             ("getconf", "PAGESIZE"): (0, "4096\n", ""),
         }
         if with_rocm64:
-            values[("apt-cache", "policy", "rocm-core")] = (
+            for package in ("rocm-core", "hip-runtime-amd"):
+                values[("apt-cache", "policy", package)] = (
+                    0,
+                    " 500 https://repo.radeon.com/rocm/apt/6.4 noble/main amd64 Packages\n",
+                    "",
+                )
+            values[("apt-cache", "policy", "amdgpu-dkms")] = (
                 0,
-                " 500 https://repo.radeon.com/rocm/apt/6.4 noble/main amd64 Packages\n",
+                " 500 https://repo.radeon.com/amdgpu/6.4/ubuntu noble/main amd64 Packages\n",
                 "",
             )
         responses = {

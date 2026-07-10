@@ -39,3 +39,20 @@ class HostSnapshot:
     docker_version: str | None
     dmesg: str
     dedicated_vram_mib: int | None
+
+
+@dataclass(frozen=True)
+class PlannedAction:
+    code: str
+    summary: str
+    argv: tuple[str, ...]
+    privileged: bool
+    input_text: str | None = None
+
+
+@dataclass(frozen=True)
+class PreparePlan:
+    supported: bool
+    target_user: str
+    actions: tuple[PlannedAction, ...]
+    reboot_required: bool
