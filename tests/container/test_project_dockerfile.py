@@ -11,3 +11,16 @@ def test_project_install_cannot_sync_or_replace_parent():
     assert "uv pip sync" not in text
     assert "pip uninstall" not in text
     assert "--mount=type=cache,target=/root/.cache/uv,sharing=locked" in text
+
+
+def test_project_entrypoint_checks_and_marks_overlay_under_startup_lock():
+    text = Path("templates/project/project-entrypoint").read_text(
+        encoding="utf-8"
+    )
+
+    assert "fcntl.flock" in text
+    assert "fcntl.LOCK_EX | fcntl.LOCK_NB" in text
+    assert "OVERLAY.TRANSACTION_INCOMPLETE" in text
+    assert "mark_generation_healthy" in text
+    assert "acquire_lock=False" in text
+    assert text.index("fcntl.LOCK_UN") < text.index("os.execvp")

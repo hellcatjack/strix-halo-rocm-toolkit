@@ -136,6 +136,42 @@ def test_project_run_returns_live_container_exit_code(tmp_path, monkeypatch):
     assert captured["build"] == {"force": False, "no_build": True}
 
 
+def test_project_run_initializes_overlay_before_argv_and_live_process(
+    tmp_path, monkeypatch
+):
+    config = project_config(tmp_path / "demo")
+    captured = {}
+    events = []
+    _patch_project_run(monkeypatch, config, captured)
+    monkeypatch.setattr(
+        cli,
+        "_project_protected_profile",
+        lambda **kwargs: SimpleNamespace(profile_id="stable"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli,
+        "initialize_overlay",
+        lambda *args, **kwargs: events.append("initialize"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli,
+        "build_run_argv",
+        lambda **kwargs: events.append("argv") or ("docker", "run"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_run_live",
+        lambda argv: events.append("live") or 0,
+    )
+
+    code = cli.main(["project-run", str(config.path.parent), "--no-build"])
+
+    assert code == 0
+    assert events == ["initialize", "argv", "live"]
+
+
 def test_project_command_wrappers_are_executable_and_dispatch_expected_command():
     for name in ("project-init", "project-lock", "project-run"):
         path = Path("bin") / name
@@ -174,4 +210,10 @@ def _patch_project_run(monkeypatch, config, captured):
     monkeypatch.setattr(cli, "discover_gpu_access", runtime_access)
     monkeypatch.setattr(cli, "read_mem_total_kib", lambda: 131015488)
     monkeypatch.setattr(cli, "ensure_project_home", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "_project_protected_profile",
+        lambda **kwargs: SimpleNamespace(profile_id="stable"),
+    )
+    monkeypatch.setattr(cli, "initialize_overlay", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli, "_runtime_identity", lambda: (1000, 1000))

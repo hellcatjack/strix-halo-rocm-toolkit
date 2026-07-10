@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
+import fcntl
 import os
 import subprocess
 import sys
+from pathlib import Path
+
+from amd_ai.overlay.models import OverlayPaths
+from amd_ai.overlay.transaction import mark_generation_healthy
 
 
 status = os.environ.get("AMD_AI_PROFILE_STATUS", "experimental")
@@ -14,10 +19,32 @@ if status != "verified" and os.environ.get("ALLOW_UNVERIFIED") != "1":
 if not sys.argv[1:]:
     print("project command is empty", file=sys.stderr)
     raise SystemExit(64)
-check = subprocess.run(
-    ["container-check", "--mode", "torch", "--runtime", "--json", "-"],
-    check=False,
-)
-if check.returncode != 0:
-    raise SystemExit(check.returncode)
+
+paths = OverlayPaths.for_project(Path("/workspace"))
+flags = os.O_RDWR | os.O_CREAT
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+try:
+    lock_descriptor = os.open(paths.transaction_lock, flags, 0o600)
+    fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except (BlockingIOError, OSError) as error:
+    print(f"OVERLAY.TRANSACTION_INCOMPLETE: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    check = subprocess.run(
+        ["container-check", "--mode", "torch", "--runtime", "--json", "-"],
+        check=False,
+    )
+    if check.returncode != 0:
+        raise SystemExit(check.returncode)
+    try:
+        mark_generation_healthy(paths, acquire_lock=False)
+    except Exception as error:
+        print(f"OVERLAY.TRANSACTION_INCOMPLETE: {error}", file=sys.stderr)
+        raise SystemExit(1)
+finally:
+    fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+    os.close(lock_descriptor)
+
 os.execvp(sys.argv[1], sys.argv[1:])

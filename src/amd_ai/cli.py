@@ -50,6 +50,14 @@ from amd_ai.installer.release import (
     load_stable_release,
     pull_and_verify_release,
 )
+from amd_ai.overlay.models import (
+    PROTECTED_DISTRIBUTIONS,
+    OverlayError,
+    OverlayPaths,
+    ProtectedComponent,
+    ProtectedProfile,
+)
+from amd_ai.overlay.transaction import TransactionError, initialize_overlay
 from amd_ai.project.build import ProjectBuildError, build_or_reuse_project
 from amd_ai.project.config import ConfigError, load_project_config
 from amd_ai.project.dependencies import (
@@ -260,6 +268,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             ProjectInitError,
             ProjectRunError,
             RuntimePolicyError,
+            OverlayError,
+            TransactionError,
         ) as error:
             print(f"{args.command}: {error}", file=sys.stderr)
             return 2
@@ -507,6 +517,16 @@ def _project_run(args: argparse.Namespace) -> int:
     metadata = inspect_project_image(config, runner, docker.prefix)
     require_profile_allowed(metadata.profile_status, os.environ)
     ensure_project_home(config.path.parent, uid=uid, gid=gid)
+    profile = _project_protected_profile(
+        config=config,
+        metadata=metadata,
+        runner=runner,
+        docker_prefix=docker.prefix,
+    )
+    initialize_overlay(
+        OverlayPaths.for_project(config.path.parent),
+        profile=profile,
+    )
     terminal = sys.stdin.isatty() and sys.stdout.isatty()
     argv = build_run_argv(
         config=config,
@@ -522,6 +542,64 @@ def _project_run(args: argparse.Namespace) -> int:
         print(shlex.join(redact_run_argv(argv)))
         return 0
     return _run_live(argv)
+
+
+def _project_protected_profile(
+    *,
+    config,
+    metadata,
+    runner: Runner,
+    docker_prefix: Sequence[str],
+) -> ProtectedProfile:
+    args = [
+        *docker_prefix,
+        "run",
+        "--rm",
+        "--entrypoint",
+        "/bin/cat",
+        config.image,
+        "/opt/amd-ai/torch-manifest.json",
+    ]
+    result = runner.run(args, check=False)
+    if result.returncode != 0:
+        evidence = result.stderr.strip() or result.stdout.strip() or "no output"
+        raise ProjectRunError(
+            f"cannot read project Torch manifest: {evidence}"
+        )
+    try:
+        manifest = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ProjectRunError("cannot parse project Torch manifest") from error
+    packages = manifest.get("packages") if isinstance(manifest, dict) else None
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != 1
+        or not isinstance(packages, list)
+    ):
+        raise ProjectRunError("project Torch manifest schema is invalid")
+    components: list[ProtectedComponent] = []
+    for package in packages:
+        if not isinstance(package, dict):
+            raise ProjectRunError("project Torch manifest package is invalid")
+        name = package.get("name")
+        version = package.get("version")
+        if name in PROTECTED_DISTRIBUTIONS and isinstance(version, str):
+            try:
+                components.append(ProtectedComponent(name, version))
+            except OverlayError as error:
+                raise ProjectRunError(
+                    f"project Torch manifest package is invalid: {name}"
+                ) from error
+    try:
+        return ProtectedProfile(
+            metadata.profile_id,
+            config.base_digest,
+            tuple(components),
+        )
+    except OverlayError as error:
+        raise ProjectRunError(
+            f"project protected profile is invalid: {error}"
+        ) from error
 
 
 def _project_config_path(project: Path) -> Path:

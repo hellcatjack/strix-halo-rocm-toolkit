@@ -311,8 +311,11 @@ def load_generation_state(generation: Path) -> OverlayState:
         raise TransactionError(f"overlay state is invalid: {error}") from error
 
 
-def mark_generation_healthy(paths: OverlayPaths) -> OverlayState:
-    with overlay_transaction(paths):
+def mark_generation_healthy(
+    paths: OverlayPaths, *, acquire_lock: bool = True
+) -> OverlayState:
+    transaction = overlay_transaction(paths) if acquire_lock else nullcontext()
+    with transaction:
         current = resolve_current_generation(paths)
         state = load_generation_state(current)
         if not state.healthy:

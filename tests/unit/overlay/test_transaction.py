@@ -125,6 +125,22 @@ def test_overlay_can_initialize_while_caller_holds_transaction_lock(
     assert resolve_current_generation(paths).name == state.generation_id
 
 
+def test_generation_can_be_marked_healthy_while_startup_holds_lock(
+    tmp_path: Path, profile: ProtectedProfile
+) -> None:
+    paths = make_paths(tmp_path)
+    initialize_overlay(
+        paths,
+        profile=profile,
+        transaction_id="20260710T120000Z-a1b2c3d4",
+    )
+
+    with overlay_transaction(paths):
+        state = mark_generation_healthy(paths, acquire_lock=False)
+
+    assert state.healthy is True
+
+
 def test_initialize_overlay_creates_one_valid_empty_generation(
     tmp_path: Path, profile: ProtectedProfile
 ) -> None:
