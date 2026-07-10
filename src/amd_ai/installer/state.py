@@ -5,10 +5,12 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -89,6 +91,12 @@ class ResumeInputChanged(InstallerStateError):
         self.actual_digest = actual_digest
 
 
+@dataclass(frozen=True)
+class StatePathSelection:
+    path: Path
+    source: str
+
+
 def stage_input_digest(value: object) -> str:
     try:
         encoded = json.dumps(
@@ -152,35 +160,41 @@ def load_state(path: Path) -> InstallState | None:
         raise InstallerStateError(f"cannot read install state: {error}") from error
 
     try:
-        payload = json.loads(raw, object_pairs_hook=_unique_object)
-        if not isinstance(payload, dict):
-            raise ValueError("install state must be a JSON object")
-        payload = _migrate_payload(payload)
-        unknown = sorted(set(payload).difference(STATE_KEYS))
-        if unknown:
-            raise ValueError("unknown install state keys: " + ", ".join(unknown))
-        missing = sorted(STATE_KEYS.difference(payload))
-        if missing:
-            raise ValueError("missing install state keys: " + ", ".join(missing))
-        completed = payload["completed_stage_input_digests"]
-        reports = payload["last_report_paths"]
-        host_findings = payload["host_verification_findings"]
-        if not isinstance(completed, dict):
-            raise ValueError("completed stage digests must be an object")
-        if not isinstance(reports, list):
-            raise ValueError("last report paths must be an array")
-        if not isinstance(host_findings, list):
-            raise ValueError("host verification findings must be an array")
-        return InstallState(
-            **{
-                **payload,
-                "completed_stage_input_digests": completed,
-                "last_report_paths": tuple(reports),
-                "host_verification_findings": tuple(host_findings),
-            }
-        )
+        return _decode_state(raw)
     except (KeyError, TypeError, ValueError, InstallerModelError) as error:
         _raise_corrupt(path, f"invalid install state: {error}")
+
+
+def project_state_path(project_dir: Path, legacy_path: Path) -> Path:
+    project = Path(project_dir).resolve(strict=False)
+    legacy = Path(legacy_path).resolve(strict=False)
+    readable = re.sub(r"[^A-Za-z0-9._-]+", "-", project.name)
+    readable = readable.strip(".-_")[:48] or "project"
+    identity = hashlib.sha256(str(project).encode("utf-8")).hexdigest()[:12]
+    return legacy.parent / "projects" / f"{readable}-{identity}.json"
+
+
+def select_install_state_path(
+    *,
+    project_dir: Path,
+    requested_path: Path,
+    explicit: bool,
+) -> StatePathSelection:
+    project = Path(project_dir).resolve(strict=False)
+    requested = Path(requested_path).resolve(strict=False)
+    if explicit:
+        return StatePathSelection(requested, "explicit")
+
+    per_project = project_state_path(project, requested)
+    if os.path.lexists(per_project):
+        return StatePathSelection(per_project, "project")
+
+    legacy_exists, legacy_project = _inspect_state_project_path(requested)
+    if not legacy_exists:
+        return StatePathSelection(per_project, "project")
+    if legacy_project is None or legacy_project == str(project):
+        return StatePathSelection(requested, "legacy")
+    return StatePathSelection(per_project, "project")
 
 
 @contextmanager
@@ -283,6 +297,47 @@ def _state_payload(state: InstallState) -> dict[str, object]:
         "host_kernel": state.host_kernel,
         "host_verification_findings": list(state.host_verification_findings),
     }
+
+
+def _decode_state(raw: str) -> InstallState:
+    payload = json.loads(raw, object_pairs_hook=_unique_object)
+    if not isinstance(payload, dict):
+        raise ValueError("install state must be a JSON object")
+    payload = _migrate_payload(payload)
+    unknown = sorted(set(payload).difference(STATE_KEYS))
+    if unknown:
+        raise ValueError("unknown install state keys: " + ", ".join(unknown))
+    missing = sorted(STATE_KEYS.difference(payload))
+    if missing:
+        raise ValueError("missing install state keys: " + ", ".join(missing))
+    completed = payload["completed_stage_input_digests"]
+    reports = payload["last_report_paths"]
+    host_findings = payload["host_verification_findings"]
+    if not isinstance(completed, dict):
+        raise ValueError("completed stage digests must be an object")
+    if not isinstance(reports, list):
+        raise ValueError("last report paths must be an array")
+    if not isinstance(host_findings, list):
+        raise ValueError("host verification findings must be an array")
+    return InstallState(
+        **{
+            **payload,
+            "completed_stage_input_digests": completed,
+            "last_report_paths": tuple(reports),
+            "host_verification_findings": tuple(host_findings),
+        }
+    )
+
+
+def _inspect_state_project_path(path: Path) -> tuple[bool, str | None]:
+    if not os.path.lexists(path):
+        return False, None
+    try:
+        raw = path.read_text(encoding="utf-8")
+        state = _decode_state(raw)
+    except (KeyError, OSError, TypeError, UnicodeError, ValueError, InstallerModelError):
+        return True, None
+    return True, state.project_path
 
 
 def _migrate_payload(payload: dict[str, Any]) -> dict[str, Any]:

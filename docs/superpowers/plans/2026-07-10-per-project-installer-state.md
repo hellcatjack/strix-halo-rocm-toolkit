@@ -17,7 +17,7 @@
 - Modify: `src/amd_ai/installer/state.py`
 - Test: `tests/unit/installer/test_state.py`
 
-- [ ] **Step 1: Write failing deterministic path and selection tests**
+- [x] **Step 1: Write failing deterministic path and selection tests**
 
 Add imports for `project_state_path` and `select_install_state_path`, then add tests equivalent to:
 
@@ -83,7 +83,7 @@ def test_explicit_state_path_always_wins(tmp_path: Path) -> None:
 
 Also cover an existing project state winning over legacy state, unsafe basename sanitization, and malformed legacy JSON selecting `source="legacy"` without changing the malformed file.
 
-- [ ] **Step 2: Run the new tests and verify RED**
+- [x] **Step 2: Run the new tests and verify RED**
 
 Run:
 
@@ -94,7 +94,7 @@ PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
 
 Expected: collection fails because `project_state_path` and `select_install_state_path` do not exist.
 
-- [ ] **Step 3: Implement read-only identity inspection and path selection**
+- [x] **Step 3: Implement read-only identity inspection and path selection**
 
 In `src/amd_ai/installer/state.py`, add a frozen selection result:
 
@@ -126,7 +126,7 @@ an existing but invalid file. Implement selection in this order: explicit,
 existing project state, matching valid legacy, unrelated valid legacy, invalid
 legacy, no legacy. Return sources `explicit`, `project`, or `legacy` exactly.
 
-- [ ] **Step 4: Run state tests and verify GREEN**
+- [x] **Step 4: Run state tests and verify GREEN**
 
 Run:
 
@@ -137,7 +137,7 @@ PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
 
 Expected: all state tests pass and malformed-state preservation tests remain unchanged.
 
-- [ ] **Step 5: Commit the state-selection primitive**
+- [x] **Step 5: Commit the state-selection primitive**
 
 ```bash
 git add src/amd_ai/installer/state.py tests/unit/installer/test_state.py

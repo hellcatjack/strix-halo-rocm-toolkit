@@ -14,8 +14,10 @@ from amd_ai.installer.state import (
     boot_id_changed,
     install_lock,
     load_state,
+    project_state_path,
     read_boot_id,
     save_state,
+    select_install_state_path,
     stage_input_digest,
     validate_completed_stage,
 )
@@ -83,6 +85,121 @@ def test_state_round_trip_uses_atomic_replace(
     assert load_state(path) == expected
     assert calls[-1][1] == path
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_project_state_path_is_stable_and_separates_equal_basenames(
+    tmp_path: Path,
+) -> None:
+    legacy = tmp_path / "state" / "install-state.json"
+    first_project = tmp_path / "one" / "video-lab"
+    first = project_state_path(first_project, legacy)
+    second = project_state_path(tmp_path / "two" / "video-lab", legacy)
+
+    assert first == project_state_path(first_project.resolve(), legacy)
+    assert first.parent == legacy.resolve().parent / "projects"
+    assert first.name.startswith("video-lab-")
+    assert first.suffix == ".json"
+    assert first != second
+
+
+def test_project_state_path_sanitizes_unsafe_readable_name(tmp_path: Path) -> None:
+    legacy = tmp_path / "install-state.json"
+
+    selected = project_state_path(tmp_path / "视频 lab", legacy)
+
+    assert selected.parent == legacy.parent / "projects"
+    assert selected.name.startswith("lab-")
+    assert selected.name.isascii()
+
+
+def test_unrelated_legacy_state_selects_new_project_state(
+    tmp_path: Path,
+) -> None:
+    legacy = tmp_path / "install-state.json"
+    save_state(
+        legacy,
+        install_state(
+            tmp_path,
+            project_path=str((tmp_path / "old").resolve()),
+        ),
+    )
+
+    selection = select_install_state_path(
+        project_dir=(tmp_path / "new").resolve(),
+        requested_path=legacy,
+        explicit=False,
+    )
+
+    assert selection.source == "project"
+    assert selection.path == project_state_path(tmp_path / "new", legacy)
+    assert legacy.is_file()
+
+
+def test_matching_legacy_state_is_reused_even_when_mode_will_conflict(
+    tmp_path: Path,
+) -> None:
+    project = (tmp_path / "project").resolve()
+    legacy = tmp_path / "install-state.json"
+    save_state(legacy, install_state(tmp_path, project_path=str(project)))
+
+    selection = select_install_state_path(
+        project_dir=project,
+        requested_path=legacy,
+        explicit=False,
+    )
+
+    assert selection.source == "legacy"
+    assert selection.path == legacy.resolve()
+
+
+def test_explicit_state_path_always_wins(tmp_path: Path) -> None:
+    explicit = tmp_path / "operator.json"
+
+    selection = select_install_state_path(
+        project_dir=(tmp_path / "project").resolve(),
+        requested_path=explicit,
+        explicit=True,
+    )
+
+    assert selection.source == "explicit"
+    assert selection.path == explicit.resolve()
+
+
+def test_existing_project_state_wins_over_matching_legacy(
+    tmp_path: Path,
+) -> None:
+    project = (tmp_path / "project").resolve()
+    legacy = tmp_path / "install-state.json"
+    selected = project_state_path(project, legacy)
+    save_state(legacy, install_state(tmp_path, project_path=str(project)))
+    save_state(selected, install_state(tmp_path, project_path=str(project)))
+
+    selection = select_install_state_path(
+        project_dir=project,
+        requested_path=legacy,
+        explicit=False,
+    )
+
+    assert selection.source == "project"
+    assert selection.path == selected
+
+
+def test_unidentifiable_legacy_state_is_selected_without_mutation(
+    tmp_path: Path,
+) -> None:
+    legacy = tmp_path / "install-state.json"
+    legacy.write_text("not-json", encoding="utf-8")
+
+    selection = select_install_state_path(
+        project_dir=(tmp_path / "new").resolve(),
+        requested_path=legacy,
+        explicit=False,
+    )
+
+    assert selection.source == "legacy"
+    assert selection.path == legacy.resolve()
+    assert legacy.read_text(encoding="utf-8") == "not-json"
+    assert list(tmp_path.glob("install-state.corrupt.*.json")) == []
 
 
 def test_schema_one_state_migrates_with_empty_host_verification_fields(
