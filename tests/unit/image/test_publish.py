@@ -13,8 +13,10 @@ from amd_ai.image.publish import (
     RegistryImageObservation,
     observe_pushed_release,
     publish_images,
+    publish_stable_release,
     write_observed_release,
 )
+from amd_ai.installer.release import load_stable_release
 from amd_ai.qualification.models import REQUIRED_CHECKS
 
 
@@ -23,8 +25,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 class FakeRegistry:
     def __init__(self, candidate) -> None:
+        self.candidate = candidate
         self.calls: list[tuple[str, ...]] = []
         self.push_error: Exception | None = None
+        self.authless_error: Exception | None = None
+        self.authless_pull_calls: list[str] = []
         self.observations = {
             "ghcr.io/hellcatjack/strix-halo-rocm-python:0.2.0": (
                 RegistryImageObservation(
@@ -64,6 +69,53 @@ class FakeRegistry:
     def observe(self, target: str) -> RegistryImageObservation:
         self.calls.append(("observe", target))
         return self.observations[target]
+
+    def authless_pull(self, reference: str) -> None:
+        self.authless_pull_calls.append(reference)
+        if self.authless_error is not None:
+            raise self.authless_error
+
+    def inspect(self, reference: str):
+        observation = self._by_reference(reference)
+        labels = {
+            "org.opencontainers.image.source": self.candidate.source_repository,
+            "org.opencontainers.image.revision": self.candidate.source_revision,
+            "org.amd-ai.rocm.version": "7.2.1",
+            "org.amd-ai.python.version": "3.12",
+        }
+        if observation.image.endswith("-pytorch"):
+            labels.update(
+                {
+                    "org.amd-ai.profile.id": self.candidate.torch_profile_id,
+                    "org.amd-ai.profile.status": "verified",
+                    "org.amd-ai.torch.version": "2.9.1",
+                }
+            )
+        return {
+            "Id": observation.config_digest,
+            "RepoDigests": [reference],
+            "Config": {"Labels": labels},
+        }
+
+    def hash_file(self, reference: str, path: str) -> str:
+        observation = self._by_reference(reference)
+        names = {
+            "/etc/apt/keyrings/rocm.gpg": "rocm_keyring",
+            "/opt/amd-ai/locks/rocm-packages.lock": "rocm_packages_lock",
+            "/opt/amd-ai/profile.env": "profile",
+            "/opt/amd-ai/profile.requirements.lock": "requirements_lock",
+            "/opt/amd-ai/torch-manifest.json": "torch_manifest",
+        }
+        return observation.artifact_digests[names[path]]
+
+    def _by_reference(self, reference: str) -> RegistryImageObservation:
+        for observation in self.observations.values():
+            if (
+                f"{observation.image}@{observation.manifest_digest}"
+                == reference
+            ):
+                return observation
+        raise KeyError(reference)
 
 
 @pytest.fixture
@@ -232,6 +284,38 @@ def test_publish_rejects_incomplete_registry_identity(
 
     with pytest.raises(PublishError):
         publish_images(candidate, registry=registry)
+
+
+def test_manifest_is_written_only_after_two_authless_pulls(
+    candidate, tmp_path: Path
+) -> None:
+    registry = FakeRegistry.for_candidate(candidate)
+    output = tmp_path / "stable.json"
+
+    release = publish_stable_release(
+        candidate, registry=registry, output=output
+    )
+
+    assert registry.authless_pull_calls == [
+        release.base.reference,
+        release.torch.reference,
+    ]
+    assert output.is_file()
+    assert load_stable_release(output) == release
+
+
+def test_failed_authless_pull_leaves_existing_manifest_unchanged(
+    candidate, tmp_path: Path
+) -> None:
+    output = tmp_path / "stable.json"
+    output.write_text("known-good\n", encoding="utf-8")
+    registry = FakeRegistry.for_candidate(candidate)
+    registry.authless_error = PublishError("denied")
+
+    with pytest.raises(PublishError, match="denied"):
+        publish_stable_release(candidate, registry=registry, output=output)
+
+    assert output.read_text(encoding="utf-8") == "known-good\n"
 
 
 def write_publish_evidence(

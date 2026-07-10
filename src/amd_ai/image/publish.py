@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import subprocess
+import tempfile
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from amd_ai.installer.release import (
     SEMVER_PATTERN,
     TORCH_ARTIFACT_PATHS,
     load_stable_release,
+    verify_release_image,
 )
 
 
@@ -166,6 +168,15 @@ class PublishRegistry(Protocol):
     def observe(self, target: str) -> RegistryImageObservation:
         pass
 
+    def authless_pull(self, reference: str) -> None:
+        pass
+
+    def inspect(self, reference: str) -> Mapping[str, object]:
+        pass
+
+    def hash_file(self, reference: str, path: str) -> str:
+        pass
+
 
 class DockerPublishRegistry:
     def __init__(self, docker_prefix: tuple[str, ...] = ("docker",)) -> None:
@@ -182,6 +193,16 @@ class DockerPublishRegistry:
 
     def pull(self, reference: str) -> None:
         self._completed(("pull", reference))
+
+    def authless_pull(self, reference: str) -> None:
+        with tempfile.TemporaryDirectory(prefix="amd-ai-authless-") as directory:
+            config = Path(directory)
+            config.chmod(0o700)
+            if any(config.iterdir()):
+                raise PublishError("temporary authless Docker config is not empty")
+            environment = dict(os.environ)
+            environment["DOCKER_CONFIG"] = str(config)
+            self._completed(("pull", reference), environment=environment)
 
     def inspect(self, reference: str) -> Mapping[str, object]:
         result = self._completed(("image", "inspect", reference))
@@ -474,6 +495,45 @@ def publish_images(
     )
 
 
+def publish_stable_release(
+    candidate: PublishCandidate,
+    *,
+    registry: PublishRegistry,
+    output: Path,
+    observed: StableRelease | None = None,
+) -> StableRelease:
+    release = observed or publish_images(candidate, registry=registry)
+    _require_release_matches_candidate(release, candidate)
+    for image, kind in ((release.base, "base"), (release.torch, "torch")):
+        try:
+            registry.authless_pull(image.reference)
+        except PublishError:
+            raise
+        except Exception as error:
+            raise PublishError(
+                f"anonymous pull failed for {image.reference}: {error}"
+            ) from error
+        try:
+            verify_release_image(
+                release,
+                image,
+                kind=kind,
+                docker=registry,
+            )
+        except Exception as error:
+            if isinstance(error, PublishError):
+                raise
+            raise PublishError(
+                f"anonymous image verification failed for {image.reference}: {error}"
+            ) from error
+    content = (
+        json.dumps(_stable_release_dict(release), indent=2, sort_keys=True)
+        + "\n"
+    )
+    _atomic_write(output, content, mode=0o644)
+    return release
+
+
 def write_observed_release(path: Path, release: StableRelease) -> None:
     content = (
         json.dumps(_stable_release_dict(release), indent=2, sort_keys=True)
@@ -484,6 +544,50 @@ def write_observed_release(path: Path, release: StableRelease) -> None:
 
 def observe_pushed_release(path: Path) -> StableRelease:
     return load_stable_release(path)
+
+
+def _require_release_matches_candidate(
+    release: StableRelease, candidate: PublishCandidate
+) -> None:
+    expected = {
+        "release_id": candidate.release_id,
+        "source_repository": candidate.source_repository,
+        "source_revision": candidate.source_revision,
+        "qualification_profile_digest": candidate.qualification_profile_digest,
+        "qualification_report_digest": candidate.qualification_digest,
+        "sbom_digest": candidate.sbom_digest,
+        "gpu_arch": candidate.gpu_arch,
+        "supported_host_adapter_ids": candidate.supported_host_adapter_ids,
+        "torch_profile_id": candidate.torch_profile_id,
+        "torch_profile_digest": candidate.torch_profile_digest,
+        "published_at": candidate.published_at,
+    }
+    for name, value in expected.items():
+        if getattr(release, name) != value:
+            raise PublishError(
+                f"observed publication differs from current evidence: {name}"
+            )
+    if candidate.base_local_id is None:
+        raise PublishError("base local image ID is required for stable publication")
+    if release.base.config_digest != candidate.base_local_id:
+        raise PublishError("observed base config differs from current local image")
+    if release.torch.config_digest != candidate.torch_local_id:
+        raise PublishError("observed Torch config differs from current local image")
+    if (release.base.image, release.torch.image) != (
+        BASE_PACKAGE,
+        TORCH_PACKAGE,
+    ):
+        raise PublishError("observed publication uses an unexpected package")
+    for name, digest in candidate.base_artifact_digests.items():
+        if release.base.artifact_digests.get(name) != digest:
+            raise PublishError(
+                f"observed base artifact differs from current evidence: {name}"
+            )
+    for name, digest in candidate.torch_artifact_digests.items():
+        if release.torch.artifact_digests.get(name) != digest:
+            raise PublishError(
+                f"observed Torch artifact differs from current evidence: {name}"
+            )
 
 
 def _validate_registry_observation(
