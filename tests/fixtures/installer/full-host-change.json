@@ -1,0 +1,7 @@
+{
+  "adapter_id": "ubuntu-24.04",
+  "blocked_stage": null,
+  "fact_revision": "host-change-v1",
+  "reboot_required": true,
+  "schema_version": 1
+}

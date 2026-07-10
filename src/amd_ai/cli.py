@@ -481,12 +481,26 @@ def _install_command(args: argparse.Namespace) -> int:
         state_path=state_path,
     )
     revision = _installer_source_revision(source_root)
+    fixture_root = os.environ.get("AMD_AI_INSTALLER_FIXTURE_ROOT")
+    workflow_arguments: dict[str, object] = {}
+    if fixture_root:
+        if os.environ.get("AMD_AI_INSTALLER_ENABLE_FIXTURES") != "1":
+            raise InstallerModelError(
+                "installer fixture backend was not explicitly enabled"
+            )
+        from amd_ai.installer.fixture import FixtureInstallerActions
+
+        actions = FixtureInstallerActions(Path(fixture_root))
+        workflow_arguments["boot_id_reader"] = actions.read_boot_id
+    else:
+        actions = ProductionInstallerActions()
     workflow = InstallerWorkflow(
         options=options,
-        actions=ProductionInstallerActions(),
+        actions=actions,
         installer_version=__version__,
         installer_source_revision=revision,
         prompts=prompts,
+        **workflow_arguments,
     )
     result = workflow.run()
     if result.message:
