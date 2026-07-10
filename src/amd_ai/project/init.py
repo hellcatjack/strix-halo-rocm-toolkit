@@ -7,11 +7,17 @@ import shutil
 from collections.abc import Sequence
 from pathlib import Path
 
+from amd_ai.image.profile import ProfileError, load_profile
 from amd_ai.project.config import (
     IMAGE_ID_PATTERN,
     NAME_PATTERN,
     PROFILE_PATTERN,
     load_project_config,
+)
+from amd_ai.project.dependencies import (
+    lock_project_dependencies,
+    render_profile_constraints,
+    render_torch_constraints,
 )
 from amd_ai.runner import Runner
 
@@ -74,6 +80,18 @@ def initialize_project(
         for key, value in replacements.items():
             config_text = _replace_toml_string(config_text, key, value)
         config_path.write_text(config_text, encoding="utf-8")
+        constraints = _base_constraints(
+            base_profile=base_profile,
+            image=image,
+            destination=destination,
+            runner=runner,
+            docker_prefix=docker_prefix,
+        )
+        (destination / "torch-constraints.txt").write_text(
+            constraints,
+            encoding="utf-8",
+        )
+        lock_project_dependencies(destination)
         load_project_config(config_path)
         _apply_ownership(
             destination,
@@ -85,6 +103,45 @@ def initialize_project(
             shutil.rmtree(destination, ignore_errors=True)
         raise
     return destination
+
+
+def _base_constraints(
+    *,
+    base_profile: str,
+    image: str,
+    destination: Path,
+    runner: Runner,
+    docker_prefix: Sequence[str],
+) -> str:
+    if base_profile == "stable":
+        return render_torch_constraints(
+            REPOSITORY_ROOT / "profiles/torch/stable.requirements.lock"
+        )
+    args = [
+        *docker_prefix,
+        "run",
+        "--rm",
+        image,
+        "cat",
+        "/opt/amd-ai/profile.env",
+    ]
+    result = runner.run(args, check=False)
+    if result.returncode != 0:
+        evidence = result.stderr.strip() or result.stdout.strip()
+        raise ProjectInitError(
+            f"cannot read profile metadata from {image}: {evidence}"
+        )
+    temporary = destination / ".base-profile.env"
+    try:
+        temporary.write_text(result.stdout, encoding="utf-8")
+        profile = load_profile(temporary, allow_verified=False)
+    except (OSError, ProfileError) as error:
+        raise ProjectInitError(f"invalid embedded base profile: {error}") from error
+    finally:
+        temporary.unlink(missing_ok=True)
+    if profile.profile_id != base_profile or profile.status != "experimental":
+        raise ProjectInitError("embedded base profile ID or status does not match")
+    return render_profile_constraints(profile)
 
 
 def _resolve_base_image(
