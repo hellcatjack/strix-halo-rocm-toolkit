@@ -265,11 +265,11 @@ git commit -m "fix: isolate implicit installer state per project"
 - Modify: `README.md`
 - Modify: `docs/install.md`
 
-- [ ] **Step 1: Write the failing version assertion**
+- [x] **Step 1: Write the failing version assertion**
 
 Change `tests/test_version.py` to require `0.2.2` from both the module and CLI.
 
-- [ ] **Step 2: Run the version test and verify RED**
+- [x] **Step 2: Run the version test and verify RED**
 
 ```bash
 PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest tests/test_version.py -q
@@ -277,7 +277,7 @@ PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest tests/test_version.py -q
 
 Expected: failure reports current version `0.2.1`.
 
-- [ ] **Step 3: Update version and documentation**
+- [x] **Step 3: Update version and documentation**
 
 Set `__version__ = "0.2.2"`. Update README clone examples and toolkit-version
 banner to `v0.2.2`, while retaining stable image release ID `0.2.0`.
@@ -295,7 +295,7 @@ Document the deterministic state directory, legacy matching behavior, selected
 state `INFO` line, and explicit `--state-path` override. Do not recommend
 deleting the legacy state.
 
-- [ ] **Step 4: Verify tests and Markdown**
+- [x] **Step 4: Verify tests and Markdown**
 
 ```bash
 PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest tests/test_version.py -q
@@ -305,7 +305,7 @@ git diff --check
 
 Expected: all commands exit zero.
 
-- [ ] **Step 5: Commit release-facing changes**
+- [x] **Step 5: Commit release-facing changes**
 
 ```bash
 git add src/amd_ai/__init__.py tests/test_version.py README.md docs/install.md

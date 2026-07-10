@@ -2,10 +2,10 @@
 
 面向 **AMD Ryzen AI Max+ 395 / Radeon 8060S (`gfx1151`)** 的可恢复 ROCm 容器开发平台。它提供 Ubuntu 宿主机准备、公开且内容寻址的 ROCm/PyTorch 镜像、独立项目容器、受保护的 `pip` 工作流，以及可审计的 GPU 验证和精确修复。
 
-> - 当前工具包版本：`v0.2.1`
+> - 当前工具包版本：`v0.2.2`
 > - 正式软件基线：ROCm 7.2.1、Python 3.12、PyTorch 2.9.1
 > - 正式宿主适配器：Ubuntu 24.04.x AMD64
-> - Stable 镜像 release ID：`0.2.0`（`v0.2.1` 不重建镜像）
+> - Stable 镜像 release ID：`0.2.0`（`v0.2.2` 不重建镜像）
 
 ## 目录
 
@@ -107,7 +107,7 @@ sudo apt install -y git python3.12
 在任何写入前先执行只读检查：
 
 ```bash
-git clone --branch v0.2.1 --depth 1 \
+git clone --branch v0.2.2 --depth 1 \
   https://github.com/hellcatjack/strix-halo-rocm-toolkit.git
 cd strix-halo-rocm-toolkit
 mkdir -p reports
@@ -127,7 +127,7 @@ mkdir -p reports
 ### 1. 获取固定版本
 
 ```bash
-git clone --branch v0.2.1 --depth 1 \
+git clone --branch v0.2.2 --depth 1 \
   https://github.com/hellcatjack/strix-halo-rocm-toolkit.git
 cd strix-halo-rocm-toolkit
 git rev-parse --verify HEAD
@@ -207,7 +207,7 @@ sudo reboot
 
 重启后进入同一个 checkout，再次执行原命令。安装器核对 boot ID 后从 host verify 阶段继续，不会重复已经完成的写入。
 
-若新启动的 OEM patch kernel 高于最低版本，且 TTM、设备权限和内核日志检查通过，但内核尚未进入静态已测清单，`v0.2.1` 会显示 `WARN HOST_VERIFY unverified` 并继续部署。状态文件记录 `host_verification_status`、`host_kernel` 和诊断码；真正的 `change-required` 或 `blocked` 仍会停止。
+若新启动的 OEM patch kernel 高于最低版本，且 TTM、设备权限和内核日志检查通过，但内核尚未进入静态已测清单，`v0.2.1` 起会显示 `WARN HOST_VERIFY unverified` 并继续部署。状态文件记录 `host_verification_status`、`host_kernel` 和诊断码；真正的 `change-required` 或 `blocked` 仍会停止。
 
 后续 `IMAGE_VERIFY` 仍必须通过 exact stable 镜像的 `gfx1151` Torch runtime 探针。警告同时打印一条可选的完整硬件资格命令；将该内核用于新的正式 release 前，仍必须完成包含 300 秒压力测试和内核日志差分的全部门禁。
 
@@ -222,6 +222,17 @@ sudo reboot
   --project-dir "$HOME/ai-projects/video-lab" \
   --project-name video-lab
 ```
+
+完整工作站安装完成后，后续项目同样直接使用 container 模式。例如：
+
+```bash
+./install.sh --mode container \
+  --project-dir "/app/test/video-lab" \
+  --project-name video-lab \
+  --image-source pull
+```
+
+从 `v0.2.2` 起，省略 `--state-path` 时安装器根据规范化后的项目绝对路径自动选择独立状态文件，并显示 `INFO installer state (project): ...`。不同项目不会再误用第一个项目的 `full` 状态。
 
 该模式仍要求以下条件全部通过：
 
@@ -292,13 +303,15 @@ printf 'accepted host plan: %s\n' "$PLAN_DIGEST"
 | `--image-source pull` | 只接受 stable exact digest 拉取 |
 | `--image-source build` | 从当前干净 checkout 本地构建 |
 | `--target-user USER` | 完整模式的目标用户和项目所有者 |
-| `--state-path PATH` | 覆盖默认恢复状态文件 |
+| `--state-path PATH` | 高级用法：显式覆盖项目恢复状态文件 |
 
-默认恢复状态文件为：
+新项目的默认恢复状态目录为：
 
 ```text
-~/.local/state/strix-halo-rocm-toolkit/install-state.json
+~/.local/state/strix-halo-rocm-toolkit/projects/
 ```
+
+文件名由可读项目目录名和规范化绝对路径的 SHA-256 前缀组成，例如 `video-lab-b9bb64878f63.json`。若旧版全局状态 `~/.local/state/strix-halo-rocm-toolkit/install-state.json` 属于同一个项目，安装器继续原地恢复并显示 `installer state (legacy)`；它不会自动移动、删除或复制旧状态。同一项目更换安装模式仍会阻断。显式 `--state-path` 始终优先，并显示 `installer state (explicit)`。
 
 损坏状态会被重命名为带 UTC 时间戳的证据文件；安装器不会猜测哪些动作已经成功。完整状态与退出码说明见[安装与恢复](docs/install.md)。
 
@@ -620,11 +633,11 @@ git switch --detach <新发布标签>
 
 ```bash
 git fetch origin --tags
-git switch --detach v0.2.1
+git switch --detach v0.2.2
 ./install.sh
 ```
 
-再次选择相同模式和项目目录。`v0.2.1` 会验证旧 `BOOTSTRAP` 输入摘要、迁移 schema 1 状态并从 `HOST_VERIFY` 续跑；它不会重新执行 `HOST_APPLY`。只有同一 `0.2.x` 系列、宿主写入已经完成且其他引导输入完全一致时才允许该迁移。
+再次选择相同模式和项目目录。`v0.2.1` 及后续 `0.2.x` 补丁会验证旧 `BOOTSTRAP` 输入摘要、迁移 schema 1 状态并从 `HOST_VERIFY` 续跑；它不会重新执行 `HOST_APPLY`。只有同一 `0.2.x` 系列、宿主写入已经完成且其他引导输入完全一致时才允许该迁移。
 
 ### 查看共享层占用
 
@@ -680,7 +693,7 @@ rm -rf "$HOME/.local/state/strix-halo-rocm-toolkit"
 | Docker permission denied | 重新登录以刷新组成员关系，或运行 `sudo -v` 后让工具使用 `sudo docker` |
 | 找不到 `/dev/kfd` | 直接在宿主运行 `host-preflight`；不要用未映射设备的普通容器报告判断宿主 |
 | `HOST.UNSUPPORTED_OS` | 该发行版只支持只读采集，不能强制套用 Ubuntu 写入适配器 |
-| `HOST.UPSTREAM_UNVERIFIED` | 新 OEM patch 尚未进入已测清单；`v0.2.1` 记录警告并继续，后续 GPU runtime 探针仍为强制项，正式发布前还需完整硬件门禁 |
+| `HOST.UPSTREAM_UNVERIFIED` | 新 OEM patch 尚未进入已测清单；`v0.2.1` 起记录警告并继续，后续 GPU runtime 探针仍为强制项，正式发布前还需完整硬件门禁 |
 | `GPU.RUNTIME_FAILED` | 运行 `host-verify`、检查设备 GID 和 `sudo dmesg`；CPU fallback 不算通过 |
 | `IMAGE.DIGEST_DRIFT` | 运行项目级 `doctor`，确认计划后执行 `repair` |
 | `TORCH.SHADOWED` | overlay 中出现受保护包或身份变化；执行 `doctor`/`repair`，不要 force-reinstall |
