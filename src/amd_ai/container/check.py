@@ -3,13 +3,21 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
 from amd_ai.image.profile import ProfileError, load_profile
+from amd_ai.overlay.effective_probe import collect as collect_effective_probe
+from amd_ai.overlay.verify import (
+    OverlayVerificationError,
+    load_protected_profile,
+    scan_protected_entries,
+    validate_effective_probe,
+)
 from amd_ai.report import Finding, Report, Severity, Status
 from amd_ai.runner import CommandResult, Runner, SubprocessRunner
 
@@ -129,6 +137,7 @@ def run_torch_check(
     runner: Runner,
     metadata_only: bool,
     runtime: bool,
+    effective_verifier: Callable[[], None] | None = None,
 ) -> Report:
     rocm_report = run_rocm_check(
         root=root,
@@ -187,26 +196,45 @@ def run_torch_check(
             )
     facts["torch_hip_version"] = hip_version
 
-    manifest_status = "skipped (runtime)"
-    if not runtime:
-        manifest = root / "opt/amd-ai/torch-manifest.json"
-        script = root / "opt/amd-ai/torch-manifest.py"
-        result = _run_optional(
-            runner,
-            (sys.executable, str(script), "verify", str(manifest)),
+    manifest = root / "opt/amd-ai/torch-manifest.json"
+    script = root / "opt/amd-ai/torch-manifest.py"
+    result = _run_optional(
+        runner,
+        (sys.executable, str(script), "verify", str(manifest)),
+    )
+    manifest_status = f"{result.stdout}\n{result.stderr}".strip() or "pass"
+    if result.returncode != 0:
+        findings.append(
+            Finding(
+                code="TORCH.BASE_CHANGED",
+                severity=Severity.ERROR,
+                summary="Protected Torch base distribution files changed",
+                evidence=manifest_status,
+                remediation="Rebuild the project from the verified PyTorch parent image.",
+            )
         )
-        manifest_status = f"{result.stdout}\n{result.stderr}".strip() or "pass"
-        if result.returncode != 0:
+    facts["torch_manifest"] = manifest_status
+
+    effective_status = "not requested outside the live container root"
+    if effective_verifier is not None or root == Path("/"):
+        try:
+            if effective_verifier is not None:
+                effective_verifier()
+            else:
+                _verify_effective_current(root)
+            effective_status = "pass"
+        except OverlayVerificationError as error:
+            effective_status = str(error)
             findings.append(
                 Finding(
-                    code="TORCH.MANIFEST",
+                    code="TORCH.SHADOWED",
                     severity=Severity.ERROR,
-                    summary="Protected Torch distribution files changed",
-                    evidence=manifest_status,
-                    remediation="Rebuild the project from the verified PyTorch parent image.",
+                    summary="Effective protected Torch import identity changed",
+                    evidence=effective_status,
+                    remediation="Run doctor and repair the project overlay.",
                 )
             )
-    facts["torch_manifest"] = manifest_status
+    facts["effective_torch"] = effective_status
 
     run_gpu = runtime or not metadata_only
     if run_gpu and torch is not None:
@@ -220,6 +248,25 @@ def run_torch_check(
         ),
         facts=facts,
         findings=tuple(findings),
+    )
+
+
+def _verify_effective_current(root: Path) -> None:
+    parent_digest = os.environ.get(
+        "AMD_AI_PARENT_CONFIG_DIGEST", "sha256:" + "0" * 64
+    )
+    profile = load_protected_profile(
+        manifest_path=root / "opt/amd-ai/torch-manifest.json",
+        profile_path=root / "opt/amd-ai/profile.env",
+        parent_config_digest=parent_digest,
+    )
+    overlay = os.environ.get("AMD_AI_OVERLAY")
+    if overlay:
+        scan_protected_entries(Path(overlay))
+    validate_effective_probe(
+        collect_effective_probe(),
+        profile=profile,
+        base_root=root / "opt/venv",
     )
 
 

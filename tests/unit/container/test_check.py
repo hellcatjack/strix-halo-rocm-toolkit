@@ -3,6 +3,7 @@ from pathlib import Path
 from amd_ai.container import check
 from amd_ai.container.check import public_version, run_rocm_check, run_torch_check
 from amd_ai.runner import CommandResult
+from amd_ai.overlay.verify import OverlayVerificationError
 from tests.unit.host.fakes import FakeRunner
 
 
@@ -205,3 +206,90 @@ def test_torch_versions_are_loaded_from_image_profile(tmp_path, monkeypatch):
         "id": "test-profile",
         "status": "experimental",
     }
+
+
+def test_torch_check_reports_base_change_and_effective_shadow(
+    tmp_path, monkeypatch
+):
+    root = rocm_root(tmp_path)
+    write_torch_profile(root)
+    manifest = root / "opt/amd-ai/torch-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    class Version:
+        hip = "7.2.1"
+
+    class Module:
+        __version__ = "2.9.1+rocm7.2.1.local"
+
+    modules = {name: Module() for name in check.TORCH_COMPONENTS}
+    modules["torch"].version = Version()
+    monkeypatch.setattr(check.importlib, "import_module", lambda name: modules[name])
+    runner = hipcc_runner()
+    verify_args = (
+        check.sys.executable,
+        str(root / "opt/amd-ai/torch-manifest.py"),
+        "verify",
+        str(manifest),
+    )
+    runner.responses[verify_args] = CommandResult(
+        verify_args, 1, "", "changed"
+    )
+
+    def shadowed() -> None:
+        raise OverlayVerificationError("module path escaped")
+
+    report = run_torch_check(
+        root=root,
+        runner=runner,
+        metadata_only=True,
+        runtime=False,
+        effective_verifier=shadowed,
+    )
+
+    assert report.status.value == "blocked"
+    assert {finding.code for finding in report.findings} >= {
+        "TORCH.SHADOWED",
+        "TORCH.BASE_CHANGED",
+    }
+
+
+def test_runtime_mode_still_verifies_base_manifest(tmp_path, monkeypatch):
+    root = rocm_root(tmp_path)
+    write_torch_profile(root)
+    manifest = root / "opt/amd-ai/torch-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    class Version:
+        hip = "7.2.1"
+
+    class Cuda:
+        @staticmethod
+        def is_available():
+            return False
+
+    class Module:
+        __version__ = "2.9.1+rocm7.2.1.local"
+
+    modules = {name: Module() for name in check.TORCH_COMPONENTS}
+    modules["torch"].version = Version()
+    modules["torch"].cuda = Cuda()
+    monkeypatch.setattr(check.importlib, "import_module", lambda name: modules[name])
+    runner = hipcc_runner()
+    verify_args = (
+        check.sys.executable,
+        str(root / "opt/amd-ai/torch-manifest.py"),
+        "verify",
+        str(manifest),
+    )
+    runner.responses[verify_args] = CommandResult(verify_args, 0, "", "")
+
+    run_torch_check(
+        root=root,
+        runner=runner,
+        metadata_only=True,
+        runtime=True,
+        effective_verifier=lambda: None,
+    )
+
+    assert verify_args in runner.calls
