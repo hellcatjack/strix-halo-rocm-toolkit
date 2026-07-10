@@ -1,0 +1,8 @@
+{
+  "kernels": [
+    "6.14.0-1018-oem"
+  ],
+  "schema_version": 1,
+  "source": "https://rocm.docs.amd.com/projects/radeon-ryzen/en/docs-7.2.1/docs/compatibility/compatibilityryz/native_linux/native_linux_compatibility.html"
+}
+

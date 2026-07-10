@@ -1,0 +1,48 @@
+{
+  "dkms\u0000status": {
+    "returncode": 0,
+    "stderr": "",
+    "stdout": ""
+  },
+  "dmesg\u0000--color=never": {
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "amdgpu: 512M of VRAM memory ready\n"
+  },
+  "dmidecode\u0000--type\u0000memory": {
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "Size: 64 GB\nSize: 64 GB\n"
+  },
+  "docker\u0000version\u0000--format\u0000{{.Server.Version}}": {
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "27.5.1\n"
+  },
+  "dpkg-query\u0000-W\u0000-f=${binary:Package}\\t${Version}\\n": {
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "linux-firmware\t20240318.git3b128b60-0ubuntu2\n"
+  },
+  "getconf\u0000PAGESIZE": {
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "4096\n"
+  },
+  "lspci\u0000-Dnnk\u0000-d\u00001002:1586": {
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "0000:c5:00.0 VGA compatible controller [0300]: AMD Device [1002:1586]\n\tKernel driver in use: amdgpu\n"
+  },
+  "uname\u0000-m": {
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "x86_64\n"
+  },
+  "uname\u0000-r": {
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "6.17.0-1025-oem\n"
+  }
+}
+

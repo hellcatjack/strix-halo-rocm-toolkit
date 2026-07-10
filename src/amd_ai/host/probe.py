@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -31,6 +32,49 @@ PACKAGE_PREFIXES = (
     "rocsparse",
     "rccl",
 )
+
+
+class FixtureRunner:
+    def __init__(self, responses: dict[tuple[str, ...], CommandResult]) -> None:
+        self.responses = responses
+
+    @classmethod
+    def from_root(cls, root: str | Path) -> FixtureRunner:
+        path = Path(root) / "commands.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        responses: dict[tuple[str, ...], CommandResult] = {}
+        for joined_args, record in payload.items():
+            args = tuple(joined_args.split("\0"))
+            responses[args] = CommandResult(
+                args,
+                int(record["returncode"]),
+                str(record["stdout"]),
+                str(record["stderr"]),
+            )
+        return cls(responses)
+
+    def run(
+        self,
+        args: list[str],
+        *,
+        check: bool = True,
+        input_text: str | None = None,
+    ) -> CommandResult:
+        key = tuple(args)
+        if key not in self.responses:
+            raise AssertionError(f"unregistered fixture command: {key}")
+        result = self.responses[key]
+        if check and result.returncode != 0:
+            raise RuntimeError(f"fixture command failed: {key}")
+        return result
+
+
+def load_fixture_device_gids(root: str | Path) -> dict[str, int]:
+    path = Path(root) / "devices.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid fixture device map: {path}")
+    return {str(device): int(gid) for device, gid in payload.items()}
 
 
 class HostProbe:
