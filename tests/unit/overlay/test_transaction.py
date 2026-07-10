@@ -89,6 +89,42 @@ def test_transaction_lock_rejects_concurrent_writer(tmp_path: Path) -> None:
                 pass
 
 
+def test_generation_can_build_while_caller_holds_transaction_lock(
+    tmp_path: Path, profile: ProtectedProfile
+) -> None:
+    paths = make_paths(tmp_path)
+
+    with overlay_transaction(paths):
+        state = build_generation(
+            paths,
+            profile=profile,
+            input_text="",
+            lock_text="",
+            runner=FakeRunner(returncode=0),
+            verifier=lambda path: None,
+            transaction_id="20260710T120000Z-a1b2c3d4",
+            acquire_lock=False,
+        )
+
+    assert resolve_current_generation(paths).name == state.generation_id
+
+
+def test_overlay_can_initialize_while_caller_holds_transaction_lock(
+    tmp_path: Path, profile: ProtectedProfile
+) -> None:
+    paths = make_paths(tmp_path)
+
+    with overlay_transaction(paths):
+        state = initialize_overlay(
+            paths,
+            profile=profile,
+            transaction_id="20260710T120000Z-a1b2c3d4",
+            acquire_lock=False,
+        )
+
+    assert resolve_current_generation(paths).name == state.generation_id
+
+
 def test_initialize_overlay_creates_one_valid_empty_generation(
     tmp_path: Path, profile: ProtectedProfile
 ) -> None:

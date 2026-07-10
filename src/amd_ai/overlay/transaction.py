@@ -8,7 +8,7 @@ import secrets
 import shutil
 import stat
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -113,8 +113,10 @@ def initialize_overlay(
     *,
     profile: ProtectedProfile,
     transaction_id: str | None = None,
+    acquire_lock: bool = True,
 ) -> OverlayState:
-    with overlay_transaction(paths):
+    transaction = overlay_transaction(paths) if acquire_lock else nullcontext()
+    with transaction:
         if paths.current.is_symlink():
             try:
                 generation = resolve_current_generation(paths)
@@ -161,8 +163,10 @@ def build_generation(
     transaction_id: str | None = None,
     validate_artifacts: bool = True,
     base_environment: Mapping[str, str] | None = None,
+    acquire_lock: bool = True,
 ) -> OverlayState:
-    with overlay_transaction(paths):
+    transaction = overlay_transaction(paths) if acquire_lock else nullcontext()
+    with transaction:
         generation_id = transaction_id or new_transaction_id()
         generation = _create_generation(paths, generation_id)
         site_packages = generation / "site-packages"
