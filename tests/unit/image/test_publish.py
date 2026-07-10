@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from amd_ai.image.build import IMAGE_SOURCE
-from amd_ai.image.publish import PublishError, validate_publish_inputs
+from amd_ai.image.publish import (
+    DockerPublishRegistry,
+    PublishError,
+    validate_publish_inputs,
+)
 from amd_ai.image.publish import (
     MAX_GHCR_LAYER_BYTES,
     RegistryImageObservation,
@@ -317,6 +322,30 @@ def test_failed_authless_pull_leaves_existing_manifest_unchanged(
         publish_stable_release(candidate, registry=registry, output=output)
 
     assert output.read_text(encoding="utf-8") == "known-good\n"
+
+
+def test_authless_pull_passes_empty_config_to_sudo_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[str, ...], object]] = []
+
+    def completed(argv, **kwargs):
+        command = tuple(argv)
+        config = Path(command[command.index("--config") + 1])
+        assert config.is_dir()
+        assert tuple(config.iterdir()) == ()
+        calls.append((command, kwargs.get("env")))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", completed)
+    reference = "ghcr.io/hellcatjack/example@sha256:" + "a" * 64
+
+    DockerPublishRegistry(("sudo", "-n", "docker")).authless_pull(reference)
+
+    command, environment = calls[0]
+    assert command[:4] == ("sudo", "-n", "docker", "--config")
+    assert command[-2:] == ("pull", reference)
+    assert environment is None
 
 
 def write_publish_evidence(

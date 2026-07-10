@@ -200,9 +200,7 @@ class DockerPublishRegistry:
             config.chmod(0o700)
             if any(config.iterdir()):
                 raise PublishError("temporary authless Docker config is not empty")
-            environment = dict(os.environ)
-            environment["DOCKER_CONFIG"] = str(config)
-            self._completed(("pull", reference), environment=environment)
+            self._completed(("--config", str(config), "pull", reference))
 
     def inspect(self, reference: str) -> Mapping[str, object]:
         result = self._completed(("image", "inspect", reference))
