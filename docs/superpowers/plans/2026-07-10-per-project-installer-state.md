@@ -4,7 +4,7 @@
 
 **Goal:** Make an omitted `--state-path` select a deterministic per-project state while preserving compatible legacy global-state resumes.
 
-**Architecture:** Add read-only state identity inspection and deterministic path selection to `installer/state.py`. Mark CLI-provided state paths as explicit in `InstallOptions`, then let `InstallerWorkflow` select and report the effective path after the project directory is known but before locking or loading state. Existing state decoding, checkpoint validation, and explicit-path behavior remain authoritative.
+**Architecture:** Add read-only state identity inspection and deterministic path selection to `installer/state.py`. Mark CLI-provided state paths as explicit in `InstallOptions`, then let `InstallerWorkflow` select and report the effective path after the project directory is known. A fixed internal coordination lock serializes complete workflows across projects and explicit state locations; the selected state retains its own lock. Existing state decoding, checkpoint validation, and explicit-path behavior remain authoritative.
 
 **Tech Stack:** Python 3.12, standard-library `dataclasses`, `hashlib`, `json`, `pathlib`, pytest 8.4, shell-level fixture integration tests.
 
@@ -312,13 +312,65 @@ git add src/amd_ai/__init__.py tests/test_version.py README.md docs/install.md
 git commit -m "docs: publish per-project state workflow"
 ```
 
-## Task 4: Verification, production regression, and release
+## Task 4: Review hardening
+
+**Files:**
+
+- Modify: `src/amd_ai/installer/models.py`
+- Modify: `src/amd_ai/installer/state.py`
+- Modify: `src/amd_ai/installer/workflow.py`
+- Modify: `tests/cli/test_installer_resume.py`
+- Modify: `tests/unit/installer/test_models.py`
+- Modify: `tests/unit/installer/test_state.py`
+- Modify: `tests/unit/installer/test_workflow.py`
+
+- [x] **Step 1: Reproduce a valid legacy state with no project identity**
+
+Verify RED: a schema-valid state at `BOOTSTRAP` with `project_path=null` runs
+all stages instead of stopping.
+
+- [x] **Step 2: Require project identity and preserve invalid legacy state**
+
+Make `InstallState` reject a missing project path. Verify selection remains
+read-only, while the locked load preserves the file as corrupt evidence and
+runs no action.
+
+- [x] **Step 3: Reproduce cross-project coordination gaps**
+
+Verify that different projects and explicit state roots can otherwise acquire
+different state locks and enter full mode concurrently.
+
+- [x] **Step 4: Add a fixed internal workflow coordination lock**
+
+Add a normalized internal `coordination_state_path` to `InstallOptions`. Hold
+that lock around state selection, selected-state locking, and the complete
+workflow. Do not expose a CLI override.
+
+- [x] **Step 5: Use a completed full legacy state in integration regression**
+
+Construct a completed `InstallMode.FULL` legacy state, run a different project
+in container mode without `--state-path`, and assert the exact container-only
+action sequence.
+
+- [x] **Step 6: Commit review hardening**
+
+```bash
+git add src/amd_ai/installer/models.py src/amd_ai/installer/state.py \
+  src/amd_ai/installer/workflow.py tests/cli/test_installer_resume.py \
+  tests/unit/installer/test_models.py tests/unit/installer/test_state.py \
+  tests/unit/installer/test_workflow.py README.md docs/install.md \
+  docs/superpowers/specs/2026-07-10-per-project-installer-state-design.md \
+  docs/superpowers/plans/2026-07-10-per-project-installer-state.md
+git commit -m "fix: serialize multi-project installer workflows"
+```
+
+## Task 5: Verification, production regression, and release
 
 **Files:**
 
 - Verify only; no planned source edits
 
-- [x] **Step 1: Run static and complete automated verification**
+- [ ] **Step 1: Run static and complete automated verification**
 
 ```bash
 # v0.2.1 baseline exclusions: F401, F541, and F811 outside this diff.
@@ -335,7 +387,7 @@ Expected: Ruff with documented baseline exclusions, Markdown, and diff checks
 pass; the non-hardware suite has no failures. The affected files must also pass
 Ruff without exclusions except the pre-existing `cli.py` F401 findings.
 
-- [x] **Step 2: Verify stable image identities are unchanged**
+- [ ] **Step 2: Verify stable image identities are unchanged**
 
 ```bash
 PYTHONPATH=src bin/strix-halo-rocm release verify \
@@ -349,7 +401,7 @@ sha256:e9991f97f578156c8620fbb587d2d34504eb632f165cc5597deaadaa3e692a12
 sha256:dc0bb217474cfd4f602423bd3bf4fe8714b03e900cf3c6b4417b99e622ebcf8b
 ```
 
-- [x] **Step 3: Exercise the user's legacy state without mutation**
+- [ ] **Step 3: Exercise the user's legacy state without mutation**
 
 Record the SHA-256 of
 `~/.local/state/strix-halo-rocm-toolkit/install-state.json`, copy it and the

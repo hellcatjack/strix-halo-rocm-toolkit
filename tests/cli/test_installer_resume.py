@@ -6,7 +6,13 @@ import subprocess
 from pathlib import Path
 
 from amd_ai.installer.fixture import fixture_host_plan_digest
-from amd_ai.installer.state import project_state_path
+from amd_ai.installer.models import (
+    FULL_STAGE_ORDER,
+    InstallMode,
+    InstallStage,
+    InstallState,
+)
+from amd_ai.installer.state import project_state_path, save_state
 
 
 ROOT = Path.cwd()
@@ -228,14 +234,31 @@ def test_real_install_implicitly_isolates_second_project_from_legacy_state(
     )
     first_project = tmp_path / "first-project"
     second_project = tmp_path / "video-lab"
-    first = run_install(
-        home=home,
-        fixture=fixture,
-        state=legacy,
-        project=first_project,
-        mode="container",
+    save_state(
+        legacy,
+        InstallState(
+            schema_version=2,
+            installer_version="0.2.1",
+            mode=InstallMode.FULL,
+            target_user="developer",
+            release_id=None,
+            source_revision=None,
+            base_image_reference=None,
+            base_manifest_digest=None,
+            torch_image_reference=None,
+            torch_manifest_digest=None,
+            project_path=str(first_project.resolve()),
+            current_stage=InstallStage.COMPLETE,
+            completed_stage_input_digests={
+                stage.value: "0" * 64 for stage in FULL_STAGE_ORDER
+            },
+            reboot_boot_id=None,
+            created_at="2026-07-10T10:00:00Z",
+            updated_at="2026-07-10T10:01:00Z",
+            installer_source_revision="a" * 40,
+            source_root=str(ROOT.resolve()),
+        ),
     )
-    assert first.returncode == 0, first.stderr
     legacy_before = legacy.read_bytes()
 
     second = run_install(
@@ -251,5 +274,14 @@ def test_real_install_implicitly_isolates_second_project_from_legacy_state(
     assert f"installer state (project): {selected}" in second.stdout
     assert legacy.read_bytes() == legacy_before
     assert selected.is_file()
-    assert (first_project / "amd-ai-project.toml").is_file()
     assert (second_project / "amd-ai-project.toml").is_file()
+    calls = (fixture / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert calls == [
+        "bootstrap",
+        "container_host_check",
+        "resolve_release",
+        "pull_release",
+        "verify_torch_image",
+        "initialize_project",
+        "verify_project",
+    ]

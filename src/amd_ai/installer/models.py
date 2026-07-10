@@ -81,6 +81,10 @@ def default_state_path() -> Path:
     ).resolve(strict=False)
 
 
+def default_coordination_state_path() -> Path:
+    return default_state_path().with_name(".installer-coordination.json")
+
+
 @dataclass(frozen=True)
 class InstallOptions:
     mode: InstallMode
@@ -95,6 +99,9 @@ class InstallOptions:
     stable_manifest_path: Path | None = None
     source_root: Path | None = None
     state_path: Path = field(default_factory=default_state_path)
+    coordination_state_path: Path = field(
+        default_factory=default_coordination_state_path
+    )
     state_path_explicit: bool = True
 
     def __post_init__(self) -> None:
@@ -115,6 +122,11 @@ class InstallOptions:
             ),
         )
         object.__setattr__(self, "state_path", _absolute_path(self.state_path))
+        object.__setattr__(
+            self,
+            "coordination_state_path",
+            _absolute_path(self.coordination_state_path),
+        )
         if self.project_dir is not None:
             object.__setattr__(
                 self, "project_dir", _absolute_path(self.project_dir)
@@ -152,7 +164,12 @@ class InstallOptions:
         ):
             raise InstallerModelError("accepted host plan digest is invalid")
 
-        for name in ("source_root", "stable_manifest_path", "state_path"):
+        for name in (
+            "source_root",
+            "stable_manifest_path",
+            "state_path",
+            "coordination_state_path",
+        ):
             _require_normalized_absolute_path(name, getattr(self, name))
         if self.project_dir is not None:
             _require_normalized_absolute_path("project_dir", self.project_dir)
@@ -296,12 +313,13 @@ class InstallState:
         source_root = _absolute_path(Path(self.source_root))
         if str(source_root) != self.source_root:
             raise InstallerModelError("install state source_root is not normalized")
-        if self.project_path is not None:
-            project_path = _absolute_path(Path(self.project_path))
-            if str(project_path) != self.project_path:
-                raise InstallerModelError(
-                    "install state project_path is not normalized"
-                )
+        if self.project_path is None:
+            raise InstallerModelError("install state project path is missing")
+        project_path = _absolute_path(Path(self.project_path))
+        if str(project_path) != self.project_path:
+            raise InstallerModelError(
+                "install state project_path is not normalized"
+            )
 
         completed: dict[str, str] = {}
         for raw_stage, digest in self.completed_stage_input_digests.items():

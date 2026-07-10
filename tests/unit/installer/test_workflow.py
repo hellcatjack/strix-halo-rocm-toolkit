@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -12,6 +13,7 @@ from amd_ai.installer.release import (
     ReleaseIdentityError,
 )
 from amd_ai.installer.state import (
+    installer_coordination_lock,
     install_lock,
     project_state_path,
     save_state,
@@ -40,6 +42,7 @@ def workflow_options(
             or Path("tests/fixtures/releases/stable.json").resolve()
         ),
         state_path=tmp_path / "install-state.json",
+        coordination_state_path=tmp_path / "coordination-state.json",
     )
 
 
@@ -127,6 +130,7 @@ def full_options(
             "tests/fixtures/releases/stable.json"
         ).resolve(),
         state_path=tmp_path / "install-state.json",
+        coordination_state_path=tmp_path / "coordination-state.json",
     )
 
 
@@ -300,6 +304,36 @@ def test_implicit_state_reuses_matching_legacy_project(tmp_path: Path) -> None:
     )
 
 
+def test_implicit_state_stops_on_legacy_state_without_project_identity(
+    tmp_path: Path,
+) -> None:
+    options = workflow_options(tmp_path)
+    failing_actions = FakeInstallerActions.healthy()
+    failing_actions.failures[InstallStage.BOOTSTRAP] = RuntimeError("stop")
+    first = installer_workflow(
+        tmp_path,
+        actions=failing_actions,
+        options=options,
+    ).run()
+    assert first.exit_code == 2
+    payload = json.loads(options.state_path.read_text(encoding="utf-8"))
+    payload["project_path"] = None
+    options.state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    actions = FakeInstallerActions.healthy()
+    result = installer_workflow(
+        tmp_path,
+        actions=actions,
+        options=replace(options, state_path_explicit=False),
+    ).run()
+
+    assert result.exit_code == 2
+    assert "invalid install state" in result.message
+    assert actions.calls == []
+    assert not options.state_path.exists()
+    assert len(list(tmp_path.glob("install-state.corrupt.*.json"))) == 1
+
+
 def test_matching_legacy_project_still_blocks_mode_change(
     tmp_path: Path,
 ) -> None:
@@ -326,6 +360,34 @@ def test_matching_legacy_project_still_blocks_mode_change(
     assert result.exit_code == 2
     assert "mode changed" in result.message
     assert str(tmp_path / "install-state.json") in result.message
+    assert actions.calls == []
+
+
+def test_different_full_project_is_blocked_by_installer_coordination_lock(
+    tmp_path: Path,
+) -> None:
+    coordination_state = tmp_path / "coordination.json"
+    options = implicit_workflow_options(
+        tmp_path,
+        project_dir=tmp_path / "second-project",
+        mode=InstallMode.FULL,
+    )
+    options = replace(
+        options,
+        state_path=tmp_path / "other-root" / "state.json",
+        coordination_state_path=coordination_state,
+    )
+    actions = FakeInstallerActions.host_change_requires_reboot()
+
+    with installer_coordination_lock(coordination_state):
+        result = installer_workflow(
+            tmp_path,
+            actions=actions,
+            options=options,
+        ).run()
+
+    assert result.exit_code == 2
+    assert "another installer" in result.message
     assert actions.calls == []
 
 

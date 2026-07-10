@@ -43,6 +43,7 @@ from amd_ai.installer.state import (
     InstallerStateError,
     ResumeInputChanged,
     boot_id_changed,
+    installer_coordination_lock,
     install_lock,
     load_state,
     read_boot_id,
@@ -113,18 +114,22 @@ class InstallerWorkflow:
                 self.installer_source_revision
             ) is None:
                 raise WorkflowError("installer source revision is invalid")
-            with install_lock(self.options.state_path):
-                state = load_state(self.options.state_path)
-                if state is None:
-                    state = self._new_state()
-                    if not self.options.dry_run:
-                        save_state(self.options.state_path, state)
-                elif not self.options.dry_run:
-                    state = self._adopt_compatible_installer_update(state)
-                self._validate_transition(state)
-                if self.options.dry_run:
-                    return self._run_dry(state)
-                return self._run_stages(state)
+            with installer_coordination_lock(
+                self.options.coordination_state_path
+            ):
+                self._select_state_path()
+                with install_lock(self.options.state_path):
+                    state = load_state(self.options.state_path)
+                    if state is None:
+                        state = self._new_state()
+                        if not self.options.dry_run:
+                            save_state(self.options.state_path, state)
+                    elif not self.options.dry_run:
+                        state = self._adopt_compatible_installer_update(state)
+                    self._validate_transition(state)
+                    if self.options.dry_run:
+                        return self._run_dry(state)
+                    return self._run_stages(state)
         except KeyboardInterrupt:
             return WorkflowResult(1, state, "installation interrupted")
         except ResumeInputChanged as error:
@@ -151,6 +156,8 @@ class InstallerWorkflow:
         if self.options.project_dir is None:
             project_dir = self.prompts.ask_project_dir()
             self.options = replace(self.options, project_dir=project_dir)
+
+    def _select_state_path(self) -> None:
         assert self.options.project_dir is not None
         selection = select_install_state_path(
             project_dir=self.options.project_dir,

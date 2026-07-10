@@ -54,8 +54,9 @@ For example, `/app/test/video-lab` receives a stable path similar to:
 ## Selection algorithm
 
 State selection happens after the project directory has been supplied or
-collected by the interactive prompt, and before the installer acquires its
-state-file lock.
+collected by the interactive prompt. The installer first acquires a fixed
+toolkit coordination lock, then selects the project state and acquires its
+state-file lock. The coordination lock remains held for the full workflow.
 
 1. If the user supplied `--state-path`, normalize and use exactly that path.
 2. Calculate the deterministic per-project path.
@@ -90,10 +91,15 @@ as an informational installer status line.
 - State files remain mode `0600`; state directories remain mode `0700` subject
   to existing filesystem permissions.
 - No state file is deleted, moved, or overwritten by selection alone.
+- A decoded install state without a normalized `project_path` is corrupt and
+  cannot execute stages.
 
-Separate state files allow independent project workflows to hold independent
-locks. This change does not add cross-project concurrency for host mutation;
-the existing host authorization and digest checks remain unchanged.
+Separate state files provide independent recovery histories. A fixed internal
+coordination lock serializes workflows even when `--state-path` points outside
+the default directory, so different projects cannot concurrently mutate host
+packages, Docker, TTM configuration, images, or checkpoints. The selected
+state's own lock still protects direct state access. The coordination lock is
+not exposed as a CLI override.
 
 ## User workflow
 
@@ -129,8 +135,11 @@ Automated tests cover:
 - matching legacy-state reuse;
 - unrelated valid legacy-state isolation;
 - conservative handling of an unidentifiable legacy state;
+- rejection and preservation of a decoded state with no project identity;
 - existing per-project-state precedence;
 - same-project mode mismatch protection;
+- toolkit-wide coordination across different projects and explicit state
+  locations;
 - command-line and interactive project selection;
 - unchanged checkpoint digest validation after state selection.
 

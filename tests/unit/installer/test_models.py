@@ -67,3 +67,20 @@ def test_state_path_provenance_must_be_boolean(tmp_path: Path) -> None:
             state_path=tmp_path / "state.json",
             state_path_explicit="no",  # type: ignore[arg-type]
         ).validate()
+
+
+def test_coordination_path_is_independent_from_explicit_state_path(
+    tmp_path: Path,
+) -> None:
+    first = InstallOptions(
+        mode=InstallMode.CONTAINER,
+        project_dir=tmp_path / "first-project",
+        state_path=tmp_path / "one" / "state.json",
+    )
+    second = InstallOptions(
+        mode=InstallMode.CONTAINER,
+        project_dir=tmp_path / "second-project",
+        state_path=tmp_path / "two" / "state.json",
+    )
+
+    assert first.coordination_state_path == second.coordination_state_path

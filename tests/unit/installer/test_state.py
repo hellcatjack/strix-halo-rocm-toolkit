@@ -6,12 +6,18 @@ from pathlib import Path
 
 import pytest
 
-from amd_ai.installer.models import InstallMode, InstallStage, InstallState
+from amd_ai.installer.models import (
+    InstallMode,
+    InstallStage,
+    InstallState,
+    InstallerModelError,
+)
 from amd_ai.installer.state import (
     CorruptInstallState,
     InstallAlreadyRunning,
     ResumeInputChanged,
     boot_id_changed,
+    installer_coordination_lock,
     install_lock,
     load_state,
     project_state_path,
@@ -85,6 +91,11 @@ def test_state_round_trip_uses_atomic_replace(
     assert load_state(path) == expected
     assert calls[-1][1] == path
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_install_state_requires_a_project_identity(tmp_path: Path) -> None:
+    with pytest.raises(InstallerModelError, match="project path"):
+        install_state(tmp_path, project_path=None)
 
 
 def test_project_state_path_is_stable_and_separates_equal_basenames(
@@ -254,6 +265,17 @@ def test_install_lock_refuses_a_concurrent_workflow(tmp_path: Path) -> None:
         with pytest.raises(InstallAlreadyRunning):
             with install_lock(path):
                 pytest.fail("second lock must not be acquired")
+
+
+def test_coordination_lock_refuses_a_concurrent_workflow(
+    tmp_path: Path,
+) -> None:
+    coordination = tmp_path / ".installer-coordination.json"
+
+    with installer_coordination_lock(coordination):
+        with pytest.raises(InstallAlreadyRunning):
+            with installer_coordination_lock(coordination):
+                pytest.fail("second workflow must not acquire coordination")
 
 
 def test_completed_stage_accepts_same_inputs_and_rejects_changed_inputs(

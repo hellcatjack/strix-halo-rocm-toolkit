@@ -230,6 +230,13 @@ def install_lock(state_path: Path) -> Iterator[Path]:
         os.close(descriptor)
 
 
+@contextmanager
+def installer_coordination_lock(state_path: Path) -> Iterator[Path]:
+    coordination_state = Path(state_path).resolve(strict=False)
+    with install_lock(coordination_state) as lock_path:
+        yield lock_path
+
+
 def validate_completed_stage(
     state: InstallState,
     stage: InstallStage,

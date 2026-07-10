@@ -311,7 +311,7 @@ printf 'accepted host plan: %s\n' "$PLAN_DIGEST"
 ~/.local/state/strix-halo-rocm-toolkit/projects/
 ```
 
-文件名由可读项目目录名和规范化绝对路径的 SHA-256 前缀组成，例如 `video-lab-b9bb64878f63.json`。若旧版全局状态 `~/.local/state/strix-halo-rocm-toolkit/install-state.json` 属于同一个项目，安装器继续原地恢复并显示 `installer state (legacy)`；它不会自动移动、删除或复制旧状态。同一项目更换安装模式仍会阻断。显式 `--state-path` 始终优先，并显示 `installer state (explicit)`。
+文件名由可读项目目录名和规范化绝对路径的 SHA-256 前缀组成，例如 `video-lab-b9bb64878f63.json`。若旧版全局状态 `~/.local/state/strix-halo-rocm-toolkit/install-state.json` 属于同一个项目，安装器继续原地恢复并显示 `installer state (legacy)`；它不会自动移动、删除或复制旧状态。同一项目更换安装模式仍会阻断。显式 `--state-path` 始终优先，并显示 `installer state (explicit)`。项目状态彼此独立，但固定的 toolkit 协调锁会串行化安装流程，避免不同项目并发修改宿主、镜像或检查点。
 
 损坏状态会被重命名为带 UTC 时间戳的证据文件；安装器不会猜测哪些动作已经成功。完整状态与退出码说明见[安装与恢复](docs/install.md)。
 
