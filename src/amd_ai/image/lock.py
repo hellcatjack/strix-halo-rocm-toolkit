@@ -158,6 +158,28 @@ def validate_wheelhouse_manifest(wheelhouse: Path) -> tuple[str, ...]:
     return tuple(errors)
 
 
+def parse_package_lock(text: str) -> tuple[tuple[str, str], ...]:
+    packages: list[tuple[str, str]] = []
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        if not raw_line:
+            continue
+        match = re.fullmatch(
+            r"([a-z0-9][a-z0-9+.-]*)=([^\s=]+)",
+            raw_line,
+        )
+        if match is None:
+            raise LockError(f"invalid package lock line {line_number}: {raw_line!r}")
+        packages.append((match.group(1), match.group(2)))
+    if not packages:
+        raise LockError("package lock is empty")
+    names = [name for name, _ in packages]
+    if names != sorted(names):
+        raise LockError("package lock is not sorted")
+    if len(names) != len(set(names)):
+        raise LockError("package lock contains duplicate names")
+    return tuple(packages)
+
+
 def lock_wheels(*, sources: Path, profile_path: Path, wheelhouse: Path) -> None:
     source_text = sources.read_text(encoding="utf-8")
     source_values = _parse_source_values(source_text)
