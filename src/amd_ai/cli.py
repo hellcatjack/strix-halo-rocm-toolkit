@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import shlex
+import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import asdict, replace
@@ -18,10 +20,29 @@ from amd_ai.host.probe import FixtureRunner, HostProbe, load_fixture_device_gids
 from amd_ai.host.verify import verify_host
 from amd_ai.image.build import (
     BuildError,
+    Docker,
     build_rocm_python,
     build_rocm_pytorch,
     prune_images,
     run_image_check,
+)
+from amd_ai.project.build import ProjectBuildError, build_or_reuse_project
+from amd_ai.project.config import ConfigError, load_project_config
+from amd_ai.project.dependencies import DependencyError
+from amd_ai.project.init import ProjectInitError, initialize_project
+from amd_ai.project.run import (
+    ProjectRunError,
+    build_run_argv,
+    ensure_project_home,
+    inspect_project_image,
+    redact_run_argv,
+    require_profile_allowed,
+)
+from amd_ai.project.runtime import (
+    RuntimePolicyError,
+    compute_shm_gib,
+    discover_gpu_access,
+    read_mem_total_kib,
 )
 from amd_ai.report import Report, Status
 from amd_ai.runner import Runner, SubprocessRunner
@@ -93,6 +114,20 @@ def build_parser() -> argparse.ArgumentParser:
     check_kind.add_argument("--metadata-only", action="store_true")
     check_kind.add_argument("--runtime", action="store_true")
     container_check.add_argument("--json", dest="json_path")
+
+    project_init = subparsers.add_parser("project-init")
+    project_init.add_argument("name")
+    project_init.add_argument("--directory", type=Path)
+    project_init.add_argument("--base-profile", default="stable")
+
+    project_run = subparsers.add_parser("project-run")
+    project_run.add_argument("project", type=Path)
+    build_mode = project_run.add_mutually_exclusive_group()
+    build_mode.add_argument("--build", action="store_true")
+    build_mode.add_argument("--no-build", action="store_true")
+    project_run.add_argument("--dry-run", action="store_true")
+    project_run.add_argument("--debug", action="store_true")
+    project_run.add_argument("--shm-size-gib", type=_shm_gib)
     return parser
 
 
@@ -122,6 +157,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         except BuildError as error:
             print(f"container-check: {error}", file=sys.stderr)
             return 2
+    if args.command in {"project-init", "project-run"}:
+        try:
+            if args.command == "project-init":
+                return _project_init(args)
+            return _project_run(args)
+        except (
+            BuildError,
+            ConfigError,
+            DependencyError,
+            ProjectBuildError,
+            ProjectInitError,
+            ProjectRunError,
+            RuntimePolicyError,
+        ) as error:
+            print(f"{args.command}: {error}", file=sys.stderr)
+            return 2
     raise AssertionError(f"unhandled command: {args.command}")
 
 
@@ -145,6 +196,96 @@ def _image_build(args: argparse.Namespace) -> int:
         )
         return 0
     raise AssertionError(f"unhandled image mode: {args.image_mode}")
+
+
+def _project_init(args: argparse.Namespace) -> int:
+    docker = Docker.detect()
+    destination = args.directory or Path(args.name)
+    project_dir = initialize_project(
+        name=args.name,
+        destination=destination,
+        base_profile=args.base_profile,
+        runner=SubprocessRunner(),
+        docker_prefix=docker.prefix,
+    )
+    print(f"initialized {project_dir}")
+    return 0
+
+
+def _project_run(args: argparse.Namespace) -> int:
+    config = load_project_config(_project_config_path(args.project))
+    if args.debug and not config.debug:
+        config = replace(config, debug=True)
+
+    docker = Docker.detect()
+    runner = SubprocessRunner()
+    access = discover_gpu_access()
+    shm_gib = (
+        args.shm_size_gib
+        or config.shm_size_gib
+        or compute_shm_gib(mem_total_kib=read_mem_total_kib())
+    )
+    uid, gid = _runtime_identity()
+
+    build_or_reuse_project(
+        config=config,
+        runner=runner,
+        force=args.build,
+        no_build=args.no_build,
+        docker_prefix=docker.prefix,
+    )
+    metadata = inspect_project_image(config, runner, docker.prefix)
+    require_profile_allowed(metadata.profile_status, os.environ)
+    ensure_project_home(config.path.parent, uid=uid, gid=gid)
+    terminal = sys.stdin.isatty() and sys.stdout.isatty()
+    argv = build_run_argv(
+        config=config,
+        access=access,
+        uid=uid,
+        gid=gid,
+        shm_gib=shm_gib,
+        environment=os.environ,
+        terminal=terminal,
+        docker_prefix=docker.prefix,
+    )
+    if args.dry_run:
+        print(shlex.join(redact_run_argv(argv)))
+        return 0
+    return _run_live(argv)
+
+
+def _project_config_path(project: Path) -> Path:
+    project = project.expanduser()
+    if project.is_dir() or (not project.exists() and project.suffix != ".toml"):
+        return project / "amd-ai-project.toml"
+    return project
+
+
+def _runtime_identity() -> tuple[int, int]:
+    if os.geteuid() != 0:
+        return os.getuid(), os.getgid()
+    sudo_uid = os.environ.get("SUDO_UID")
+    sudo_gid = os.environ.get("SUDO_GID")
+    if sudo_uid is None and sudo_gid is None:
+        return os.getuid(), os.getgid()
+    if sudo_uid is None or sudo_gid is None:
+        raise ProjectRunError("SUDO_UID and SUDO_GID must either both be set or absent")
+    try:
+        uid = int(sudo_uid)
+        gid = int(sudo_gid)
+    except ValueError as error:
+        raise ProjectRunError("SUDO_UID and SUDO_GID must be integers") from error
+    if uid < 0 or gid < 0:
+        raise ProjectRunError("SUDO_UID and SUDO_GID must be nonnegative")
+    return uid, gid
+
+
+def _run_live(argv: Sequence[str]) -> int:
+    try:
+        completed = subprocess.run(argv, check=False)
+    except OSError as error:
+        raise ProjectRunError(f"cannot start project container: {error}") from error
+    return completed.returncode
 
 
 def _host_preflight(fixture_root: Path | None, json_path: Path | None) -> int:
@@ -321,6 +462,13 @@ def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def _shm_gib(value: str) -> int:
+    parsed = _positive_int(value)
+    if parsed > 128:
+        raise argparse.ArgumentTypeError("must not exceed 128 GiB")
     return parsed
 
 
