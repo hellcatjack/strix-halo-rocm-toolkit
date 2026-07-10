@@ -17,7 +17,7 @@ HOME_MENU = """Strix Halo ROCm Toolkit
 IMAGE_FALLBACK_MENU = """1. 使用当前源码在本机构建
 2. 退出"""
 
-STATUS_PREFIXES = frozenset({"PASS", "WARN", "ACTION", "BLOCKED"})
+STATUS_PREFIXES = frozenset({"PASS", "INFO", "WARN", "ACTION", "BLOCKED"})
 
 
 class PromptError(RuntimeError):

@@ -479,6 +479,7 @@ def _install_command(args: argparse.Namespace) -> int:
         stable_manifest_path=manifest,
         source_root=source_root,
         state_path=state_path,
+        state_path_explicit=args.state_path is not None,
     )
     revision = _installer_source_revision(source_root)
     fixture_root = os.environ.get("AMD_AI_INSTALLER_FIXTURE_ROOT")

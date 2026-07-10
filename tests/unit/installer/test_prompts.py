@@ -76,11 +76,12 @@ def test_image_fallback_requires_explicit_number() -> None:
 
 def test_status_renderer_accepts_only_approved_prefixes() -> None:
     assert render_status("PASS", "已满足") == "PASS     已满足"
+    assert render_status("INFO", "状态路径") == "INFO     状态路径"
     assert render_status("WARN", "需要注意") == "WARN     需要注意"
     assert render_status("ACTION", "将执行修改") == "ACTION   将执行修改"
     assert render_status("BLOCKED", "不允许继续") == "BLOCKED  不允许继续"
     with pytest.raises(ValueError):
-        render_status("INFO", "not approved")
+        render_status("DEBUG", "not approved")
 
 
 def test_noninteractive_prompts_render_status_without_answering(

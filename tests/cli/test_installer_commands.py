@@ -96,6 +96,52 @@ def test_install_dispatch_constructs_workflow_once(
     assert code == 0
     assert captured["actions"] == "actions"
     assert captured["installer_source_revision"] == "a" * 40
+    assert captured["options"].state_path_explicit is True
+
+
+def test_install_dispatch_marks_omitted_state_path_as_implicit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Result:
+        exit_code = 0
+        message = "complete"
+
+    class Workflow:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def run(self):
+            return Result()
+
+    monkeypatch.setenv("AMD_AI_INSTALLER_SOURCE_REVISION", "a" * 40)
+    monkeypatch.setattr(
+        cli.Docker,
+        "detect",
+        lambda: SimpleNamespace(prefix=("docker",)),
+    )
+    monkeypatch.setattr(cli, "InstallerWorkflow", Workflow)
+    monkeypatch.setattr(
+        cli, "ProductionInstallerActions", lambda **kwargs: "actions"
+    )
+
+    code = cli.main(
+        [
+            "install",
+            "--mode",
+            "container",
+            "--project-dir",
+            str(tmp_path / "project"),
+            "--image-source",
+            "pull",
+            "--source-root",
+            str(Path.cwd()),
+        ]
+    )
+
+    assert code == 0
+    assert captured["options"].state_path_explicit is False
 
 
 def test_install_dispatch_uses_detected_sudo_docker_prefix(

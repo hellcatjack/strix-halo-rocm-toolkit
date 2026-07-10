@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from amd_ai.installer.fixture import fixture_host_plan_digest
+from amd_ai.installer.state import project_state_path
 
 
 ROOT = Path.cwd()
@@ -42,13 +43,12 @@ def run_install(
     *,
     home: Path,
     fixture: Path,
-    state: Path,
+    state: Path | None,
     project: Path,
     mode: str,
     extra: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        (
+    arguments = [
             str(INSTALL),
             "--mode",
             mode,
@@ -61,12 +61,14 @@ def run_install(
             "pull",
             "--manifest",
             str(MANIFEST),
-            "--state-path",
-            str(state),
             "--target-user",
             "developer",
-            *extra,
-        ),
+    ]
+    if state is not None:
+        arguments.extend(("--state-path", str(state)))
+    arguments.extend(extra)
+    return subprocess.run(
+        arguments,
         cwd=ROOT,
         env=fixture_environment(home, fixture),
         text=True,
@@ -213,3 +215,41 @@ def test_real_install_blocks_changed_project_path_before_actions(
     assert resumed.returncode == 2
     assert "inputs changed" in resumed.stderr
     assert (fixture / "calls.log").read_text(encoding="utf-8") == calls_before
+
+
+def test_real_install_implicitly_isolates_second_project_from_legacy_state(
+    tmp_path: Path,
+) -> None:
+    fixture = make_fixture(tmp_path, "container-healthy.json")
+    home = tmp_path / "home"
+    legacy = (
+        home
+        / ".local/state/strix-halo-rocm-toolkit/install-state.json"
+    )
+    first_project = tmp_path / "first-project"
+    second_project = tmp_path / "video-lab"
+    first = run_install(
+        home=home,
+        fixture=fixture,
+        state=legacy,
+        project=first_project,
+        mode="container",
+    )
+    assert first.returncode == 0, first.stderr
+    legacy_before = legacy.read_bytes()
+
+    second = run_install(
+        home=home,
+        fixture=fixture,
+        state=None,
+        project=second_project,
+        mode="container",
+    )
+
+    selected = project_state_path(second_project, legacy)
+    assert second.returncode == 0, second.stderr
+    assert f"installer state (project): {selected}" in second.stdout
+    assert legacy.read_bytes() == legacy_before
+    assert selected.is_file()
+    assert (first_project / "amd-ai-project.toml").is_file()
+    assert (second_project / "amd-ai-project.toml").is_file()

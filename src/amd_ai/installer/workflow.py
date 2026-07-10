@@ -41,11 +41,13 @@ from amd_ai.installer.state import (
     CorruptInstallState,
     InstallAlreadyRunning,
     InstallerStateError,
+    ResumeInputChanged,
     boot_id_changed,
     install_lock,
     load_state,
     read_boot_id,
     save_state,
+    select_install_state_path,
     stage_input_digest,
     validate_completed_stage,
 )
@@ -125,6 +127,12 @@ class InstallerWorkflow:
                 return self._run_stages(state)
         except KeyboardInterrupt:
             return WorkflowResult(1, state, "installation interrupted")
+        except ResumeInputChanged as error:
+            return WorkflowResult(
+                2,
+                state,
+                f"{error}; state: {self.options.state_path}",
+            )
         except (
             CorruptInstallState,
             InstallAlreadyRunning,
@@ -143,6 +151,17 @@ class InstallerWorkflow:
         if self.options.project_dir is None:
             project_dir = self.prompts.ask_project_dir()
             self.options = replace(self.options, project_dir=project_dir)
+        assert self.options.project_dir is not None
+        selection = select_install_state_path(
+            project_dir=self.options.project_dir,
+            requested_path=self.options.state_path,
+            explicit=self.options.state_path_explicit,
+        )
+        self.options = replace(self.options, state_path=selection.path)
+        self._status(
+            "INFO",
+            f"installer state ({selection.source}): {selection.path}",
+        )
 
     def _new_state(self) -> InstallState:
         now = _utc_timestamp()
@@ -749,7 +768,10 @@ class InstallerWorkflow:
 
     def _validate_transition(self, state: InstallState) -> None:
         if state.mode is not self.options.mode:
-            raise WorkflowError("illegal installer transition: mode changed")
+            raise WorkflowError(
+                "illegal installer transition: mode changed; "
+                f"state: {self.options.state_path}"
+            )
         order = self._stage_order()
         allowed = {stage.value for stage in order}
         unknown = set(state.completed_stage_input_digests).difference(allowed)

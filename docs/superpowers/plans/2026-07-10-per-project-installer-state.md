@@ -150,13 +150,15 @@ git commit -m "feat: select installer state by project"
 
 - Modify: `src/amd_ai/installer/models.py`
 - Modify: `src/amd_ai/cli.py`
+- Modify: `src/amd_ai/installer/prompts.py`
 - Modify: `src/amd_ai/installer/workflow.py`
 - Modify: `tests/cli/test_installer_commands.py`
 - Modify: `tests/cli/test_installer_resume.py`
 - Modify: `tests/unit/installer/test_models.py`
+- Modify: `tests/unit/installer/test_prompts.py`
 - Modify: `tests/unit/installer/test_workflow.py`
 
-- [ ] **Step 1: Write failing CLI and workflow tests**
+- [x] **Step 1: Write failing CLI and workflow tests**
 
 In `tests/cli/test_installer_commands.py`, capture the workflow options and
 assert omitted and explicit state-path provenance:
@@ -191,7 +193,7 @@ test that completes project A into the legacy default path, then installs
 project B without `--state-path` and verifies both state files and projects
 remain present.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run:
 
@@ -205,7 +207,7 @@ PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
 
 Expected: failures show missing `state_path_explicit` and the workflow still loading the unrelated legacy state.
 
-- [ ] **Step 3: Mark explicit CLI state paths**
+- [x] **Step 3: Mark explicit CLI state paths**
 
 Add this frozen option field in `InstallOptions` with a strict boolean check:
 
@@ -221,7 +223,7 @@ construct an option with a chosen path preserve current semantics. In
 state_path_explicit=args.state_path is not None
 ```
 
-- [ ] **Step 4: Select and report state after project prompting**
+- [x] **Step 4: Select and report state after project prompting**
 
 Import `ResumeInputChanged` and `select_install_state_path` into the workflow.
 After `_prepare_options` has obtained `project_dir`, call selection when
@@ -235,20 +237,22 @@ INFO installer state (<source>): <absolute path>
 For explicit paths, emit the same status with source `explicit`. Keep selection
 before `install_lock`. Catch `ResumeInputChanged` separately so its message
 includes the selected state path. Include that path in the existing mode-change
-transition error as well.
+transition error as well. Add `INFO` to the prompt renderer's approved status
+prefixes and retain rejection of unknown prefixes.
 
-- [ ] **Step 5: Run focused tests and verify GREEN**
+- [x] **Step 5: Run focused tests and verify GREEN**
 
 Run the command from Step 2. Expected: all focused tests pass, including the
 real `install.sh` fixture regression for two projects.
 
-- [ ] **Step 6: Commit CLI and workflow integration**
+- [x] **Step 6: Commit CLI and workflow integration**
 
 ```bash
 git add src/amd_ai/installer/models.py src/amd_ai/cli.py \
-  src/amd_ai/installer/workflow.py tests/cli/test_installer_commands.py \
+  src/amd_ai/installer/prompts.py src/amd_ai/installer/workflow.py \
+  tests/cli/test_installer_commands.py \
   tests/cli/test_installer_resume.py tests/unit/installer/test_models.py \
-  tests/unit/installer/test_workflow.py
+  tests/unit/installer/test_prompts.py tests/unit/installer/test_workflow.py
 git commit -m "fix: isolate implicit installer state per project"
 ```
 

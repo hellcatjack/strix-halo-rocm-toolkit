@@ -95,6 +95,7 @@ class InstallOptions:
     stable_manifest_path: Path | None = None
     source_root: Path | None = None
     state_path: Path = field(default_factory=default_state_path)
+    state_path_explicit: bool = True
 
     def __post_init__(self) -> None:
         try:
@@ -134,6 +135,10 @@ class InstallOptions:
             raise InstallerModelError("dry_run must be a boolean")
         if type(self.accept_docker_group) is not bool:
             raise InstallerModelError("accept_docker_group must be a boolean")
+        if type(self.state_path_explicit) is not bool:
+            raise InstallerModelError(
+                "state path provenance must be a boolean"
+            )
         if PROJECT_NAME_PATTERN.fullmatch(self.project_name) is None:
             raise InstallerModelError("project name is invalid")
         if self.image_source not in (None, "pull", "build"):

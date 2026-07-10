@@ -57,3 +57,13 @@ def test_noninteractive_full_mode_requires_exact_plan_digest(
             image_source="pull",
             accepted_host_plan_digest=None,
         ).validate()
+
+
+def test_state_path_provenance_must_be_boolean(tmp_path: Path) -> None:
+    with pytest.raises(InstallerModelError, match="state path provenance"):
+        InstallOptions(
+            mode=InstallMode.CONTAINER,
+            project_dir=tmp_path / "project",
+            state_path=tmp_path / "state.json",
+            state_path_explicit="no",  # type: ignore[arg-type]
+        ).validate()

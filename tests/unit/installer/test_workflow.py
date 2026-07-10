@@ -13,6 +13,7 @@ from amd_ai.installer.release import (
 )
 from amd_ai.installer.state import (
     install_lock,
+    project_state_path,
     save_state,
     stage_input_digest,
 )
@@ -139,6 +140,20 @@ def noninteractive_container_options(
     )
 
 
+def implicit_workflow_options(
+    tmp_path: Path,
+    *,
+    project_dir: Path,
+    mode: InstallMode = InstallMode.CONTAINER,
+) -> InstallOptions:
+    options = (
+        workflow_options(tmp_path, project_dir=project_dir)
+        if mode is InstallMode.CONTAINER
+        else replace(full_options(tmp_path), project_dir=project_dir)
+    )
+    return replace(options, state_path_explicit=False)
+
+
 def test_container_workflow_runs_each_stage_once_and_completes(
     tmp_path: Path,
 ) -> None:
@@ -213,6 +228,135 @@ def test_project_path_change_blocks_resume(tmp_path: Path) -> None:
 
     assert result.exit_code == 2
     assert resumed_actions.calls == []
+
+
+def test_implicit_state_isolated_from_unrelated_legacy_project(
+    tmp_path: Path,
+) -> None:
+    legacy = tmp_path / "install-state.json"
+    old_project = tmp_path / "old-project"
+    old_options = workflow_options(tmp_path, project_dir=old_project)
+    assert old_options.state_path == legacy
+    first = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.healthy(),
+        options=old_options,
+    ).run()
+    assert first.exit_code == 0
+    legacy_before = legacy.read_bytes()
+
+    new_project = tmp_path / "video-lab"
+    options = implicit_workflow_options(
+        tmp_path,
+        project_dir=new_project,
+    )
+    actions = FakeInstallerActions.healthy()
+    prompts = FakePrompts()
+    workflow = installer_workflow(
+        tmp_path,
+        actions=actions,
+        options=options,
+        prompts=prompts,
+    )
+
+    result = workflow.run()
+
+    selected = project_state_path(new_project, legacy)
+    assert result.exit_code == 0
+    assert workflow.options.state_path == selected
+    assert selected.is_file()
+    assert legacy.read_bytes() == legacy_before
+    assert actions.calls[0] == "bootstrap"
+    assert ("INFO", f"installer state (project): {selected}") in prompts.statuses
+
+
+def test_implicit_state_reuses_matching_legacy_project(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    first = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.healthy(),
+        options=workflow_options(tmp_path, project_dir=project),
+    ).run()
+    assert first.exit_code == 0
+
+    options = implicit_workflow_options(tmp_path, project_dir=project)
+    actions = FakeInstallerActions.healthy()
+    prompts = FakePrompts()
+    workflow = installer_workflow(
+        tmp_path,
+        actions=actions,
+        options=options,
+        prompts=prompts,
+    )
+
+    result = workflow.run()
+
+    assert result.exit_code == 0
+    assert workflow.options.state_path == tmp_path / "install-state.json"
+    assert actions.calls == []
+    assert any(
+        prefix == "INFO" and "installer state (legacy)" in message
+        for prefix, message in prompts.statuses
+    )
+
+
+def test_matching_legacy_project_still_blocks_mode_change(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    first = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.healthy(),
+        options=workflow_options(tmp_path, project_dir=project),
+    ).run()
+    assert first.exit_code == 0
+
+    options = implicit_workflow_options(
+        tmp_path,
+        project_dir=project,
+        mode=InstallMode.FULL,
+    )
+    actions = FakeInstallerActions.host_change_requires_reboot()
+    result = installer_workflow(
+        tmp_path,
+        actions=actions,
+        options=options,
+    ).run()
+
+    assert result.exit_code == 2
+    assert "mode changed" in result.message
+    assert str(tmp_path / "install-state.json") in result.message
+    assert actions.calls == []
+
+
+def test_implicit_state_is_selected_after_interactive_project_prompt(
+    tmp_path: Path,
+) -> None:
+    project = (tmp_path / "prompted-project").resolve()
+
+    class ProjectPrompts(FakePrompts):
+        def ask_project_dir(self) -> Path:
+            return project
+
+    options = replace(
+        workflow_options(tmp_path),
+        project_dir=None,
+        state_path_explicit=False,
+    )
+    workflow = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.healthy(),
+        options=options,
+        prompts=ProjectPrompts(),
+    )
+
+    result = workflow.run()
+
+    assert result.exit_code == 0
+    assert workflow.options.project_dir == project
+    assert workflow.options.state_path == project_state_path(
+        project, tmp_path / "install-state.json"
+    )
 
 
 def test_action_failure_does_not_checkpoint_stage(tmp_path: Path) -> None:
