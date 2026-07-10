@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+import os
+import subprocess
+import sys
+
+
+status = os.environ.get("AMD_AI_PROFILE_STATUS", "experimental")
+if status != "verified" and os.environ.get("ALLOW_UNVERIFIED") != "1":
+    print(
+        "experimental or unlabeled Torch profile requires ALLOW_UNVERIFIED=1",
+        file=sys.stderr,
+    )
+    raise SystemExit(64)
+if not sys.argv[1:]:
+    print("project command is empty", file=sys.stderr)
+    raise SystemExit(64)
+check = subprocess.run(
+    ["container-check", "--mode", "torch", "--runtime", "--json", "-"],
+    check=False,
+)
+if check.returncode != 0:
+    raise SystemExit(check.returncode)
+os.execvp(sys.argv[1], sys.argv[1:])

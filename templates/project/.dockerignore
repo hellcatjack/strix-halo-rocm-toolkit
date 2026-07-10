@@ -1,0 +1,10 @@
+.git
+.venv
+.cache
+.amd-ai
+models
+input
+output
+reports
+__pycache__
+*.pyc
