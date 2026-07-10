@@ -100,6 +100,23 @@ def test_project_run_build_flags_are_mutually_exclusive():
     assert error.value.code == 2
 
 
+def test_project_lock_updates_only_the_selected_project(tmp_path, monkeypatch):
+    config = project_config(tmp_path / "demo")
+    captured = {}
+    monkeypatch.setattr(cli, "load_project_config", lambda path: config)
+
+    def fake_lock(project_dir):
+        captured["project_dir"] = project_dir
+        return project_dir / "requirements.lock"
+
+    monkeypatch.setattr(cli, "lock_project_dependencies", fake_lock)
+
+    code = cli.main(["project-lock", str(config.path.parent)])
+
+    assert code == 0
+    assert captured["project_dir"] == config.path.parent
+
+
 def test_project_run_returns_live_container_exit_code(tmp_path, monkeypatch):
     config = project_config(tmp_path / "demo")
     captured = {}
@@ -113,7 +130,7 @@ def test_project_run_returns_live_container_exit_code(tmp_path, monkeypatch):
 
 
 def test_project_command_wrappers_are_executable_and_dispatch_expected_command():
-    for name in ("project-init", "project-run"):
+    for name in ("project-init", "project-lock", "project-run"):
         path = Path("bin") / name
         assert path.is_file()
         assert os.access(path, os.X_OK)

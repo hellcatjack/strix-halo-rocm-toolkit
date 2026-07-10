@@ -28,7 +28,7 @@ from amd_ai.image.build import (
 )
 from amd_ai.project.build import ProjectBuildError, build_or_reuse_project
 from amd_ai.project.config import ConfigError, load_project_config
-from amd_ai.project.dependencies import DependencyError
+from amd_ai.project.dependencies import DependencyError, lock_project_dependencies
 from amd_ai.project.init import ProjectInitError, initialize_project
 from amd_ai.project.run import (
     ProjectRunError,
@@ -120,6 +120,9 @@ def build_parser() -> argparse.ArgumentParser:
     project_init.add_argument("--directory", type=Path)
     project_init.add_argument("--base-profile", default="stable")
 
+    project_lock = subparsers.add_parser("project-lock")
+    project_lock.add_argument("project", type=Path)
+
     project_run = subparsers.add_parser("project-run")
     project_run.add_argument("project", type=Path)
     build_mode = project_run.add_mutually_exclusive_group()
@@ -157,10 +160,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         except BuildError as error:
             print(f"container-check: {error}", file=sys.stderr)
             return 2
-    if args.command in {"project-init", "project-run"}:
+    if args.command in {"project-init", "project-lock", "project-run"}:
         try:
             if args.command == "project-init":
                 return _project_init(args)
+            if args.command == "project-lock":
+                return _project_lock(args)
             return _project_run(args)
         except (
             BuildError,
@@ -209,6 +214,13 @@ def _project_init(args: argparse.Namespace) -> int:
         docker_prefix=docker.prefix,
     )
     print(f"initialized {project_dir}")
+    return 0
+
+
+def _project_lock(args: argparse.Namespace) -> int:
+    config = load_project_config(_project_config_path(args.project))
+    lock_path = lock_project_dependencies(config.path.parent)
+    print(f"locked {lock_path}")
     return 0
 
 
