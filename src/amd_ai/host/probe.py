@@ -114,6 +114,11 @@ class HostProbe:
             for name, version in parse_dpkg_packages(package_result.stdout)
         )
         ttm_text = self._read("sys/module/ttm/parameters/pages_limit", required=False)
+        if not ttm_text:
+            ttm_text = self._read(
+                "sys/module/amdttm/parameters/pages_limit",
+                required=False,
+            )
         return HostSnapshot(
             os_id=os_release.get("ID", ""),
             os_version=os_release.get("VERSION_ID", ""),

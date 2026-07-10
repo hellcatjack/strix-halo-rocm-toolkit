@@ -47,6 +47,7 @@ BACKUP_FILES = (
     "etc/apt/sources.list",
     "proc/cmdline",
     "sys/module/ttm/parameters/pages_limit",
+    "sys/module/amdttm/parameters/pages_limit",
 )
 BACKUP_GLOBS = (
     "etc/apt/sources.list.d/*",

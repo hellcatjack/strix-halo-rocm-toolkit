@@ -15,6 +15,7 @@ from amd_ai.host.models import HostSnapshot, PlannedAction, PreparePlan
 from amd_ai.host.policy import evaluate_preflight
 from amd_ai.host.prepare import UnsupportedHostError, create_prepare_plan
 from amd_ai.host.probe import FixtureRunner, HostProbe, load_fixture_device_gids
+from amd_ai.host.verify import verify_host
 from amd_ai.report import Report, Status
 from amd_ai.runner import Runner, SubprocessRunner
 
@@ -49,6 +50,17 @@ def build_parser() -> argparse.ArgumentParser:
         if mode == "apply":
             mode_parser.add_argument("--yes", action="store_true")
             mode_parser.add_argument("--reboot", action="store_true")
+    verify = subparsers.add_parser("host-verify")
+    verify.add_argument(
+        "--probe-image",
+        default="rocm-python:7.2.1-py3.12",
+    )
+    verify.add_argument("--json", type=Path, dest="json_path")
+    verify.add_argument(
+        "--fixture-root",
+        type=Path,
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -58,6 +70,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _host_preflight(args.fixture_root, args.json_path)
     if args.command == "host-prepare":
         return _host_prepare(args)
+    if args.command == "host-verify":
+        return _host_verify(args.fixture_root, args.probe_image, args.json_path)
     raise AssertionError(f"unhandled command: {args.command}")
 
 
@@ -129,6 +143,22 @@ def _host_prepare(args: argparse.Namespace) -> int:
             args.json_path
         )
     return 0
+
+
+def _host_verify(
+    fixture_root: Path | None,
+    probe_image: str,
+    json_path: Path | None,
+) -> int:
+    snapshot, runner, _ = _collect_host(fixture_root)
+    report = verify_host(snapshot, image=probe_image, runner=runner)
+    for finding in report.findings:
+        print(f"[{finding.severity.value}] {finding.code}: {finding.summary}")
+    if json_path is not None:
+        report.write_json(json_path)
+    if report.status == Status.PASS:
+        return 0
+    return 2 if report.status == Status.BLOCKED else 1
 
 
 def _collect_host(

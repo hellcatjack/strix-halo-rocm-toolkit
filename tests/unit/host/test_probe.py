@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 from amd_ai.host.probe import HostProbe
@@ -38,3 +39,21 @@ def test_probe_records_radeon_origin_for_old_rocm_package():
     assert rocm.version == "6.4.43483-1"
     assert rocm.origin == "https://repo.radeon.com/rocm/apt/6.4"
     assert any("archive.ubuntu.com" in source.content for source in snapshot.apt_sources)
+
+
+def test_probe_reads_legacy_amdttm_live_page_limit(tmp_path):
+    root = tmp_path / "host"
+    shutil.copytree("tests/fixtures/host/healthy", root)
+    (root / "sys/module/ttm/parameters/pages_limit").unlink()
+    legacy = root / "sys/module/amdttm/parameters/pages_limit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("33554432\n", encoding="utf-8")
+
+    snapshot = HostProbe(
+        root=root,
+        runner=FakeRunner.healthy_target(),
+        device_gids={},
+        current_group_ids=(),
+    ).collect()
+
+    assert snapshot.ttm_pages_limit == 33554432

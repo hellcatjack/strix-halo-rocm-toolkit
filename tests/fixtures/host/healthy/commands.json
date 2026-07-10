@@ -19,6 +19,16 @@
     "stderr": "",
     "stdout": "27.5.1\n"
   },
+  "docker\u0000image\u0000inspect\u0000--format\u0000{{.Id}}\u0000rocm-python:7.2.1-py3.12": {
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "sha256:fixture-probe\n"
+  },
+  "docker\u0000run\u0000--rm\u0000--device\u0000/dev/kfd\u0000--device\u0000/dev/dri\u0000--group-add\u0000109\u0000--group-add\u0000110\u0000rocm-python:7.2.1-py3.12\u0000/usr/local/bin/container-check\u0000--mode\u0000rocm\u0000--json\u0000-": {
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "{\"architecture\": \"gfx1151\"}\n"
+  },
   "dpkg-query\u0000-W\u0000-f=${binary:Package}\\t${Version}\\n": {
     "returncode": 0,
     "stderr": "",
@@ -45,4 +55,3 @@
     "stdout": "6.17.0-1025-oem\n"
   }
 }
-

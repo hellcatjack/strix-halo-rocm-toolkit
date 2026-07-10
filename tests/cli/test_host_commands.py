@@ -73,3 +73,23 @@ def test_prepare_apply_rejects_any_confirmation_except_apply(monkeypatch, capsys
 
     assert code == 2
     assert "confirmation" in capsys.readouterr().err.lower()
+
+
+def test_verify_fixture_requires_recorded_kernel_even_when_probe_passes(tmp_path):
+    output = tmp_path / "verify.json"
+
+    code = main(
+        [
+            "host-verify",
+            "--fixture-root",
+            "tests/fixtures/host/healthy",
+            "--json",
+            str(output),
+        ]
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert code == 1
+    assert payload["command"] == "host-verify"
+    assert payload["status"] == "unverified"
+    assert payload["facts"]["probe"]["image_id"] == "sha256:fixture-probe"
