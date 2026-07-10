@@ -3,12 +3,43 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from pathlib import Path
 
 import pytest
 
 
 BASE_IMAGE = "rocm-python:7.2.1-py3.12"
 TORCH_IMAGE = "rocm-pytorch:7.2.1-py3.12-torch2.9.1"
+
+
+def test_operator_documentation_contains_required_contract_anchors() -> None:
+    required = {
+        "README.md": ["./install.sh", "ROCm 7.2.1", "PyTorch 2.9.1"],
+        "docs/install.md": [
+            "--mode container",
+            "--non-interactive",
+            "REBOOT_PENDING",
+        ],
+        "docs/protected-pip.md": [
+            "pip install",
+            "--target",
+            "overlay.requirements.lock",
+        ],
+        "docs/doctor-repair.md": [
+            "TORCH.SHADOWED",
+            "quarantine",
+            "docker system prune",
+        ],
+        "docs/release-chain.md": [
+            "manifest digest",
+            "config digest",
+            "anonymous",
+        ],
+    }
+    for filename, anchors in required.items():
+        text = Path(filename).read_text(encoding="utf-8")
+        for anchor in anchors:
+            assert anchor in text, f"{filename} is missing {anchor!r}"
 
 
 def _completed(prefix, args):
