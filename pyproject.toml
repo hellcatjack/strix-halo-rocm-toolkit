@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "amd-ai-container-platform"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "pytest==8.4.1",
+  "pytest-cov==6.2.1",
+]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+testpaths = ["tests"]
+markers = [
+  "container: requires a local Docker daemon and built images",
+  "hardware: requires /dev/kfd and the target Radeon 8060S host",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/amd_ai"]
