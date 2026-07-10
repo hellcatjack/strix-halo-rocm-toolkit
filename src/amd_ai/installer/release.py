@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Literal, Protocol
 
 from amd_ai.installer.models import ReleaseImage, StableRelease
 
@@ -59,10 +62,44 @@ BASE_ARTIFACT_KEYS = frozenset({"rocm_keyring", "rocm_packages_lock"})
 TORCH_ARTIFACT_KEYS = frozenset(
     {"profile", "requirements_lock", "torch_manifest"}
 )
+BASE_ARTIFACT_PATHS = {
+    "rocm_keyring": "/etc/apt/keyrings/rocm.gpg",
+    "rocm_packages_lock": "/opt/amd-ai/locks/rocm-packages.lock",
+}
+TORCH_ARTIFACT_PATHS = {
+    "profile": "/opt/amd-ai/profile.env",
+    "requirements_lock": "/opt/amd-ai/profile.requirements.lock",
+    "torch_manifest": "/opt/amd-ai/torch-manifest.json",
+}
 
 
 class ReleaseError(RuntimeError):
     pass
+
+
+class ReleaseDocker(Protocol):
+    def pull(self, reference: str) -> None:
+        pass
+
+    def inspect(self, reference: str) -> Mapping[str, object]:
+        pass
+
+    def hash_file(self, reference: str, path: str) -> str:
+        pass
+
+
+@dataclass(frozen=True)
+class VerifiedImageIdentity:
+    reference: str
+    config_digest: str
+    repo_digests: tuple[str, ...]
+    labels: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "repo_digests", tuple(self.repo_digests))
+        object.__setattr__(
+            self, "labels", MappingProxyType(dict(self.labels))
+        )
 
 
 def load_stable_release(path: Path) -> StableRelease:
@@ -165,6 +202,95 @@ def load_stable_release(path: Path) -> StableRelease:
         base=base,
         torch=torch,
         published_at=published_at,
+    )
+
+
+def verify_release_image(
+    release: StableRelease,
+    image: ReleaseImage,
+    *,
+    kind: Literal["base", "torch"],
+    docker: ReleaseDocker,
+) -> VerifiedImageIdentity:
+    expected_image = release.base if kind == "base" else release.torch
+    if image != expected_image:
+        raise ReleaseError(
+            f"stable release {kind} verifier received the wrong image identity"
+        )
+    try:
+        record = docker.inspect(image.reference)
+    except ReleaseError:
+        raise
+    except Exception as error:
+        raise ReleaseError(
+            f"cannot inspect exact release image {image.reference}: {error}"
+        ) from error
+    if not isinstance(record, Mapping):
+        raise ReleaseError(f"release {kind} image inspect record is invalid")
+    config_digest = record.get("Id")
+    if config_digest != image.config_digest:
+        raise ReleaseError(
+            f"release {kind} config digest does not match: {config_digest}"
+        )
+    raw_repo_digests = record.get("RepoDigests")
+    if (
+        not isinstance(raw_repo_digests, list)
+        or any(not isinstance(value, str) for value in raw_repo_digests)
+        or image.reference not in raw_repo_digests
+    ):
+        raise ReleaseError(
+            f"release {kind} RepoDigest does not include {image.reference}"
+        )
+    raw_config = record.get("Config")
+    if not isinstance(raw_config, Mapping):
+        raise ReleaseError(f"release {kind} image config is invalid")
+    raw_labels = raw_config.get("Labels")
+    if not isinstance(raw_labels, Mapping) or any(
+        not isinstance(name, str) or not isinstance(value, str)
+        for name, value in raw_labels.items()
+    ):
+        raise ReleaseError(f"release {kind} image labels are invalid")
+    labels = dict(raw_labels)
+    expected_labels = {
+        "org.opencontainers.image.source": release.source_repository,
+        "org.opencontainers.image.revision": release.source_revision,
+        "org.amd-ai.rocm.version": release.rocm_version,
+        "org.amd-ai.python.version": release.python_version,
+    }
+    artifact_paths = BASE_ARTIFACT_PATHS
+    if kind == "torch":
+        expected_labels.update(
+            {
+                "org.amd-ai.profile.id": release.torch_profile_id,
+                "org.amd-ai.profile.status": "verified",
+                "org.amd-ai.torch.version": release.torch_version,
+            }
+        )
+        artifact_paths = TORCH_ARTIFACT_PATHS
+    for name, expected in expected_labels.items():
+        if labels.get(name) != expected:
+            raise ReleaseError(
+                f"release {kind} image label {name} does not match"
+            )
+    for name, path in artifact_paths.items():
+        try:
+            actual = docker.hash_file(image.reference, path)
+        except ReleaseError:
+            raise
+        except Exception as error:
+            raise ReleaseError(
+                f"cannot hash release {kind} artifact {path}: {error}"
+            ) from error
+        expected = image.artifact_digests[name]
+        if actual != expected:
+            raise ReleaseError(
+                f"release {kind} artifact digest does not match: {path}"
+            )
+    return VerifiedImageIdentity(
+        reference=image.reference,
+        config_digest=config_digest,
+        repo_digests=tuple(raw_repo_digests),
+        labels=labels,
     )
 
 

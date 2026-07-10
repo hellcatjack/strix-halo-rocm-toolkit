@@ -5,10 +5,20 @@ from pathlib import Path
 
 import pytest
 
-from amd_ai.installer.release import ReleaseError, load_stable_release
+from amd_ai.installer.release import (
+    ReleaseError,
+    load_stable_release,
+    verify_release_image,
+)
+from tests.unit.installer.fakes import FakeReleaseDocker
 
 
 FIXTURE = Path("tests/fixtures/releases/stable.json")
+
+
+@pytest.fixture
+def release():
+    return load_stable_release(FIXTURE)
 
 
 def test_valid_release_distinguishes_manifest_and_config_digest() -> None:
@@ -95,3 +105,57 @@ def test_release_schema_rejects_duplicate_adapter(tmp_path: Path) -> None:
 
     with pytest.raises(ReleaseError, match="adapter"):
         load_stable_release(path)
+
+
+def test_verify_release_image_requires_repo_digest_config_labels_and_artifacts(
+    release,
+) -> None:
+    docker = FakeReleaseDocker.for_release(release)
+
+    identity = verify_release_image(
+        release, release.torch, kind="torch", docker=docker
+    )
+
+    assert identity.config_digest == release.torch.config_digest
+    assert identity.repo_digests == (release.torch.reference,)
+    assert docker.hash_calls == [
+        (release.torch.reference, "/opt/amd-ai/profile.env"),
+        (release.torch.reference, "/opt/amd-ai/profile.requirements.lock"),
+        (release.torch.reference, "/opt/amd-ai/torch-manifest.json"),
+    ]
+
+
+def test_verify_release_image_rejects_friendly_tag_drift(release) -> None:
+    docker = FakeReleaseDocker.for_release(release)
+    docker.records[release.torch.reference]["RepoDigests"] = [
+        release.torch.image + "@sha256:" + "9" * 64
+    ]
+
+    with pytest.raises(ReleaseError, match="RepoDigest"):
+        verify_release_image(
+            release, release.torch, kind="torch", docker=docker
+        )
+
+
+@pytest.mark.parametrize("damage", ("config", "label", "artifact", "kind"))
+def test_verify_release_image_rejects_identity_damage(
+    release, damage: str
+) -> None:
+    docker = FakeReleaseDocker.for_release(release)
+    kind = "torch"
+    if damage == "config":
+        docker.records[release.torch.reference]["Id"] = "sha256:" + "8" * 64
+    elif damage == "label":
+        config = docker.records[release.torch.reference]["Config"]
+        config["Labels"]["org.amd-ai.profile.status"] = "experimental"
+    elif damage == "artifact":
+        docker.hashes[
+            (release.torch.reference, "/opt/amd-ai/torch-manifest.json")
+        ] = "sha256:" + "8" * 64
+    else:
+        kind = "base"
+
+    with pytest.raises(ReleaseError):
+        verify_release_image(
+            release, release.torch, kind=kind, docker=docker
+        )
