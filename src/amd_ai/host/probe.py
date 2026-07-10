@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 from amd_ai.host.models import AptSourceFile, HostSnapshot, InstalledPackage
@@ -85,11 +86,17 @@ class HostProbe:
         runner: Runner,
         device_gids: dict[str, int] | None = None,
         current_group_ids: tuple[int, ...] | None = None,
+        docker_prefix: Sequence[str] = ("docker",),
+        dmesg_fallback: Sequence[str] | None = None,
     ) -> None:
         self.root = Path(root)
         self.runner = runner
         self._device_gids = device_gids
         self._current_group_ids = current_group_ids
+        self._docker_prefix = tuple(docker_prefix)
+        self._dmesg_fallback = (
+            tuple(dmesg_fallback) if dmesg_fallback is not None else None
+        )
 
     def collect(self) -> HostSnapshot:
         os_release = parse_os_release(self._read("etc/os-release"))
@@ -104,9 +111,16 @@ class HostProbe:
         )
         dkms_result = self._run(["dkms", "status"])
         docker_result = self._run(
-            ["docker", "version", "--format", "{{.Server.Version}}"]
+            [
+                *self._docker_prefix,
+                "version",
+                "--format",
+                "{{.Server.Version}}",
+            ]
         )
         dmesg_result = self._run(["dmesg", "--color=never"])
+        if dmesg_result.returncode != 0 and self._dmesg_fallback is not None:
+            dmesg_result = self._run(list(self._dmesg_fallback))
         page_size_result = self._run(["getconf", "PAGESIZE"])
 
         packages = tuple(

@@ -21,6 +21,7 @@ sudo ./bin/host-prepare plan --target-user "$USER"
 sudo ./bin/host-prepare apply --target-user "$USER"
 sudo reboot
 ./bin/image-build rocm-python
+sudo -v
 ./bin/host-verify \
   --probe-image rocm-python:7.2.1-py3.12 \
   --json reports/host-verify.json
@@ -33,7 +34,7 @@ sudo reboot
 - `bin/host-preflight`：只读采集系统、GPU、设备权限、旧 ROCm、DKMS、Docker、内存与 TTM 状态。
 - `bin/host-prepare plan`：生成有序变更计划，不修改主机。
 - `bin/host-prepare apply`：备份后按计划执行；要求 root 和精确确认。
-- `bin/host-verify`：重启后检查 live TTM、内核 GPU 错误和容器内 `gfx1151`。
+- `bin/host-verify`：重启后检查 live TTM、内核 GPU 错误和容器内 `gfx1151`；受限资源只使用固定的非交互 sudo 回退。
 - `bin/image-build`：按固定锁构建 ROCm/Python、稳定或 experimental PyTorch 镜像，并提供安全清理预览。
 - `bin/container-check`：在指定镜像中执行元数据或 GPU runtime 检查。
 - `bin/container-check --suite stable`：执行完整 `gfx1151` 硬件资格门禁。

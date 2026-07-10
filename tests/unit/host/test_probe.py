@@ -50,6 +50,36 @@ def test_probe_records_dmesg_command_failure():
     assert "operation not permitted" in snapshot.dmesg
 
 
+def test_probe_retries_restricted_dmesg_with_configured_fallback():
+    runner = FakeRunner.healthy_target()
+    dmesg_args = ("dmesg", "--color=never")
+    fallback_args = ("sudo", "-n", "dmesg", "--color=never")
+    runner.responses[dmesg_args] = CommandResult(
+        dmesg_args,
+        1,
+        "",
+        "operation not permitted",
+    )
+    runner.responses[fallback_args] = CommandResult(
+        fallback_args,
+        0,
+        "amdgpu: 512M of VRAM memory ready\n",
+        "",
+    )
+
+    snapshot = HostProbe(
+        root=Path("tests/fixtures/host/healthy"),
+        runner=runner,
+        device_gids={},
+        current_group_ids=(),
+        dmesg_fallback=fallback_args,
+    ).collect()
+
+    assert snapshot.dmesg_available is True
+    assert snapshot.dedicated_vram_mib == 512
+    assert runner.calls.index(dmesg_args) < runner.calls.index(fallback_args)
+
+
 def test_probe_records_radeon_origin_for_old_rocm_package():
     snapshot = HostProbe(
         root=Path("tests/fixtures/host/healthy"),

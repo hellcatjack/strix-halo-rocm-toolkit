@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from amd_ai.host.models import HostSnapshot
@@ -125,8 +126,13 @@ def evaluate_post_reboot(snapshot: HostSnapshot) -> Report:
     )
 
 
-def build_probe_argv(*, image: str, device_gids: dict[str, int]) -> list[str]:
-    argv = ["docker", "run", "--rm"]
+def build_probe_argv(
+    *,
+    image: str,
+    device_gids: dict[str, int],
+    docker_prefix: Sequence[str] = ("docker",),
+) -> list[str]:
+    argv = [*docker_prefix, "run", "--rm"]
     if "/dev/kfd" in device_gids:
         argv.extend(("--device", "/dev/kfd"))
     if any(path.startswith("/dev/dri/render") for path in device_gids):
@@ -152,12 +158,23 @@ def build_probe_argv(*, image: str, device_gids: dict[str, int]) -> list[str]:
     return argv
 
 
-def verify_host(snapshot: HostSnapshot, *, image: str, runner: Runner) -> Report:
+def verify_host(
+    snapshot: HostSnapshot,
+    *,
+    image: str,
+    runner: Runner,
+    docker_prefix: Sequence[str] = ("docker",),
+) -> Report:
     host_report = evaluate_post_reboot(snapshot)
     if host_report.status == Status.BLOCKED:
         outcome = ProbeOutcome(image, None, None, "", ())
     else:
-        outcome = _run_container_probe(snapshot, image=image, runner=runner)
+        outcome = _run_container_probe(
+            snapshot,
+            image=image,
+            runner=runner,
+            docker_prefix=docker_prefix,
+        )
 
     findings = host_report.findings + outcome.findings
     status = Status.BLOCKED if outcome.findings else host_report.status
@@ -182,9 +199,10 @@ def _run_container_probe(
     *,
     image: str,
     runner: Runner,
+    docker_prefix: Sequence[str],
 ) -> ProbeOutcome:
     inspect_args = (
-        "docker",
+        *docker_prefix,
         "image",
         "inspect",
         "--format",
@@ -230,7 +248,13 @@ def _run_container_probe(
             ),
         )
 
-    probe_args = tuple(build_probe_argv(image=image, device_gids=snapshot.device_gids))
+    probe_args = tuple(
+        build_probe_argv(
+            image=image,
+            device_gids=snapshot.device_gids,
+            docker_prefix=docker_prefix,
+        )
+    )
     probe_result = _run_optional(runner, probe_args)
     output = f"{probe_result.stdout}\n{probe_result.stderr}".strip()
     if probe_result.returncode != 0:

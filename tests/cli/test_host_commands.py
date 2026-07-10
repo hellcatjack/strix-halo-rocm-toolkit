@@ -3,6 +3,8 @@ from pathlib import Path
 
 from amd_ai import cli
 from amd_ai.cli import main
+from amd_ai.runner import CommandResult
+from tests.unit.host.fakes import FakeRunner
 
 
 def test_preflight_fixture_writes_json_without_using_host_commands(tmp_path, capsys):
@@ -98,6 +100,26 @@ def test_prepare_resolves_groups_for_target_user_not_sudo_process(monkeypatch):
         fixture_root=Path("fixture"),
         fixture_group_ids=(109,),
     ) == (109,)
+
+
+def test_docker_prefix_detection_falls_back_to_noninteractive_sudo():
+    direct = ("docker", "version", "--format", "{{.Server.Version}}")
+    fallback = (
+        "sudo",
+        "-n",
+        "docker",
+        "version",
+        "--format",
+        "{{.Server.Version}}",
+    )
+    runner = FakeRunner(
+        {
+            direct: CommandResult(direct, 1, "", "permission denied"),
+            fallback: CommandResult(fallback, 0, "27.5.1\n", ""),
+        }
+    )
+
+    assert cli._detect_docker_prefix(runner) == ("sudo", "-n", "docker")
 
 
 def test_verify_fixture_requires_recorded_kernel_even_when_probe_passes(tmp_path):

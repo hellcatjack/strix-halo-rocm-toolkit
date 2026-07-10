@@ -391,7 +391,7 @@ def _run_live(argv: Sequence[str]) -> int:
 
 
 def _host_preflight(fixture_root: Path | None, json_path: Path | None) -> int:
-    snapshot, _, _ = _collect_host(fixture_root)
+    snapshot, _, _, _ = _collect_host(fixture_root)
     report = evaluate_preflight(snapshot)
     for finding in report.findings:
         print(f"[{finding.severity.value}] {finding.code}: {finding.summary}")
@@ -407,7 +407,7 @@ def _host_preflight(fixture_root: Path | None, json_path: Path | None) -> int:
 
 
 def _host_prepare(args: argparse.Namespace) -> int:
-    snapshot, runner, root = _collect_host(args.fixture_root)
+    snapshot, runner, root, _ = _collect_host(args.fixture_root)
     target_user = args.target_user or os.environ.get("SUDO_USER") or getpass.getuser()
     try:
         snapshot = replace(
@@ -473,8 +473,13 @@ def _host_verify(
     probe_image: str,
     json_path: Path | None,
 ) -> int:
-    snapshot, runner, _ = _collect_host(fixture_root)
-    report = verify_host(snapshot, image=probe_image, runner=runner)
+    snapshot, runner, _, docker_prefix = _collect_host(fixture_root)
+    report = verify_host(
+        snapshot,
+        image=probe_image,
+        runner=runner,
+        docker_prefix=docker_prefix,
+    )
     for finding in report.findings:
         print(f"[{finding.severity.value}] {finding.code}: {finding.summary}")
     if json_path is not None:
@@ -486,25 +491,45 @@ def _host_verify(
 
 def _collect_host(
     fixture_root: Path | None,
-) -> tuple[HostSnapshot, Runner, Path]:
+) -> tuple[HostSnapshot, Runner, Path, tuple[str, ...]]:
     if fixture_root is None:
         root = Path("/")
         runner = SubprocessRunner()
         device_gids = None
         current_group_ids = None
+        docker_prefix = _detect_docker_prefix(runner)
+        dmesg_fallback = ("sudo", "-n", "dmesg", "--color=never")
     else:
         root = fixture_root
         runner = FixtureRunner.from_root(root)
         device_gids = load_fixture_device_gids(root)
         current_group_ids = tuple(sorted(set(device_gids.values())))
+        docker_prefix = ("docker",)
+        dmesg_fallback = None
 
     snapshot = HostProbe(
         root=root,
         runner=runner,
         device_gids=device_gids,
         current_group_ids=current_group_ids,
+        docker_prefix=docker_prefix,
+        dmesg_fallback=dmesg_fallback,
     ).collect()
-    return snapshot, runner, root
+    return snapshot, runner, root, docker_prefix
+
+
+def _detect_docker_prefix(runner: Runner) -> tuple[str, ...]:
+    for prefix in (("docker",), ("sudo", "-n", "docker")):
+        try:
+            result = runner.run(
+                [*prefix, "version", "--format", "{{.Server.Version}}"],
+                check=False,
+            )
+        except OSError:
+            continue
+        if result.returncode == 0:
+            return prefix
+    return ("docker",)
 
 
 def _target_user_group_ids(

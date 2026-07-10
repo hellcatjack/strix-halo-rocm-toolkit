@@ -17,9 +17,15 @@ def finding_codes(report):
     return {finding.code for finding in report.findings}
 
 
-def probe_runner(*, inspect_returncode=0, probe_returncode=0, output="gfx1151\n"):
+def probe_runner(
+    *,
+    inspect_returncode=0,
+    probe_returncode=0,
+    output="gfx1151\n",
+    docker_prefix=("docker",),
+):
     inspect_args = (
-        "docker",
+        *docker_prefix,
         "image",
         "inspect",
         "--format",
@@ -30,6 +36,7 @@ def probe_runner(*, inspect_returncode=0, probe_returncode=0, output="gfx1151\n"
         build_probe_argv(
             image=PROBE_IMAGE,
             device_gids={"/dev/kfd": 109, "/dev/dri/renderD128": 110},
+            docker_prefix=docker_prefix,
         )
     )
     return FakeRunner(
@@ -75,6 +82,22 @@ def test_probe_uses_devices_and_actual_gids():
         "--json",
         "-",
     ]
+
+
+def test_verify_uses_configured_docker_prefix_for_all_probe_commands():
+    docker_prefix = ("sudo", "-n", "docker")
+    runner = probe_runner(docker_prefix=docker_prefix)
+
+    report = verify_host(
+        healthy_snapshot(kernel="6.14.0-1018-oem"),
+        image=PROBE_IMAGE,
+        runner=runner,
+        docker_prefix=docker_prefix,
+    )
+
+    assert report.status == Status.PASS
+    assert runner.calls
+    assert all(call[:3] == docker_prefix for call in runner.calls)
 
 
 @pytest.mark.parametrize(

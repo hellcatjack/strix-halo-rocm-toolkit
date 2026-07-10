@@ -104,6 +104,7 @@ sudo reboot
 
 ```bash
 ./bin/image-build rocm-python
+sudo -v
 ./bin/host-verify \
   --probe-image rocm-python:7.2.1-py3.12 \
   --json reports/host-verify.json
@@ -117,7 +118,7 @@ sudo reboot
 - 容器输出包含 `gfx1151`；
 - 当前启动的 `dmesg` 中没有 MES timeout、GPU reset、amdgpu page fault、firmware 加载失败或 ring timeout。
 
-`dmesg` 无法读取时会得到 `HOST.DMESG_UNAVAILABLE`，不会把空输出当成“没有 GPU 错误”。`host-verify` 只有在宿主检查和容器探针均正式通过时返回 0。满足最低要求但未登记的 OEM 内核保持 `unverified` 并返回 1；阻断错误返回 2。
+`host-verify` 本身保持以普通目标用户运行，以便正确判断该用户的设备组；普通 `dmesg` 或 Docker daemon 不可访问时，只回退到固定的 `sudo -n dmesg` 与 `sudo -n docker` 命令。先运行 `sudo -v` 可刷新凭据，但不会让整条验证流程以 root 身份误判用户权限。两条路径都无法读取 dmesg 时会得到 `HOST.DMESG_UNAVAILABLE`，不会把空输出当成“没有 GPU 错误”。`host-verify` 只有在宿主检查和容器探针均正式通过时返回 0。满足最低要求但未登记的 OEM 内核保持 `unverified` 并返回 1；阻断错误返回 2。
 
 ## 4. 备份与恢复
 
