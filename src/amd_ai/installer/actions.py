@@ -6,7 +6,7 @@ import pwd
 import re
 import shutil
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -14,7 +14,7 @@ from amd_ai.doctor.checks import run_doctor
 from amd_ai.doctor.models import DoctorReport
 from amd_ai.host.adapters.base import select_adapter
 from amd_ai.host.apply import execute_plan
-from amd_ai.host.models import HostSnapshot, PreparePlan
+from amd_ai.host.models import HostSnapshot, PlannedAction, PreparePlan
 from amd_ai.host.policy import evaluate_preflight
 from amd_ai.host.prepare import create_prepare_plan, with_docker_group_action
 from amd_ai.host.probe import HostProbe
@@ -27,7 +27,14 @@ from amd_ai.image.build import (
     run_image_check,
 )
 from amd_ai.image.publish import DockerPublishRegistry
-from amd_ai.installer.models import DiskSpaceEstimate, StageResult, StableRelease
+from amd_ai.installer.models import (
+    DiskSpaceEstimate,
+    InstallOptions,
+    InstallStage,
+    InstallState,
+    StageResult,
+    StableRelease,
+)
 from amd_ai.installer.release import (
     ReleaseDocker,
     VerifiedReleaseImages,
@@ -51,7 +58,7 @@ from amd_ai.project.runtime import (
     discover_gpu_access,
     read_mem_total_kib,
 )
-from amd_ai.report import Report, Status
+from amd_ai.report import Finding, Report, Severity, Status
 from amd_ai.runner import Runner, SubprocessRunner
 
 
@@ -80,7 +87,7 @@ class ActionError(RuntimeError):
 
 @dataclass(frozen=True)
 class HostPlanResult:
-    snapshot: HostSnapshot
+    snapshot: HostSnapshot | None
     plan: PreparePlan
     plan_digest: str
     adapter_id: str
@@ -116,6 +123,9 @@ class ProductionInstallerActions:
         docker_prefix: Sequence[str] = ("docker",),
         release_docker: ReleaseDocker | None = None,
         effective_uid: int | None = None,
+        non_interactive: bool = False,
+        sudo_run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        toolkit_root: Path | None = None,
     ) -> None:
         if not docker_prefix or any(
             not isinstance(value, str) or not value or "\0" in value
@@ -131,6 +141,33 @@ class ProductionInstallerActions:
         self.effective_uid = (
             os.geteuid() if effective_uid is None else effective_uid
         )
+        self.non_interactive = non_interactive
+        self.sudo_run = sudo_run
+        self.toolkit_root = (
+            Path(__file__).resolve().parents[3]
+            if toolkit_root is None
+            else Path(toolkit_root).resolve()
+        )
+        self._input_snapshots: dict[InstallStage, HostSnapshot] = {}
+
+    def stage_inputs(
+        self,
+        stage: InstallStage,
+        options: InstallOptions,
+        state: InstallState,
+    ) -> object:
+        del options
+        if stage is not InstallStage.CONTAINER_HOST_CHECK:
+            return {}
+        del state
+        snapshot = self._snapshot()
+        self._input_snapshots[stage] = snapshot
+        report = evaluate_preflight(snapshot)
+        return {
+            "facts": report.facts,
+            "status": report.status.value,
+            "dmesg_available": snapshot.dmesg_available,
+        }
 
     def bootstrap(self, *, source_root: Path, revision: str) -> StageResult:
         return StageResult(
@@ -149,6 +186,11 @@ class ProductionInstallerActions:
         target_user: str,
         memory_gib: int | None = None,
     ) -> HostPlanResult:
+        if self.effective_uid != 0:
+            return self._sudo_host_plan(
+                target_user=target_user,
+                memory_gib=memory_gib,
+            )
         snapshot = self._snapshot(target_user=target_user)
         adapter = select_adapter(snapshot)
         if adapter is None:
@@ -171,6 +213,13 @@ class ProductionInstallerActions:
         *,
         include_docker_group: bool,
     ) -> StageResult:
+        if self.effective_uid != 0:
+            return self._sudo_host_apply(
+                host_plan,
+                include_docker_group=include_docker_group,
+            )
+        if host_plan.snapshot is None:
+            raise ActionError("root host apply requires a fresh host snapshot")
         plan = (
             with_docker_group_action(host_plan.plan)
             if include_docker_group
@@ -195,12 +244,157 @@ class ProductionInstallerActions:
             }
         )
 
+    def _sudo_host_plan(
+        self, *, target_user: str, memory_gib: int | None
+    ) -> HostPlanResult:
+        command = self._sudo_helper_command()
+        if memory_gib is not None:
+            command.extend(("--memory-gib", str(memory_gib)))
+        command.extend(("--target-user", target_user, "plan"))
+        payload = self._run_sudo_helper(command, operation="host plan")
+        _require_exact_keys(
+            "privileged host plan",
+            payload,
+            {"schema_version", "adapter_id", "plan", "plan_digest"},
+        )
+        if payload["schema_version"] != 1:
+            raise ActionError("privileged host plan schema is invalid")
+        adapter_id = payload["adapter_id"]
+        plan_digest = payload["plan_digest"]
+        if not isinstance(adapter_id, str) or not adapter_id:
+            raise ActionError("privileged host adapter ID is invalid")
+        if (
+            not isinstance(plan_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", plan_digest) is None
+        ):
+            raise ActionError("privileged host plan digest is invalid")
+        plan = prepare_plan_from_payload(payload["plan"])
+        if plan.target_user != target_user:
+            raise ActionError("privileged host plan target user changed")
+        if stage_input_digest(prepare_plan_payload(plan)) != plan_digest:
+            raise ActionError("privileged host plan digest does not match payload")
+        return HostPlanResult(
+            snapshot=None,
+            plan=plan,
+            plan_digest=plan_digest,
+            adapter_id=adapter_id,
+        )
+
+    def _sudo_host_apply(
+        self,
+        host_plan: HostPlanResult,
+        *,
+        include_docker_group: bool,
+    ) -> StageResult:
+        command = self._sudo_helper_command()
+        command.extend(
+            (
+                "--target-user",
+                host_plan.plan.target_user,
+                "--expected-plan-digest",
+                host_plan.plan_digest,
+            )
+        )
+        if include_docker_group:
+            command.append("--include-docker-group")
+        command.append("apply")
+        payload = self._run_sudo_helper(command, operation="host apply")
+        _require_exact_keys(
+            "privileged host apply",
+            payload,
+            {"schema_version", "facts"},
+        )
+        if payload["schema_version"] != 1 or not isinstance(
+            payload["facts"], dict
+        ):
+            raise ActionError("privileged host apply result is invalid")
+        facts = payload["facts"]
+        expected = {
+            "backup_path",
+            "docker_group_added",
+            "executed_codes",
+            "reboot_required",
+            "skipped_codes",
+        }
+        _require_exact_keys("privileged host apply facts", facts, expected)
+        if (
+            not isinstance(facts["backup_path"], str)
+            or not facts["backup_path"].startswith("/")
+            or type(facts["docker_group_added"]) is not bool
+            or type(facts["reboot_required"]) is not bool
+            or not _string_list(facts["executed_codes"])
+            or not _string_list(facts["skipped_codes"])
+        ):
+            raise ActionError("privileged host apply facts are invalid")
+        return StageResult(facts=facts)
+
+    def _sudo_host_verify(self) -> Report:
+        command = self._sudo_helper_command()
+        command.append("verify")
+        payload = self._run_sudo_helper(command, operation="host verify")
+        _require_exact_keys(
+            "privileged host verify",
+            payload,
+            {"schema_version", "report"},
+        )
+        if payload["schema_version"] != 1:
+            raise ActionError("privileged host verify schema is invalid")
+        return report_from_payload(payload["report"])
+
+    def _sudo_helper_command(self) -> list[str]:
+        command = ["sudo"]
+        if self.non_interactive:
+            command.append("-n")
+        command.extend(
+            (
+                "--",
+                "env",
+                f"PYTHONPATH={self.toolkit_root / 'src'}",
+                "python3.12",
+                "-m",
+                "amd_ai.installer.privileged",
+            )
+        )
+        return command
+
+    def _run_sudo_helper(
+        self, command: list[str], *, operation: str
+    ) -> dict[str, object]:
+        try:
+            result = self.sudo_run(
+                command,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ActionError(f"cannot run privileged {operation}: {error}") from error
+        if result.returncode != 0:
+            evidence = result.stderr.strip() or result.stdout.strip() or "no output"
+            raise ActionError(f"privileged {operation} failed: {evidence}")
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise ActionError(
+                f"privileged {operation} returned invalid JSON"
+            ) from error
+        if not isinstance(payload, dict):
+            raise ActionError(f"privileged {operation} result is not an object")
+        return payload
+
     def host_verify(self, *, image: str = ROCM_PYTHON_TAG) -> Report:
         del image
+        if self.effective_uid != 0:
+            return self._sudo_host_verify()
         return evaluate_post_reboot(self._snapshot())
 
     def container_host_check(self) -> StageResult:
-        snapshot = self._snapshot()
+        snapshot = self._input_snapshots.pop(
+            InstallStage.CONTAINER_HOST_CHECK, None
+        )
+        if snapshot is None:
+            snapshot = self._snapshot()
         report = evaluate_preflight(snapshot)
         adapter = select_adapter(snapshot)
         reasons: list[str] = []
@@ -499,6 +693,145 @@ def prepare_plan_payload(plan: PreparePlan) -> dict[str, object]:
         "actions": [asdict(action) for action in plan.actions],
         "reboot_required": plan.reboot_required,
     }
+
+
+def prepare_plan_from_payload(value: object) -> PreparePlan:
+    if not isinstance(value, dict):
+        raise ActionError("privileged host plan payload is not an object")
+    _require_exact_keys(
+        "privileged host plan payload",
+        value,
+        {"supported", "target_user", "actions", "reboot_required"},
+    )
+    if (
+        type(value["supported"]) is not bool
+        or type(value["reboot_required"]) is not bool
+        or not isinstance(value["target_user"], str)
+        or not value["target_user"]
+        or not isinstance(value["actions"], list)
+    ):
+        raise ActionError("privileged host plan payload fields are invalid")
+    actions: list[PlannedAction] = []
+    for raw in value["actions"]:
+        if not isinstance(raw, dict):
+            raise ActionError("privileged host plan action is not an object")
+        _require_exact_keys(
+            "privileged host plan action",
+            raw,
+            {"code", "summary", "argv", "privileged", "input_text"},
+        )
+        input_text = raw["input_text"]
+        if (
+            not isinstance(raw["code"], str)
+            or not raw["code"]
+            or not isinstance(raw["summary"], str)
+            or not raw["summary"]
+            or not _string_list(raw["argv"])
+            or type(raw["privileged"]) is not bool
+            or (input_text is not None and not isinstance(input_text, str))
+        ):
+            raise ActionError("privileged host plan action fields are invalid")
+        actions.append(
+            PlannedAction(
+                code=raw["code"],
+                summary=raw["summary"],
+                argv=tuple(raw["argv"]),
+                privileged=raw["privileged"],
+                input_text=input_text,
+            )
+        )
+    return PreparePlan(
+        supported=value["supported"],
+        target_user=value["target_user"],
+        actions=tuple(actions),
+        reboot_required=value["reboot_required"],
+    )
+
+
+def report_from_payload(value: object) -> Report:
+    if not isinstance(value, dict):
+        raise ActionError("privileged host report is not an object")
+    _require_exact_keys(
+        "privileged host report",
+        value,
+        {
+            "schema_version",
+            "command",
+            "status",
+            "generated_at",
+            "facts",
+            "findings",
+        },
+    )
+    if (
+        value["schema_version"] != 1
+        or value["command"] != "host-verify"
+        or not isinstance(value["generated_at"], str)
+        or not value["generated_at"].endswith("Z")
+        or not isinstance(value["facts"], dict)
+        or not isinstance(value["findings"], list)
+    ):
+        raise ActionError("privileged host report fields are invalid")
+    try:
+        status = Status(value["status"])
+    except (TypeError, ValueError) as error:
+        raise ActionError("privileged host report status is invalid") from error
+    findings: list[Finding] = []
+    for raw in value["findings"]:
+        if not isinstance(raw, dict):
+            raise ActionError("privileged host report finding is invalid")
+        _require_exact_keys(
+            "privileged host report finding",
+            raw,
+            {"code", "severity", "summary", "evidence", "remediation"},
+        )
+        try:
+            severity = Severity(raw["severity"])
+        except (TypeError, ValueError) as error:
+            raise ActionError(
+                "privileged host report finding severity is invalid"
+            ) from error
+        text_fields = ("code", "summary", "evidence", "remediation")
+        if any(
+            not isinstance(raw[name], str) or "\0" in raw[name]
+            for name in text_fields
+        ):
+            raise ActionError(
+                "privileged host report finding text is invalid"
+            )
+        findings.append(
+            Finding(
+                code=raw["code"],
+                severity=severity,
+                summary=raw["summary"],
+                evidence=raw["evidence"],
+                remediation=raw["remediation"],
+            )
+        )
+    return Report(
+        command="host-verify",
+        status=status,
+        generated_at=value["generated_at"],
+        facts=value["facts"],
+        findings=tuple(findings),
+    )
+
+
+def _require_exact_keys(
+    label: str, value: Mapping[str, object], expected: set[str]
+) -> None:
+    actual = set(value)
+    if actual != expected:
+        raise ActionError(
+            f"{label} keys are invalid: "
+            f"missing={sorted(expected - actual)}, unknown={sorted(actual - expected)}"
+        )
+
+
+def _string_list(value: object) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(item, str) and item and "\0" not in item for item in value
+    )
 
 
 def validate_local_build_source(

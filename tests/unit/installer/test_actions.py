@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from collections import namedtuple
 from pathlib import Path
@@ -59,7 +60,9 @@ def test_host_plan_uses_existing_probe_and_prepare_policy(
         actions, "_target_user_group_ids", lambda target_user: (109, 110)
     )
 
-    result = ProductionInstallerActions().host_plan(target_user="developer")
+    result = ProductionInstallerActions(effective_uid=0).host_plan(
+        target_user="developer"
+    )
 
     assert calls == ["HostProbe.collect", "create_prepare_plan"]
     assert result.plan == expected
@@ -266,3 +269,115 @@ def test_default_release_registry_pull_uses_empty_auth_context(
     registry.pull("ghcr.io/example/image@sha256:" + "a" * 64)
 
     assert captured == ["ghcr.io/example/image@sha256:" + "a" * 64]
+
+
+def test_nonroot_host_plan_is_recreated_by_audited_sudo_helper() -> None:
+    plan = PreparePlan(
+        supported=True,
+        target_user="developer",
+        actions=(),
+        reboot_required=True,
+    )
+    digest = stage_input_digest(prepare_plan_payload(plan))
+    response = json.dumps(
+        {
+            "adapter_id": "ubuntu-24.04",
+            "plan": prepare_plan_payload(plan),
+            "plan_digest": digest,
+            "schema_version": 1,
+        }
+    )
+    captured: list[tuple[str, ...]] = []
+
+    def sudo_run(argv, **kwargs):
+        del kwargs
+        captured.append(tuple(argv))
+        return subprocess.CompletedProcess(argv, 0, response, "")
+
+    result = ProductionInstallerActions(
+        effective_uid=1000,
+        non_interactive=True,
+        sudo_run=sudo_run,
+    ).host_plan(target_user="developer")
+
+    assert result.snapshot is None
+    assert result.plan == plan
+    assert result.plan_digest == digest
+    assert captured[0][:3] == ("sudo", "-n", "--")
+    assert "amd_ai.installer.privileged" in captured[0]
+    assert captured[0][-3:] == ("--target-user", "developer", "plan")
+
+
+def test_nonroot_host_apply_passes_only_digest_and_never_reboot() -> None:
+    plan = PreparePlan(
+        supported=True,
+        target_user="developer",
+        actions=(),
+        reboot_required=True,
+    )
+    digest = stage_input_digest(prepare_plan_payload(plan))
+    host_plan = actions.HostPlanResult(
+        snapshot=None,
+        plan=plan,
+        plan_digest=digest,
+        adapter_id="ubuntu-24.04",
+    )
+    captured: list[tuple[str, ...]] = []
+
+    def sudo_run(argv, **kwargs):
+        del kwargs
+        captured.append(tuple(argv))
+        payload = {
+            "facts": {
+                "backup_path": "/var/backups/amd-ai/fixture",
+                "docker_group_added": False,
+                "executed_codes": [],
+                "reboot_required": True,
+                "skipped_codes": ["HOST.REBOOT"],
+            },
+            "schema_version": 1,
+        }
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    result = ProductionInstallerActions(
+        effective_uid=1000,
+        non_interactive=True,
+        sudo_run=sudo_run,
+    ).host_apply(host_plan, include_docker_group=False)
+
+    assert result.facts["reboot_required"] is True
+    command = captured[0]
+    assert "--expected-plan-digest" in command
+    assert digest in command
+    assert "reboot" not in command
+
+
+def test_nonroot_host_verify_uses_privileged_read_only_helper() -> None:
+    report = {
+        "command": "host-verify",
+        "facts": {"kernel": "6.14.0-1018-oem"},
+        "findings": [],
+        "generated_at": "2026-07-10T12:00:00Z",
+        "schema_version": 1,
+        "status": "pass",
+    }
+    captured: list[tuple[str, ...]] = []
+
+    def sudo_run(argv, **kwargs):
+        del kwargs
+        captured.append(tuple(argv))
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps({"report": report, "schema_version": 1}),
+            "",
+        )
+
+    result = ProductionInstallerActions(
+        effective_uid=1000,
+        sudo_run=sudo_run,
+    ).host_verify()
+
+    assert result.status.value == "pass"
+    assert captured[0][-1] == "verify"
+    assert "apply" not in captured[0]

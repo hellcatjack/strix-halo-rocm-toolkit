@@ -493,7 +493,9 @@ def _install_command(args: argparse.Namespace) -> int:
         actions = FixtureInstallerActions(Path(fixture_root))
         workflow_arguments["boot_id_reader"] = actions.read_boot_id
     else:
-        actions = ProductionInstallerActions()
+        actions = ProductionInstallerActions(
+            non_interactive=args.non_interactive
+        )
     workflow = InstallerWorkflow(
         options=options,
         actions=actions,

@@ -72,7 +72,9 @@ def test_install_dispatch_constructs_workflow_once(
 
     monkeypatch.setenv("AMD_AI_INSTALLER_SOURCE_REVISION", "a" * 40)
     monkeypatch.setattr(cli, "InstallerWorkflow", Workflow)
-    monkeypatch.setattr(cli, "ProductionInstallerActions", lambda: "actions")
+    monkeypatch.setattr(
+        cli, "ProductionInstallerActions", lambda **kwargs: "actions"
+    )
 
     code = cli.main(
         [
