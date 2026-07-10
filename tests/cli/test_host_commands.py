@@ -1,5 +1,7 @@
 import json
+from pathlib import Path
 
+from amd_ai import cli
 from amd_ai.cli import main
 
 
@@ -73,6 +75,29 @@ def test_prepare_apply_rejects_any_confirmation_except_apply(monkeypatch, capsys
 
     assert code == 2
     assert "confirmation" in capsys.readouterr().err.lower()
+
+
+def test_prepare_resolves_groups_for_target_user_not_sudo_process(monkeypatch):
+    class User:
+        pw_gid = 1000
+
+    monkeypatch.setattr(cli.pwd, "getpwnam", lambda name: User())
+    monkeypatch.setattr(
+        cli.os,
+        "getgrouplist",
+        lambda name, primary_gid: [primary_gid, 109, 110],
+    )
+
+    assert cli._target_user_group_ids(
+        "customer",
+        fixture_root=None,
+        fixture_group_ids=(0,),
+    ) == (109, 110, 1000)
+    assert cli._target_user_group_ids(
+        "fixture-user",
+        fixture_root=Path("fixture"),
+        fixture_group_ids=(109,),
+    ) == (109,)
 
 
 def test_verify_fixture_requires_recorded_kernel_even_when_probe_passes(tmp_path):

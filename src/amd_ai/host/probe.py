@@ -139,8 +139,17 @@ class HostProbe:
             apt_sources=self._read_apt_sources(),
             dkms_status=dkms_result.stdout.strip(),
             docker_version=docker_result.stdout.strip() if docker_result.returncode == 0 else None,
-            dmesg=dmesg_result.stdout,
-            dedicated_vram_mib=parse_vram_mib(dmesg_result.stdout),
+            dmesg=(
+                dmesg_result.stdout
+                if dmesg_result.returncode == 0
+                else dmesg_result.stderr or dmesg_result.stdout
+            ),
+            dmesg_available=dmesg_result.returncode == 0,
+            dedicated_vram_mib=(
+                parse_vram_mib(dmesg_result.stdout)
+                if dmesg_result.returncode == 0
+                else None
+            ),
         )
 
     def _run(self, args: list[str]) -> CommandResult:

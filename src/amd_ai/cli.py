@@ -4,6 +4,7 @@ import argparse
 import getpass
 import json
 import os
+import pwd
 import shlex
 import subprocess
 import sys
@@ -16,7 +17,11 @@ from amd_ai import __version__
 from amd_ai.host.apply import ApplyError, ApplyRefused, execute_plan
 from amd_ai.host.models import HostSnapshot, PlannedAction, PreparePlan
 from amd_ai.host.policy import evaluate_preflight
-from amd_ai.host.prepare import UnsupportedHostError, create_prepare_plan
+from amd_ai.host.prepare import (
+    HostPlanningError,
+    UnsupportedHostError,
+    create_prepare_plan,
+)
 from amd_ai.host.probe import FixtureRunner, HostProbe, load_fixture_device_gids
 from amd_ai.host.verify import verify_host
 from amd_ai.image.build import (
@@ -405,12 +410,20 @@ def _host_prepare(args: argparse.Namespace) -> int:
     snapshot, runner, root = _collect_host(args.fixture_root)
     target_user = args.target_user or os.environ.get("SUDO_USER") or getpass.getuser()
     try:
+        snapshot = replace(
+            snapshot,
+            current_group_ids=_target_user_group_ids(
+                target_user,
+                fixture_root=args.fixture_root,
+                fixture_group_ids=snapshot.current_group_ids,
+            ),
+        )
         plan = create_prepare_plan(
             snapshot,
             target_user=target_user,
             memory_gib=args.memory_gib,
         )
-    except (UnsupportedHostError, ValueError) as error:
+    except (HostPlanningError, UnsupportedHostError, ValueError) as error:
         print(f"host-prepare: {error}", file=sys.stderr)
         return 2
 
@@ -492,6 +505,24 @@ def _collect_host(
         current_group_ids=current_group_ids,
     ).collect()
     return snapshot, runner, root
+
+
+def _target_user_group_ids(
+    target_user: str,
+    *,
+    fixture_root: Path | None,
+    fixture_group_ids: tuple[int, ...],
+) -> tuple[int, ...]:
+    if fixture_root is not None:
+        return fixture_group_ids
+    try:
+        user = pwd.getpwnam(target_user)
+        group_ids = os.getgrouplist(target_user, user.pw_gid)
+    except (KeyError, OSError) as error:
+        raise UnsupportedHostError(
+            f"cannot resolve groups for target user {target_user!r}"
+        ) from error
+    return tuple(sorted(set(group_ids)))
 
 
 def _print_plan(plan: PreparePlan) -> None:

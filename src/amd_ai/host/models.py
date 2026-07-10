@@ -38,6 +38,7 @@ class HostSnapshot:
     dkms_status: str
     docker_version: str | None
     dmesg: str
+    dmesg_available: bool
     dedicated_vram_mib: int | None
 
 

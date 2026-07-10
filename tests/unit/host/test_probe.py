@@ -2,6 +2,7 @@ import shutil
 from pathlib import Path
 
 from amd_ai.host.probe import HostProbe
+from amd_ai.runner import CommandResult
 from tests.unit.host.fakes import FakeRunner
 
 
@@ -25,6 +26,28 @@ def test_probe_collects_target_snapshot():
     assert snapshot.dedicated_vram_mib == 512
     assert snapshot.device_gids == {"/dev/kfd": 0, "/dev/dri/renderD128": 128}
     assert snapshot.docker_version == "27.5.1"
+    assert snapshot.dmesg_available is True
+
+
+def test_probe_records_dmesg_command_failure():
+    runner = FakeRunner.healthy_target()
+    dmesg_args = ("dmesg", "--color=never")
+    runner.responses[dmesg_args] = CommandResult(
+        dmesg_args,
+        1,
+        "",
+        "operation not permitted",
+    )
+
+    snapshot = HostProbe(
+        root=Path("tests/fixtures/host/healthy"),
+        runner=runner,
+        device_gids={},
+        current_group_ids=(),
+    ).collect()
+
+    assert snapshot.dmesg_available is False
+    assert "operation not permitted" in snapshot.dmesg
 
 
 def test_probe_records_radeon_origin_for_old_rocm_package():

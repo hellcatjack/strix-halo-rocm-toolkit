@@ -4,7 +4,9 @@ from dataclasses import replace
 import pytest
 
 from amd_ai.host.models import AptSourceFile, InstalledPackage
+from amd_ai.host.parsers import GpuPciInfo
 from amd_ai.host.prepare import (
+    HostPlanningError,
     UnsupportedHostError,
     cleanup_candidates,
     create_prepare_plan,
@@ -115,6 +117,20 @@ def test_old_radeon_source_detection_ignores_comments_and_new_repositories():
     assert json.loads(action.input_text) == ["etc/apt/sources.list.d/rocm64.list"]
 
 
+def test_mixed_apt_source_file_is_never_disabled_wholesale():
+    mixed = AptSourceFile(
+        "etc/apt/sources.list",
+        "deb http://archive.ubuntu.com/ubuntu noble main\n"
+        "deb https://repo.radeon.com/rocm/apt/6.4 noble main\n",
+    )
+
+    with pytest.raises(HostPlanningError, match="mixed"):
+        create_prepare_plan(
+            replace(healthy_snapshot(), apt_sources=(mixed,)),
+            target_user="customer",
+        )
+
+
 def test_plan_uses_exact_kernel_tools_and_ttm_commands():
     snapshot = healthy_snapshot(
         docker_version=None,
@@ -179,3 +195,13 @@ def test_unknown_distribution_refuses_to_create_a_write_plan():
             target_user="customer",
         )
 
+
+def test_missing_target_gpu_refuses_to_create_a_write_plan():
+    with pytest.raises(HostPlanningError, match="GPU.NOT_FOUND"):
+        create_prepare_plan(
+            replace(
+                healthy_snapshot(),
+                gpu=GpuPciInfo(None, None, ""),
+            ),
+            target_user="customer",
+        )

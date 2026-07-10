@@ -378,6 +378,7 @@ def _set_ttm(
     if result.returncode != 0:
         if _eligible_ttm_memory_fallback(result, nominal_gib, snapshot.mem_total_kib):
             _write_ttm_fallback(root, expected_pages)
+            _run_required(runner, ("update-initramfs", "-u"))
             return
         evidence = (result.stderr or result.stdout).strip() or "no command output"
         raise ApplyError(f"amd-ttm failed: {evidence}")

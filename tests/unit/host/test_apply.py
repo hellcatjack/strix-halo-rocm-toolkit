@@ -150,6 +150,13 @@ def test_ttm_memory_rounding_failure_uses_scoped_modprobe_fallback(tmp_path):
         "",
         "requested memory exceeds available system memory",
     )
+    initramfs_args = ("update-initramfs", "-u")
+    runner.responses[initramfs_args] = CommandResult(
+        initramfs_args,
+        0,
+        "",
+        "",
+    )
     action = PlannedAction(
         code="TTM.SET_AI_MAX",
         summary="set TTM",
@@ -172,6 +179,7 @@ def test_ttm_memory_rounding_failure_uses_scoped_modprobe_fallback(tmp_path):
         "options ttm pages_limit=33554432\n"
     )
     assert "amdgpu.gttsize" not in config.read_text(encoding="utf-8")
+    assert initramfs_args in runner.calls
 
 
 def test_ttm_unrelated_failure_never_writes_fallback(tmp_path):

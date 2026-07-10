@@ -94,6 +94,15 @@ def test_kernel_gpu_errors_block_verification(message, code):
     assert code in finding_codes(report)
 
 
+def test_unavailable_dmesg_blocks_verification():
+    report = evaluate_post_reboot(
+        healthy_snapshot(dmesg="operation not permitted", dmesg_available=False)
+    )
+
+    assert report.status == Status.BLOCKED
+    assert "HOST.DMESG_UNAVAILABLE" in finding_codes(report)
+
+
 def test_live_ttm_must_match_the_computed_128_gib_target():
     report = evaluate_post_reboot(
         healthy_snapshot(kernel="6.14.0-1018-oem", ttm_pages_limit=1)

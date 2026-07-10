@@ -14,6 +14,7 @@ from amd_ai.host.models import (
     PreparePlan,
 )
 from amd_ai.host.ttm import compute_ttm_plan
+from amd_ai.host.policy import evaluate_preflight
 
 
 ROCM_PACKAGE_PREFIXES = (
@@ -31,6 +32,12 @@ ROCM_PACKAGE_PREFIXES = (
     "rccl",
 )
 PROTECTED_DKMS_PACKAGES = {"dkms", "zfs-dkms", "virtualbox-dkms"}
+NON_REMEDIABLE_PREFLIGHT_CODES = {
+    "HOST.UNSUPPORTED_OS",
+    "HOST.UNSUPPORTED_ARCH",
+    "GPU.NOT_FOUND",
+    "GPU.WRONG_DRIVER",
+}
 
 
 class UnsupportedHostError(RuntimeError):
@@ -71,6 +78,16 @@ def create_prepare_plan(
             f"no host write adapter for {snapshot.os_id} {snapshot.os_version} "
             f"on {snapshot.architecture}"
         )
+    preflight = evaluate_preflight(snapshot)
+    blocking_codes = sorted(
+        finding.code
+        for finding in preflight.findings
+        if finding.code in NON_REMEDIABLE_PREFLIGHT_CODES
+    )
+    if blocking_codes:
+        raise HostPlanningError(
+            "host preparation is blocked by preflight: " + ", ".join(blocking_codes)
+        )
     return adapter.create_prepare_plan(snapshot, target_user, memory_gib)
 
 
@@ -89,6 +106,12 @@ def create_ubuntu_prepare_plan(
         _internal_action("BACKUP.SNAPSHOT", "Back up the current host state")
     ]
 
+    mixed_sources = mixed_old_rocm_source_paths(snapshot.apt_sources)
+    if mixed_sources:
+        raise HostPlanningError(
+            "mixed APT source files require manual line/stanza cleanup: "
+            + ", ".join(mixed_sources)
+        )
     source_paths = old_rocm_source_paths(snapshot.apt_sources)
     if source_paths:
         actions.append(
@@ -209,21 +232,45 @@ def create_ubuntu_prepare_plan(
 
 
 def old_rocm_source_paths(sources: tuple[AptSourceFile, ...]) -> tuple[str, ...]:
-    return tuple(sorted(source.path for source in sources if _contains_old_rocm_url(source)))
+    return tuple(
+        sorted(
+            source.path
+            for source in sources
+            if _old_rocm_source_state(source) == "exclusive"
+        )
+    )
 
 
-def _contains_old_rocm_url(source: AptSourceFile) -> bool:
+def mixed_old_rocm_source_paths(
+    sources: tuple[AptSourceFile, ...],
+) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            source.path
+            for source in sources
+            if _old_rocm_source_state(source) == "mixed"
+        )
+    )
+
+
+def _old_rocm_source_state(source: AptSourceFile) -> str:
+    urls: list[str] = []
     for line in source.content.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        for url in re.findall(r"https?://[^\s#]+", stripped):
-            parsed = urlparse(url)
-            if parsed.hostname == "repo.radeon.com" and re.search(
-                r"/6\.4(?:[./]|$)", parsed.path
-            ):
-                return True
-    return False
+        urls.extend(re.findall(r"https?://[^\s#]+", stripped))
+    old_flags = [_is_old_rocm_url(url) for url in urls]
+    if not any(old_flags):
+        return "none"
+    return "exclusive" if all(old_flags) else "mixed"
+
+
+def _is_old_rocm_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.hostname == "repo.radeon.com" and re.search(
+        r"/6\.4(?:[./]|$)", parsed.path
+    ) is not None
 
 
 def _missing_device_group_names(snapshot: HostSnapshot) -> tuple[str, ...]:
@@ -254,4 +301,3 @@ def _internal_action(
         privileged=True,
         input_text=input_text,
     )
-

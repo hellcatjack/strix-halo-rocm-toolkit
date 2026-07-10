@@ -89,20 +89,32 @@ def evaluate_post_reboot(snapshot: HostSnapshot) -> Report:
             )
             statuses.append(Status.REBOOT_REQUIRED)
 
-    for code, pattern, summary in GPU_ERROR_PATTERNS:
-        evidence = _first_matching_line(snapshot.dmesg, pattern)
-        if evidence is None:
-            continue
+    if not snapshot.dmesg_available:
         findings.append(
             Finding(
-                code=code,
+                code="HOST.DMESG_UNAVAILABLE",
                 severity=Severity.ERROR,
-                summary=summary,
-                evidence=evidence,
-                remediation="Inspect the current-boot amdgpu log before running sustained GPU workloads.",
+                summary="The current-boot kernel log could not be read",
+                evidence=snapshot.dmesg or "dmesg returned no evidence",
+                remediation="Grant reviewed dmesg access and rerun host-verify.",
             )
         )
         statuses.append(Status.BLOCKED)
+    else:
+        for code, pattern, summary in GPU_ERROR_PATTERNS:
+            evidence = _first_matching_line(snapshot.dmesg, pattern)
+            if evidence is None:
+                continue
+            findings.append(
+                Finding(
+                    code=code,
+                    severity=Severity.ERROR,
+                    summary=summary,
+                    evidence=evidence,
+                    remediation="Inspect the current-boot amdgpu log before running sustained GPU workloads.",
+                )
+            )
+            statuses.append(Status.BLOCKED)
 
     return Report(
         command="host-verify",
@@ -286,4 +298,3 @@ def _status_with_precedence(statuses: list[Status]) -> Status:
         if status in statuses:
             return status
     return Status.PASS
-
