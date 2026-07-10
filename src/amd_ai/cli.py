@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from amd_ai import __version__
+from amd_ai.doctor.checks import run_doctor
+from amd_ai.doctor.models import DiagnosticDisposition, DoctorModelError
 from amd_ai.host.apply import ApplyError, ApplyRefused, execute_plan
 from amd_ai.host.models import HostSnapshot, PlannedAction, PreparePlan
 from amd_ai.host.policy import evaluate_preflight
@@ -216,6 +218,15 @@ def build_parser() -> argparse.ArgumentParser:
     publication_stage = release_publish.add_mutually_exclusive_group()
     publication_stage.add_argument("--dry-run", action="store_true")
     publication_stage.add_argument("--push-only", action="store_true")
+
+    doctor = subparsers.add_parser("doctor")
+    doctor.add_argument("project", nargs="?", type=Path)
+    doctor.add_argument(
+        "--manifest",
+        type=Path,
+        default=Path("profiles/releases/stable.json"),
+    )
+    doctor.add_argument("--json", dest="json_path", type=Path)
     return parser
 
 
@@ -275,6 +286,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
     if args.command == "gpu-release":
         return _gpu_release(args)
+    if args.command == "doctor":
+        try:
+            report = run_doctor(args.project, args.manifest)
+        except (
+            BuildError,
+            ConfigError,
+            DoctorModelError,
+            OSError,
+            PublishError,
+            ReleaseError,
+            RuntimePolicyError,
+            TransactionError,
+        ) as error:
+            print(f"doctor: {error}", file=sys.stderr)
+            return 2
+        for diagnostic in report.diagnostics:
+            if diagnostic.disposition != DiagnosticDisposition.PASS:
+                print(
+                    f"{diagnostic.code} [{diagnostic.disposition.value}]: "
+                    f"{diagnostic.summary}"
+                )
+        if args.json_path is not None:
+            args.json_path.parent.mkdir(parents=True, exist_ok=True)
+            args.json_path.write_text(
+                json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+        if report.status in {"pass", "warning"}:
+            return 0
+        return 1 if report.status == "repairable" else 2
     if args.command == "release":
         try:
             if args.release_mode == "verify":
