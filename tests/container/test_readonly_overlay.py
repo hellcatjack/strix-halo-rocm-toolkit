@@ -286,6 +286,35 @@ def test_changed_artifact_hash_blocks_next_transaction(project_factory) -> None:
     assert project.current_target() == current_before
 
 
+def test_healthy_generation_retention_is_bounded(project_factory) -> None:
+    project = project_factory("retention")
+
+    for command in (
+        ("pip", "install", "torch"),
+        _mark_healthy_command(),
+        ("pip", "install", "six==1.16.0"),
+        _mark_healthy_command(),
+        ("pip", "install", "six==1.17.0"),
+        _mark_healthy_command(),
+    ):
+        result = project.run(*command)
+        assert result.returncode == 0, result.stderr or result.stdout
+
+    generations = tuple(
+        path
+        for path in (project.path / ".amd-ai/generations").iterdir()
+        if path.is_dir()
+    )
+    artifacts = tuple(
+        path
+        for path in (project.path / ".amd-ai/artifacts/sha256").iterdir()
+        if path.is_dir()
+    )
+    assert len(generations) == 2
+    assert len(artifacts) == 2
+    assert (project.path / ".amd-ai/current").resolve() in generations
+
+
 def _hold_tls_connections(listener: socket.socket, stop: threading.Event) -> None:
     listener.settimeout(0.2)
     connections: list[socket.socket] = []
@@ -308,6 +337,17 @@ def _wait_for(predicate: Callable[[], bool], timeout: float = 15.0) -> bool:
             return True
         time.sleep(0.05)
     return False
+
+
+def _mark_healthy_command() -> tuple[str, ...]:
+    return (
+        "python",
+        "-c",
+        "from pathlib import Path; "
+        "from amd_ai.overlay.models import OverlayPaths; "
+        "from amd_ai.overlay.transaction import mark_generation_healthy; "
+        "mark_generation_healthy(OverlayPaths.for_project(Path('/workspace')))",
+    )
 
 
 def _is_protected_entry(name: str) -> bool:
