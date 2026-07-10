@@ -45,6 +45,7 @@ def test_normal_run_is_unprivileged_and_uses_private_ipc(tmp_path):
     assert "--privileged" not in argv
     assert "--ipc=host" not in argv
     assert "--ipc=private" in argv
+    assert "--read-only" in argv
     assert "SYS_PTRACE" not in argv
     assert "--tty" not in argv and "--interactive" not in argv
     assert tuple(argv[argv.index("--shm-size") : argv.index("--shm-size") + 2]) == (
@@ -58,6 +59,8 @@ def test_normal_run_is_unprivileged_and_uses_private_ipc(tmp_path):
     assert "109" in argv and "110" in argv
     assert "1000:1000" in argv
     assert "HOME=/workspace/.amd-ai/home" in argv
+    tmpfs_index = argv.index("--tmpfs")
+    assert argv[tmpfs_index + 1] == "/tmp:rw,nosuid,nodev,size=8g,mode=1777"
     assert "PYTHONNOUSERSITE=1" in argv
     assert "PYTHONDONTWRITEBYTECODE=1" in argv
     assert "AMD_AI_OVERLAY=/workspace/.amd-ai/current/site-packages" in argv
@@ -65,6 +68,7 @@ def test_normal_run_is_unprivileged_and_uses_private_ipc(tmp_path):
         "PYTHONPATH=/workspace/.amd-ai/current/site-packages:/opt/amd-ai/src"
         in argv
     )
+    assert "AMD_AI_PARENT_CONFIG_DIGEST=" + config.base_digest in argv
     assert f"type=bind,src={tmp_path},dst=/workspace" in argv
     assert not any("HF_HOME" in value or "HF_HUB_CACHE" in value for value in argv)
     assert argv[-3:] == (config.image, "python", "app.py")

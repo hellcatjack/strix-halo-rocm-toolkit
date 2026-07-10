@@ -39,6 +39,7 @@ RESERVED_ENVIRONMENT = frozenset(
         "AMD_AI_PROFILE_ID",
         "AMD_AI_PROFILE_STATUS",
         "AMD_AI_OVERLAY",
+        "AMD_AI_PARENT_CONFIG_DIGEST",
     }
 )
 RESERVED_MOUNT_TARGETS = tuple(

@@ -6,6 +6,7 @@ from amd_ai.project.config import MountConfig
 from amd_ai.project.runtime import (
     RuntimePolicyError,
     compute_shm_gib,
+    compute_tmpfs_gib,
     discover_gpu_access,
     mount_argv,
 )
@@ -15,6 +16,14 @@ def test_nominal_memory_uses_bounded_shared_memory():
     assert compute_shm_gib(mem_total_kib=131015488) == 16
     assert compute_shm_gib(mem_total_kib=31 * 1024**2) == 4
     assert compute_shm_gib(mem_total_kib=7 * 1024**2) == 4
+
+
+@pytest.mark.parametrize(
+    ("shm_gib", "expected"),
+    ((1, 1), (2, 1), (8, 4), (16, 8), (64, 8), (128, 8)),
+)
+def test_tmpfs_size_is_bounded(shm_gib: int, expected: int) -> None:
+    assert compute_tmpfs_gib(shm_gib=shm_gib) == expected
 
 
 def test_device_groups_are_sorted_and_deduplicated():

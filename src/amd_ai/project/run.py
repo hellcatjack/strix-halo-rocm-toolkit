@@ -14,7 +14,7 @@ from amd_ai.project.config import (
     RESERVED_ENVIRONMENT,
     ProjectConfig,
 )
-from amd_ai.project.runtime import GpuAccess, mount_argv
+from amd_ai.project.runtime import GpuAccess, compute_tmpfs_gib, mount_argv
 from amd_ai.runner import Runner
 
 
@@ -89,7 +89,7 @@ def build_run_argv(
     argv: list[str] = [*docker_prefix, "run", "--rm"]
     if terminal:
         argv.extend(("--interactive", "--tty"))
-    argv.append("--ipc=private")
+    argv.extend(("--ipc=private", "--read-only"))
     for device in access.devices:
         argv.extend(("--device", str(device)))
     for group_id in access.group_ids:
@@ -100,6 +100,8 @@ def build_run_argv(
             f"{uid}:{gid}",
             "--shm-size",
             f"{shm_gib}g",
+            "--tmpfs",
+            f"/tmp:rw,nosuid,nodev,size={compute_tmpfs_gib(shm_gib=shm_gib)}g,mode=1777",
             "--workdir",
             "/workspace",
             "--env",
@@ -112,6 +114,8 @@ def build_run_argv(
             "AMD_AI_OVERLAY=/workspace/.amd-ai/current/site-packages",
             "--env",
             "PYTHONPATH=/workspace/.amd-ai/current/site-packages:/opt/amd-ai/src",
+            "--env",
+            f"AMD_AI_PARENT_CONFIG_DIGEST={config.base_digest}",
         )
     )
     for name, value in config.environment:

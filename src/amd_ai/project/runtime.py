@@ -31,6 +31,16 @@ def compute_shm_gib(*, mem_total_kib: int) -> int:
     return max(4, min(16, nominal_gib // 8))
 
 
+def compute_tmpfs_gib(*, shm_gib: int) -> int:
+    if isinstance(shm_gib, bool) or not isinstance(shm_gib, int):
+        raise RuntimePolicyError("shared memory size must be an integer")
+    if not 1 <= shm_gib <= 128:
+        raise RuntimePolicyError(
+            "shared memory size must be from 1 through 128 GiB"
+        )
+    return min(8, max(1, shm_gib // 2))
+
+
 def read_mem_total_kib(path: Path = Path("/proc/meminfo")) -> int:
     try:
         text = path.read_text(encoding="utf-8")
