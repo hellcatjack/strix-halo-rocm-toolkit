@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PYTHONPATH="/opt/amd-ai/src${PYTHONPATH:+:${PYTHONPATH}}"
+exec /opt/venv/bin/python -m amd_ai.overlay.cli "$@"

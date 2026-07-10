@@ -58,6 +58,13 @@ def test_normal_run_is_unprivileged_and_uses_private_ipc(tmp_path):
     assert "109" in argv and "110" in argv
     assert "1000:1000" in argv
     assert "HOME=/workspace/.amd-ai/home" in argv
+    assert "PYTHONNOUSERSITE=1" in argv
+    assert "PYTHONDONTWRITEBYTECODE=1" in argv
+    assert "AMD_AI_OVERLAY=/workspace/.amd-ai/current/site-packages" in argv
+    assert (
+        "PYTHONPATH=/workspace/.amd-ai/current/site-packages:/opt/amd-ai/src"
+        in argv
+    )
     assert f"type=bind,src={tmp_path},dst=/workspace" in argv
     assert not any("HF_HOME" in value or "HF_HUB_CACHE" in value for value in argv)
     assert argv[-3:] == (config.image, "python", "app.py")

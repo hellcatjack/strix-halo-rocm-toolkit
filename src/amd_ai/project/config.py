@@ -29,6 +29,8 @@ RESERVED_ENVIRONMENT = frozenset(
     {
         "PATH",
         "PYTHONPATH",
+        "PYTHONNOUSERSITE",
+        "PYTHONDONTWRITEBYTECODE",
         "LD_LIBRARY_PATH",
         "ROCM_PATH",
         "HIP_PATH",
@@ -36,6 +38,7 @@ RESERVED_ENVIRONMENT = frozenset(
         "ALLOW_UNVERIFIED",
         "AMD_AI_PROFILE_ID",
         "AMD_AI_PROFILE_STATUS",
+        "AMD_AI_OVERLAY",
     }
 )
 RESERVED_MOUNT_TARGETS = tuple(

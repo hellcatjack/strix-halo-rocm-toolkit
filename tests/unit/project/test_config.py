@@ -66,6 +66,9 @@ def test_explicit_environment_and_relative_mount_are_preserved(tmp_path):
         ('[project]\nunknown="value"\n', "unknown"),
         ('[environment]\nPATH="/tmp"\n', "reserved"),
         ('[environment]\nALLOW_UNVERIFIED="1"\n', "reserved"),
+        ('[environment]\nPYTHONNOUSERSITE="0"\n', "reserved"),
+        ('[environment]\nPYTHONDONTWRITEBYTECODE="0"\n', "reserved"),
+        ('[environment]\nAMD_AI_OVERLAY="/tmp/site"\n', "reserved"),
     ],
 )
 def test_unknown_project_key_or_reserved_environment_is_rejected(

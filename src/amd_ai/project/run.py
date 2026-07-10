@@ -104,6 +104,14 @@ def build_run_argv(
             "/workspace",
             "--env",
             "HOME=/workspace/.amd-ai/home",
+            "--env",
+            "PYTHONNOUSERSITE=1",
+            "--env",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "--env",
+            "AMD_AI_OVERLAY=/workspace/.amd-ai/current/site-packages",
+            "--env",
+            "PYTHONPATH=/workspace/.amd-ai/current/site-packages:/opt/amd-ai/src",
         )
     )
     for name, value in config.environment:
