@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from amd_ai.doctor.models import (
     DiagnosticDisposition,
@@ -10,8 +12,20 @@ from amd_ai.doctor.models import (
     RepairAction,
 )
 from amd_ai.installer.models import StableRelease
-from amd_ai.installer.release import ReleaseError, load_stable_release
+from amd_ai.installer.release import (
+    ReleaseError,
+    load_stable_release,
+    pull_and_verify_release,
+)
+from amd_ai.image.build import Docker, ROCM_PYTHON_TAG, STABLE_TORCH_TAG
+from amd_ai.image.publish import DockerPublishRegistry
 from amd_ai.overlay.models import GENERATION_PATTERN
+from amd_ai.project.build import (
+    build_or_reuse_project,
+    remove_exact_project_image,
+)
+from amd_ai.project.config import load_project_config
+from amd_ai.runner import SubprocessRunner
 
 
 IMAGE_ID_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
@@ -22,6 +36,107 @@ EXACT_REFERENCE_PATTERN = re.compile(
 
 class RepairPlanningError(ValueError):
     pass
+
+
+class RepairExecutionError(RuntimeError):
+    pass
+
+
+class RepairExecutor(Protocol):
+    def pull_and_verify(self, release: StableRelease) -> None:
+        pass
+
+    def remove_image_id(self, image_id: str) -> None:
+        pass
+
+    def build_project(self, project_path: Path, parent_digest: str) -> None:
+        pass
+
+    def repair_overlay(self, project_path: Path, reason_code: str) -> None:
+        pass
+
+    def doctor(self, project_path: Path) -> DoctorReport:
+        pass
+
+
+class SystemRepairExecutor:
+    def __init__(self, *, manifest_path: Path) -> None:
+        self.manifest_path = manifest_path
+        self.release = load_stable_release(manifest_path)
+        self.docker = Docker.detect()
+        self.registry = DockerPublishRegistry(self.docker.prefix)
+        self.runner = SubprocessRunner()
+
+    def pull_and_verify(self, release: StableRelease) -> None:
+        if release != self.release:
+            raise RepairExecutionError("repair release differs from executor manifest")
+        pull_and_verify_release(release, docker=self.registry)
+        self.registry.tag(release.base.config_digest, ROCM_PYTHON_TAG)
+        self.registry.tag(release.torch.config_digest, STABLE_TORCH_TAG)
+
+    def remove_image_id(self, image_id: str) -> None:
+        remove_exact_project_image(
+            image_id,
+            runner=self.runner,
+            docker_prefix=self.docker.prefix,
+        )
+
+    def build_project(self, project_path: Path, parent_digest: str) -> None:
+        config = load_project_config(project_path / "amd-ai-project.toml")
+        if config.base_digest != parent_digest:
+            raise RepairExecutionError(
+                "project config parent digest differs from verified release"
+            )
+        build_or_reuse_project(
+            config=config,
+            runner=self.runner,
+            force=True,
+            no_build=False,
+            docker_prefix=self.docker.prefix,
+        )
+
+    def repair_overlay(self, project_path: Path, reason_code: str) -> None:
+        config = load_project_config(project_path / "amd-ai-project.toml")
+        args = [
+            *self.docker.prefix,
+            "run",
+            "--rm",
+            "--read-only",
+            "--network",
+            "none",
+            "--ipc=private",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,size=1g,mode=1777",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "--workdir",
+            "/workspace",
+            "--entrypoint",
+            "/opt/venv/bin/python",
+            "--env",
+            "PYTHONNOUSERSITE=1",
+            "--env",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "--env",
+            f"AMD_AI_PARENT_CONFIG_DIGEST={config.base_digest}",
+            "--env",
+            "PYTHONPATH=/opt/amd-ai/src",
+            "--mount",
+            f"type=bind,src={project_path},dst=/workspace",
+            config.image,
+            "-m",
+            "amd_ai.overlay.repair_command",
+            reason_code,
+        ]
+        result = self.runner.run(args, check=False)
+        if result.returncode != 0:
+            evidence = result.stderr.strip() or result.stdout.strip() or "no output"
+            raise RepairExecutionError(f"offline overlay repair failed: {evidence}")
+
+    def doctor(self, project_path: Path) -> DoctorReport:
+        from amd_ai.doctor.checks import run_doctor
+
+        return run_doctor(project_path, self.manifest_path)
 
 
 @dataclass(frozen=True)
@@ -148,6 +263,72 @@ def plan_repair(report: DoctorReport) -> RepairPlan:
         False,
         (),
     )
+
+
+def execute_repair(
+    plan: RepairPlan, *, executor: RepairExecutor
+) -> DoctorReport:
+    if plan.blocked:
+        raise RepairExecutionError(
+            "repair plan is blocked: " + ", ".join(plan.blocked_reasons)
+        )
+    if not plan.actions:
+        raise RepairExecutionError("repair plan contains no actions")
+    if plan.release is None:
+        raise RepairExecutionError("repair plan has no verified release")
+    if plan.project_path is None:
+        raise RepairExecutionError("repair plan has no selected project")
+
+    actions = {action.kind: action for action in plan.actions}
+    try:
+        parent = actions.get("pull-parent")
+        if parent is not None:
+            if parent.exact_target != plan.release.torch.reference:
+                raise RepairExecutionError(
+                    "parent pull action differs from verified release"
+                )
+            executor.pull_and_verify(plan.release)
+
+        removal = actions.get("remove-project-image")
+        if removal is not None:
+            if IMAGE_ID_PATTERN.fullmatch(removal.exact_target) is None:
+                raise RepairExecutionError("project image removal is not exact")
+            executor.remove_image_id(removal.exact_target)
+
+        build = actions.get("build-project-image")
+        if build is not None:
+            if Path(build.exact_target) != plan.project_path / "amd-ai-project.toml":
+                raise RepairExecutionError("project build target escaped project")
+            executor.build_project(
+                plan.project_path,
+                plan.release.torch.config_digest,
+            )
+
+        quarantine = actions.get("quarantine-overlay")
+        replay = actions.get("rebuild-overlay")
+        if (quarantine is None) != (replay is None):
+            raise RepairExecutionError(
+                "overlay quarantine and replay actions must be paired"
+            )
+        if quarantine is not None and replay is not None:
+            generation = Path(quarantine.exact_target)
+            if Path(replay.exact_target) != generation / "overlay.requirements.lock":
+                raise RepairExecutionError("overlay replay lock differs from quarantine")
+            executor.repair_overlay(plan.project_path, quarantine.reason_code)
+
+        report = executor.doctor(plan.project_path)
+    except RepairExecutionError:
+        raise
+    except Exception as error:
+        raise RepairExecutionError(f"repair execution failed: {error}") from error
+    if report.status != "pass" or any(
+        diagnostic.disposition != DiagnosticDisposition.PASS
+        for diagnostic in report.diagnostics
+    ):
+        raise RepairExecutionError(
+            f"post-repair doctor did not pass: {report.status}"
+        )
+    return report
 
 
 def _load_report_release(report: DoctorReport) -> StableRelease | None:

@@ -8,7 +8,13 @@ from amd_ai.doctor.models import (
     DoctorReport,
     RepairAction,
 )
-from amd_ai.doctor.repair import plan_repair
+import pytest
+
+from amd_ai.doctor.repair import (
+    RepairExecutionError,
+    execute_repair,
+    plan_repair,
+)
 
 
 def test_repair_plan_uses_exact_generation_image_id_and_registry_digest() -> None:
@@ -84,6 +90,41 @@ def test_blocked_report_produces_no_destructive_actions() -> None:
     assert plan.blocked_reasons == ("GPU.RUNTIME_FAILED",)
 
 
+def test_execute_repair_pulls_parent_removes_exact_project_id_and_rebuilds() -> None:
+    plan = plan_repair(repairable_project_report())
+    executor = FakeRepairExecutor()
+
+    execute_repair(plan, executor=executor)
+
+    assert executor.calls == [
+        ("pull-and-verify", plan.release.torch.reference),
+        ("remove-image-id", "sha256:" + "8" * 64),
+        (
+            "build-project",
+            plan.project_path,
+            plan.release.torch.config_digest,
+        ),
+        ("repair-overlay", plan.project_path, "TORCH.SHADOWED"),
+        ("doctor", plan.project_path),
+    ]
+
+
+@pytest.mark.parametrize("failure", ("pull", "build"))
+def test_execute_repair_stops_before_dependent_actions(failure: str) -> None:
+    plan = plan_repair(repairable_project_report())
+    executor = FakeRepairExecutor(failure=failure)
+
+    with pytest.raises(RepairExecutionError):
+        execute_repair(plan, executor=executor)
+
+    if failure == "pull":
+        assert executor.calls == [
+            ("pull-and-verify", plan.release.torch.reference)
+        ]
+    else:
+        assert not any(call[0] == "repair-overlay" for call in executor.calls)
+
+
 def repairable_project_report() -> DoctorReport:
     return DoctorReport.create(
         project="/srv/demo",
@@ -127,3 +168,29 @@ def _facts() -> dict[str, object]:
         "current_generation": generation,
         "last_valid_lock": generation + "/overlay.requirements.lock",
     }
+
+
+class FakeRepairExecutor:
+    def __init__(self, failure: str | None = None) -> None:
+        self.failure = failure
+        self.calls: list[tuple[object, ...]] = []
+
+    def pull_and_verify(self, release) -> None:
+        self.calls.append(("pull-and-verify", release.torch.reference))
+        if self.failure == "pull":
+            raise RuntimeError("pull failed")
+
+    def remove_image_id(self, image_id: str) -> None:
+        self.calls.append(("remove-image-id", image_id))
+
+    def build_project(self, project_path: Path, parent_digest: str) -> None:
+        self.calls.append(("build-project", project_path, parent_digest))
+        if self.failure == "build":
+            raise RuntimeError("build failed")
+
+    def repair_overlay(self, project_path: Path, reason_code: str) -> None:
+        self.calls.append(("repair-overlay", project_path, reason_code))
+
+    def doctor(self, project_path: Path) -> DoctorReport:
+        self.calls.append(("doctor", project_path))
+        return DoctorReport.create(project=project_path, diagnostics=(), facts={})

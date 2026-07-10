@@ -71,6 +71,27 @@ class _IgnoreRule:
     anchored: bool
 
 
+def remove_exact_project_image(
+    image_id: str,
+    *,
+    runner: Runner,
+    docker_prefix: Sequence[str] = ("docker",),
+) -> None:
+    if IMAGE_ID_PATTERN.fullmatch(image_id) is None:
+        raise ProjectBuildError(
+            f"project image removal requires an exact image ID: {image_id}"
+        )
+    if not docker_prefix or any(not value for value in docker_prefix):
+        raise ProjectBuildError("Docker command prefix is invalid")
+    args = [*docker_prefix, "image", "rm", image_id]
+    result = runner.run(args, check=False)
+    if result.returncode != 0:
+        evidence = result.stderr.strip() or result.stdout.strip() or "no output"
+        raise ProjectBuildError(
+            f"cannot remove exact project image {image_id}: {evidence}"
+        )
+
+
 def build_context_fingerprint(context: Path) -> str:
     context = context.resolve()
     if not context.is_dir():

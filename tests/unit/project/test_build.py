@@ -9,9 +9,12 @@ from amd_ai.project.build import (
     project_manifest_argv,
     project_build_argv,
     project_parent_alias,
+    remove_exact_project_image,
     validate_dockerignore,
     validate_project_image_contract,
 )
+from amd_ai.runner import CommandResult
+from tests.unit.project.fakes import FakeRunner
 
 
 def test_fingerprint_changes_with_lock_not_ignored_models(tmp_path):
@@ -123,3 +126,17 @@ def test_project_image_must_reuse_parent_layers_and_manifest_command():
     assert "/opt/amd-ai/torch-manifest.py" in argv
     assert "verify" in argv
     assert parent_id not in argv
+
+
+def test_project_image_removal_accepts_only_exact_id() -> None:
+    image_id = "sha256:" + "a" * 64
+    command = ("docker", "image", "rm", image_id)
+    runner = FakeRunner(
+        {command: CommandResult(command, 0, image_id + "\n", "")}
+    )
+
+    remove_exact_project_image(image_id, runner=runner)
+
+    assert runner.calls == [command]
+    with pytest.raises(ProjectBuildError):
+        remove_exact_project_image("demo:latest", runner=runner)
