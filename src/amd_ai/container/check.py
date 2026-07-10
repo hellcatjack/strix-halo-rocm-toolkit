@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
+import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from amd_ai.image.profile import ProfileError, load_profile
 from amd_ai.report import Finding, Report, Severity, Status
 from amd_ai.runner import CommandResult, Runner, SubprocessRunner
+
+
+TORCH_COMPONENTS = ("torch", "torchvision", "torchaudio", "triton")
 
 
 def run_rocm_check(*, root: Path, runner: Runner, metadata_only: bool) -> Report:
@@ -95,6 +101,186 @@ def run_rocm_check(*, root: Path, runner: Runner, metadata_only: bool) -> Report
     )
 
 
+def public_version(full_version: str) -> str:
+    return full_version.split("+", 1)[0]
+
+
+def run_torch_check(
+    *,
+    root: Path,
+    runner: Runner,
+    metadata_only: bool,
+    runtime: bool,
+) -> Report:
+    rocm_report = run_rocm_check(
+        root=root,
+        runner=runner,
+        metadata_only=metadata_only,
+    )
+    findings = list(rocm_report.findings)
+    facts = dict(rocm_report.facts)
+    expected_versions = _load_expected_versions(root, findings, facts)
+    modules: dict[str, object] = {}
+    for name in TORCH_COMPONENTS:
+        try:
+            modules[name] = importlib.import_module(name)
+        except Exception as error:
+            findings.append(
+                Finding(
+                    code="TORCH.IMPORT",
+                    severity=Severity.ERROR,
+                    summary=f"Failed to import {name}",
+                    evidence=f"{type(error).__name__}: {error}",
+                    remediation="Rebuild the complete locked Torch profile.",
+                )
+            )
+
+    for name, expected in expected_versions.items():
+        module = modules.get(name)
+        if module is None:
+            continue
+        full = str(getattr(module, "__version__", ""))
+        public = public_version(full)
+        facts[name] = {"full_version": full, "public_version": public}
+        if public != expected:
+            findings.append(
+                Finding(
+                    code="TORCH.VERSION",
+                    severity=Severity.ERROR,
+                    summary=f"Unexpected {name} public version",
+                    evidence=f"expected={expected}, full={full or '<missing>'}",
+                    remediation="Use a complete profile with the locked four-component versions.",
+                )
+            )
+
+    torch = modules.get("torch")
+    hip_version = ""
+    if torch is not None:
+        hip_version = str(getattr(getattr(torch, "version", None), "hip", "") or "")
+        if not hip_version:
+            findings.append(
+                Finding(
+                    code="TORCH.HIP_VERSION",
+                    severity=Severity.ERROR,
+                    summary="PyTorch does not report a ROCm HIP build",
+                    evidence="torch.version.hip is empty",
+                    remediation="Install the AMD ROCm wheel rather than a PyPI CPU wheel.",
+                )
+            )
+    facts["torch_hip_version"] = hip_version
+
+    manifest_status = "skipped (runtime)"
+    if not runtime:
+        manifest = root / "opt/amd-ai/torch-manifest.json"
+        script = root / "opt/amd-ai/torch-manifest.py"
+        result = _run_optional(
+            runner,
+            (sys.executable, str(script), "verify", str(manifest)),
+        )
+        manifest_status = f"{result.stdout}\n{result.stderr}".strip() or "pass"
+        if result.returncode != 0:
+            findings.append(
+                Finding(
+                    code="TORCH.MANIFEST",
+                    severity=Severity.ERROR,
+                    summary="Protected Torch distribution files changed",
+                    evidence=manifest_status,
+                    remediation="Rebuild the project from the verified PyTorch parent image.",
+                )
+            )
+    facts["torch_manifest"] = manifest_status
+
+    run_gpu = runtime or not metadata_only
+    if run_gpu and torch is not None:
+        _check_torch_gpu(torch, findings, facts)
+
+    return Report(
+        command="container-check",
+        status=Status.BLOCKED if findings else Status.PASS,
+        generated_at=datetime.now(UTC).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        ),
+        facts=facts,
+        findings=tuple(findings),
+    )
+
+
+def _load_expected_versions(
+    root: Path,
+    findings: list[Finding],
+    facts: dict[str, object],
+) -> dict[str, str]:
+    path = root / "opt/amd-ai/profile.env"
+    try:
+        profile = load_profile(path, allow_verified=True)
+    except (OSError, ProfileError) as error:
+        findings.append(
+            Finding(
+                code="TORCH.PROFILE",
+                severity=Severity.ERROR,
+                summary="The embedded Torch profile is invalid",
+                evidence=f"{type(error).__name__}: {error}",
+                remediation="Rebuild from a complete validated Torch profile.",
+            )
+        )
+        return {}
+    facts["torch_profile"] = {
+        "id": profile.profile_id,
+        "status": profile.status,
+    }
+    return {name: wheel.version for name, wheel in profile.wheels.items()}
+
+
+def _check_torch_gpu(
+    torch: object,
+    findings: list[Finding],
+    facts: dict[str, object],
+) -> None:
+    cuda = getattr(torch, "cuda")
+    if not cuda.is_available():
+        findings.append(
+            Finding(
+                code="TORCH.GPU_UNAVAILABLE",
+                severity=Severity.ERROR,
+                summary="PyTorch cannot access a ROCm GPU",
+                evidence="torch.cuda.is_available() returned false",
+                remediation="Check /dev mappings, GIDs, the host driver, and ROCm userspace.",
+            )
+        )
+        return
+    properties = cuda.get_device_properties(0)
+    architecture = str(getattr(properties, "gcnArchName", ""))
+    facts["gpu_architecture"] = architecture
+    if not architecture.startswith("gfx1151"):
+        findings.append(
+            Finding(
+                code="TORCH.GFX1151_MISSING",
+                severity=Severity.ERROR,
+                summary="PyTorch did not expose the Radeon 8060S architecture",
+                evidence=architecture or "gcnArchName is empty",
+                remediation="Use the qualified gfx1151 host and ROCm profile.",
+            )
+        )
+        return
+    try:
+        tensor = torch.ones((32, 32), device="cuda", dtype=torch.float16)
+        result = (tensor @ tensor).sum().item()
+        cuda.synchronize()
+        facts["gpu_tensor_result"] = result
+        if result <= 0:
+            raise RuntimeError(f"unexpected tensor result: {result}")
+    except Exception as error:
+        findings.append(
+            Finding(
+                code="TORCH.GPU_OPERATION",
+                severity=Severity.ERROR,
+                summary="The synchronized GPU tensor operation failed",
+                evidence=f"{type(error).__name__}: {error}",
+                remediation="Inspect ROCm and kernel logs; CPU fallback is not accepted.",
+            )
+        )
+
+
 def _read_rocm_version(root: Path) -> str | None:
     for relative in ("opt/rocm/.info/version", "opt/rocm/.info/version-dev"):
         path = root / relative
@@ -123,14 +309,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.metadata_only and args.runtime:
         parser.error("--metadata-only and --runtime are mutually exclusive")
-    if args.mode != "rocm":
-        parser.error("torch mode is not available in this image")
-
-    report = run_rocm_check(
-        root=Path("/"),
-        runner=SubprocessRunner(),
-        metadata_only=args.metadata_only,
-    )
+    runner = SubprocessRunner()
+    if args.mode == "rocm":
+        report = run_rocm_check(
+            root=Path("/"),
+            runner=runner,
+            metadata_only=args.metadata_only,
+        )
+    else:
+        report = run_torch_check(
+            root=Path("/"),
+            runner=runner,
+            metadata_only=args.metadata_only,
+            runtime=args.runtime,
+        )
     if args.json_path == "-":
         print(json.dumps(report.to_dict(), sort_keys=True))
     elif args.json_path:
@@ -143,4 +335,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

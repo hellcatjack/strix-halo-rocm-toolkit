@@ -24,6 +24,7 @@ def test_rocm_python_has_one_venv_non_root_user_and_no_forced_caches():
     text = Path("images/rocm-python/Dockerfile").read_text(encoding="utf-8")
 
     assert 'ENV PATH="/opt/venv/bin:/opt/rocm/bin:${PATH}"' in text
+    assert 'LD_LIBRARY_PATH="/opt/rocm/lib:/opt/rocm/lib64"' in text
     assert "useradd" in text and "USER developer" in text
     assert "WORKDIR /workspace" in text
     assert "COPY --from=uv /uv /uvx /usr/local/bin/" in text

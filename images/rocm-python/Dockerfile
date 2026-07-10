@@ -68,6 +68,7 @@ RUN set -eux; \
     find /opt/venv -xdev -type d -exec chmod go-w '{}' +
 
 ENV PATH="/opt/venv/bin:/opt/rocm/bin:${PATH}" \
+    LD_LIBRARY_PATH="/opt/rocm/lib:/opt/rocm/lib64" \
     ROCM_PATH="/opt/rocm" \
     HIP_PATH="/opt/rocm" \
     PYTHONUNBUFFERED="1" \
