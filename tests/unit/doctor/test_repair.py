@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
+from amd_ai.doctor import repair
 from amd_ai.doctor.models import (
     Diagnostic,
     DiagnosticDisposition,
@@ -12,9 +15,13 @@ import pytest
 
 from amd_ai.doctor.repair import (
     RepairExecutionError,
+    SystemRepairExecutor,
     execute_repair,
     plan_repair,
 )
+
+
+RELEASE_FIXTURE = Path("tests/fixtures/releases/stable.json")
 
 
 def test_repair_plan_uses_exact_generation_image_id_and_registry_digest() -> None:
@@ -90,7 +97,82 @@ def test_blocked_report_produces_no_destructive_actions() -> None:
     assert plan.blocked_reasons == ("GPU.RUNTIME_FAILED",)
 
 
-def test_execute_repair_pulls_parent_removes_exact_project_id_and_rebuilds() -> None:
+@pytest.mark.parametrize(
+    ("reason_code", "expected_kinds"),
+    (
+        ("IMAGE.DIGEST_DRIFT", ("pull-parent",)),
+        (
+            "TORCH.BASE_CHANGED",
+            ("pull-parent", "remove-project-image", "build-project-image"),
+        ),
+    ),
+)
+def test_parent_drift_and_base_change_restore_exact_release_parent(
+    reason_code: str, expected_kinds: tuple[str, ...]
+) -> None:
+    report = DoctorReport.create(
+        project="/srv/demo",
+        diagnostics=(
+            Diagnostic(
+                reason_code,
+                DiagnosticDisposition.REPAIRABLE,
+                "parent changed",
+                "identity mismatch",
+                "restore",
+            ),
+        ),
+        facts=_facts(),
+    )
+
+    plan = plan_repair(report)
+
+    assert tuple(action.kind for action in plan.actions) == expected_kinds
+    assert plan.actions[0] == RepairAction(
+        "pull-parent",
+        "ghcr.io/hellcatjack/strix-halo-rocm-pytorch@sha256:" + "7" * 64,
+        reason_code,
+    )
+
+
+def test_system_executor_parent_pull_uses_anonymous_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        repair.Docker,
+        "detect",
+        lambda: SimpleNamespace(prefix=("sudo", "-n", "docker")),
+    )
+    executor = SystemRepairExecutor(manifest_path=RELEASE_FIXTURE)
+    authless_calls: list[str] = []
+    monkeypatch.setattr(
+        executor.registry,
+        "authless_pull",
+        lambda reference: authless_calls.append(reference),
+    )
+    monkeypatch.setattr(
+        executor.registry,
+        "_completed",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    monkeypatch.setattr(
+        repair,
+        "pull_and_verify_release",
+        lambda release, *, docker: (
+            docker.pull(release.base.reference),
+            docker.pull(release.torch.reference),
+        ),
+    )
+    monkeypatch.setattr(executor.registry, "tag", lambda source, target: None)
+
+    executor.pull_and_verify(executor.release)
+
+    assert authless_calls == [
+        executor.release.base.reference,
+        executor.release.torch.reference,
+    ]
+
+
+def test_execute_repair_rebuilds_before_removing_exact_project_id() -> None:
     plan = plan_repair(repairable_project_report())
     executor = FakeRepairExecutor()
 
@@ -98,12 +180,12 @@ def test_execute_repair_pulls_parent_removes_exact_project_id_and_rebuilds() -> 
 
     assert executor.calls == [
         ("pull-and-verify", plan.release.torch.reference),
-        ("remove-image-id", "sha256:" + "8" * 64),
         (
             "build-project",
             plan.project_path,
             plan.release.torch.config_digest,
         ),
+        ("remove-image-id", "sha256:" + "8" * 64),
         ("repair-overlay", plan.project_path, "TORCH.SHADOWED"),
         ("doctor", plan.project_path),
     ]
@@ -122,7 +204,17 @@ def test_execute_repair_stops_before_dependent_actions(failure: str) -> None:
             ("pull-and-verify", plan.release.torch.reference)
         ]
     else:
+        assert not any(call[0] == "remove-image-id" for call in executor.calls)
         assert not any(call[0] == "repair-overlay" for call in executor.calls)
+
+
+def test_repair_does_not_remove_image_when_rebuild_has_same_exact_id() -> None:
+    plan = plan_repair(repairable_project_report())
+    executor = FakeRepairExecutor(built_image_id="sha256:" + "8" * 64)
+
+    execute_repair(plan, executor=executor)
+
+    assert not any(call[0] == "remove-image-id" for call in executor.calls)
 
 
 def repairable_project_report() -> DoctorReport:
@@ -171,8 +263,13 @@ def _facts() -> dict[str, object]:
 
 
 class FakeRepairExecutor:
-    def __init__(self, failure: str | None = None) -> None:
+    def __init__(
+        self,
+        failure: str | None = None,
+        built_image_id: str = "sha256:" + "9" * 64,
+    ) -> None:
         self.failure = failure
+        self.built_image_id = built_image_id
         self.calls: list[tuple[object, ...]] = []
 
     def pull_and_verify(self, release) -> None:
@@ -183,10 +280,11 @@ class FakeRepairExecutor:
     def remove_image_id(self, image_id: str) -> None:
         self.calls.append(("remove-image-id", image_id))
 
-    def build_project(self, project_path: Path, parent_digest: str) -> None:
+    def build_project(self, project_path: Path, parent_digest: str) -> str:
         self.calls.append(("build-project", project_path, parent_digest))
         if self.failure == "build":
             raise RuntimeError("build failed")
+        return self.built_image_id
 
     def repair_overlay(self, project_path: Path, reason_code: str) -> None:
         self.calls.append(("repair-overlay", project_path, reason_code))

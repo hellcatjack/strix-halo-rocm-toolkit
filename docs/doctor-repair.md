@@ -29,6 +29,6 @@ Doctor 是只读检查。Repair 先生成只含精确目标的计划；交互模
 
 允许的动作只针对一个项目 generation、一个 exact `sha256:` 本地 image ID 或一个 exact `image@sha256:` registry reference。损坏 overlay 会移动到项目 `.amd-ai/quarantine` 留证；可恢复时使用最后有效的 `overlay.requirements.lock` 和本地 artifact store，在 `--network none`、只读父镜像下重放。
 
-父镜像变化时重新拉取并验证 exact digest。项目镜像变化时只删除 doctor 记录的 exact ID，再按当前指纹重建。每次修复后重新运行受管项目启动和 effective Torch 检查。
+父镜像变化时匿名重新拉取并验证 exact digest。项目镜像变化时先按当前指纹构建并验证替代镜像；只有成功取得不同的新 exact ID 后，才删除 doctor 记录的旧 exact ID。构建失败时保留旧 image 作为证据并维持项目 blocked。每次修复后重新运行受管项目启动和 effective Torch 检查。
 
 Repair 永远不会运行 `docker system prune`、通配 image 删除、未限定 cache 清理或 force-reinstall Torch。证据目录不会被成功修复自动删除。

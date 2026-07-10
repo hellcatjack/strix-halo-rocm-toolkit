@@ -12,13 +12,13 @@ from amd_ai.doctor.models import (
     RepairAction,
 )
 from amd_ai.installer.models import StableRelease
+from amd_ai.installer.actions import AnonymousReleaseRegistry
 from amd_ai.installer.release import (
     ReleaseError,
     load_stable_release,
     pull_and_verify_release,
 )
 from amd_ai.image.build import Docker, ROCM_PYTHON_TAG, STABLE_TORCH_TAG
-from amd_ai.image.publish import DockerPublishRegistry
 from amd_ai.overlay.models import GENERATION_PATTERN
 from amd_ai.project.build import (
     build_or_reuse_project,
@@ -49,7 +49,7 @@ class RepairExecutor(Protocol):
     def remove_image_id(self, image_id: str) -> None:
         pass
 
-    def build_project(self, project_path: Path, parent_digest: str) -> None:
+    def build_project(self, project_path: Path, parent_digest: str) -> str:
         pass
 
     def repair_overlay(self, project_path: Path, reason_code: str) -> None:
@@ -64,7 +64,7 @@ class SystemRepairExecutor:
         self.manifest_path = manifest_path
         self.release = load_stable_release(manifest_path)
         self.docker = Docker.detect()
-        self.registry = DockerPublishRegistry(self.docker.prefix)
+        self.registry = AnonymousReleaseRegistry(self.docker.prefix)
         self.runner = SubprocessRunner()
 
     def pull_and_verify(self, release: StableRelease) -> None:
@@ -81,19 +81,20 @@ class SystemRepairExecutor:
             docker_prefix=self.docker.prefix,
         )
 
-    def build_project(self, project_path: Path, parent_digest: str) -> None:
+    def build_project(self, project_path: Path, parent_digest: str) -> str:
         config = load_project_config(project_path / "amd-ai-project.toml")
         if config.base_digest != parent_digest:
             raise RepairExecutionError(
                 "project config parent digest differs from verified release"
             )
-        build_or_reuse_project(
+        result = build_or_reuse_project(
             config=config,
             runner=self.runner,
             force=True,
             no_build=False,
             docker_prefix=self.docker.prefix,
         )
+        return result.image_id
 
     def repair_overlay(self, project_path: Path, reason_code: str) -> None:
         config = load_project_config(project_path / "amd-ai-project.toml")
@@ -181,14 +182,26 @@ def plan_repair(report: DoctorReport) -> RepairPlan:
     actions: list[RepairAction] = []
     facts = report.facts
 
-    if "IMAGE.PARENT_MISSING" in repairable:
+    parent_reason = next(
+        (
+            code
+            for code in (
+                "IMAGE.PARENT_MISSING",
+                "IMAGE.DIGEST_DRIFT",
+                "TORCH.BASE_CHANGED",
+            )
+            if code in repairable
+        ),
+        None,
+    )
+    if parent_reason is not None:
         reference = _fact_string(facts, "torch_reference")
         if EXACT_REFERENCE_PATTERN.fullmatch(reference) is None:
             raise RepairPlanningError("parent repair reference is not immutable")
         if release is not None and reference != release.torch.reference:
             raise RepairPlanningError("parent repair reference differs from release")
         actions.append(
-            RepairAction("pull-parent", reference, "IMAGE.PARENT_MISSING")
+            RepairAction("pull-parent", reference, parent_reason)
         )
 
     project_reason = next(
@@ -290,19 +303,27 @@ def execute_repair(
             executor.pull_and_verify(plan.release)
 
         removal = actions.get("remove-project-image")
-        if removal is not None:
-            if IMAGE_ID_PATTERN.fullmatch(removal.exact_target) is None:
-                raise RepairExecutionError("project image removal is not exact")
-            executor.remove_image_id(removal.exact_target)
-
         build = actions.get("build-project-image")
+        rebuilt_image_id: str | None = None
         if build is not None:
             if Path(build.exact_target) != plan.project_path / "amd-ai-project.toml":
                 raise RepairExecutionError("project build target escaped project")
-            executor.build_project(
+            rebuilt_image_id = executor.build_project(
                 plan.project_path,
                 plan.release.torch.config_digest,
             )
+            if IMAGE_ID_PATTERN.fullmatch(rebuilt_image_id) is None:
+                raise RepairExecutionError("rebuilt project image ID is not exact")
+
+        if removal is not None:
+            if IMAGE_ID_PATTERN.fullmatch(removal.exact_target) is None:
+                raise RepairExecutionError("project image removal is not exact")
+            if rebuilt_image_id is None:
+                raise RepairExecutionError(
+                    "project image removal requires a successful rebuild"
+                )
+            if removal.exact_target != rebuilt_image_id:
+                executor.remove_image_id(removal.exact_target)
 
         quarantine = actions.get("quarantine-overlay")
         replay = actions.get("rebuild-overlay")
