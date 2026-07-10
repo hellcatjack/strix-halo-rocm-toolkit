@@ -1,0 +1,9 @@
+.git
+.worktrees
+.cache
+.venv
+.pytest_cache
+reports
+**/__pycache__
+**/*.pyc
+

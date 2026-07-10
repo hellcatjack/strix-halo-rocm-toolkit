@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export PYTHONPATH="/opt/amd-ai/src${PYTHONPATH:+:${PYTHONPATH}}"
+exec python3 -m amd_ai.container.check "$@"
+
