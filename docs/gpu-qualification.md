@@ -31,12 +31,15 @@ sudo -v
 
 `sudo -v` 是为了保证测试前后都能读取内核日志。无法读取 dmesg 会生成阻断项 `HOST.DMESG_UNAVAILABLE`，不会跳过 `kernel-log`。任一低成本检查失败后，编排器停止后续容器，不继续运行压力项，但仍采集测试后的 dmesg。
 
+编排器在启动第一项检查前只解析一次配置中的镜像标签，将本地 `sha256` image ID 写入报告；八项检查随后都直接运行这个不可变 ID。测试期间即使标签被移动，也不会把不同镜像的结果拼成同一份资格报告。前后内核日志为空、无法读取或无法证明连续时分别阻断，不会把清空/轮转后的日志当成干净差分。
+
 成功报告必须满足：
 
 ```text
 status = pass
 profile_id = stable-gfx1151
 gpu_arch = gfx1151
+image_id = sha256:<64 位摘要>
 八项结果各出现一次且 passed = true
 ```
 
@@ -57,11 +60,12 @@ gpu_arch = gfx1151
 - stable qualification profile 与批准设计文档摘要；
 - 八项资格结果及资格报告摘要；
 - 镜像 `verified` profile、ROCm 7.2.1、Torch 2.9.1 标签；
-- 本地不可变镜像 ID，以及存在时的 registry RepoDigest；
+- 当前标签解析出的本地不可变镜像 ID 必须与资格报告中的 ID 完全一致，以及存在时的 registry RepoDigest；
 - 四个 AMD 主 wheel SHA-256；
-- ROCm Debian 包锁 SHA-256；
-- 在该镜像内部生成的 SPDX 2.3 OS/Python 清单摘要；
-- 当前 Git revision 且没有已跟踪文件修改。
+- 镜像内 `/opt/amd-ai/locks/rocm-packages.lock` 与仓库批准锁文件的 SHA-256；
+- 镜像内 `/opt/amd-ai/profile.env` 与稳定 Torch profile 的 SHA-256；
+- 直接从该不可变 ID 生成的 SPDX 2.3 OS/Python 清单摘要；
+- 当前 Git revision，且没有已跟踪或未跟踪文件。
 
 所有条件满足后才创建：
 
@@ -69,7 +73,7 @@ gpu_arch = gfx1151
 rocm-pytorch:7.2.1-py3.12-torch2.9.1-gfx1151-verified
 ```
 
-工具会重新 inspect 此标签并要求它仍指向资格测试中的同一个本地 image ID。结果写入 `reports/releases/<UTC>-gfx1151.json`，SPDX 文件位于同目录。仅本地发布时 `repo_digest` 为 `null`；推送到 registry 后追加真实 RepoDigest，不得覆盖已经记录的本地 ID。
+工具会重新 inspect 此标签并要求它仍指向资格测试中的同一个本地 image ID。SPDX 和 JSON 先写入临时文件，verified 标签确认后才原子移动到 `reports/releases/`；标签后的产物写入若失败，工具会恢复原 verified 标签或删除新建标签。仅本地发布时 `repo_digest` 为 `null`；推送到 registry 后追加真实 RepoDigest，不得覆盖已经记录的本地 ID。
 
 ## 4. 失败留证
 

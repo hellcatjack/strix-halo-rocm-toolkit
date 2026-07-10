@@ -27,7 +27,7 @@
 - wheelhouse manifest 中每个文件的大小和哈希；
 - 本地 `rocm-python` 父镜像的完整配置 ID。
 
-PyTorch 构建使用由父配置 ID 派生的本地不可变别名。wheelhouse 作为只读 BuildKit named context 挂载，不通过 `COPY` 形成额外下载层。构建后再次检查 OCI 标签、Torch 文件 manifest 和四组件导入。
+PyTorch 构建使用由父配置 ID 派生的本地不可变别名。wheelhouse 作为只读 BuildKit named context 挂载，不通过 `COPY` 形成额外下载层。ROCm 基础镜像同时保留批准包锁为 `/opt/amd-ai/locks/rocm-packages.lock`，供发布门禁从镜像内部核对构建输入。构建后再次检查 OCI 标签、Torch 文件 manifest 和四组件导入。
 
 查看最终 ID 和标签：
 
@@ -152,7 +152,7 @@ GPU 无关的镜像检查：
 ./bin/image-build prune --older-than-hours 168
 ```
 
-工具保护当前稳定标签、运行中容器和 `--project-root` 下 `amd-ai-project.toml` 记录的基础 ID，只列出带 AMD AI profile/project 标签且超过年龄阈值的镜像。确认列表后才执行：
+工具保护当前稳定标签、运行中容器和项目配置记录的基础 ID。默认同时扫描命令执行目录与仓库 `projects/`；放在其他位置的项目必须通过一个或多个 `--project-root` 明确加入。工具只列出带 AMD AI profile/project 标签且超过年龄阈值的镜像。确认列表后才执行：
 
 ```bash
 ./bin/image-build prune --older-than-hours 168 --apply

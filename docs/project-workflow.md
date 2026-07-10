@@ -31,9 +31,9 @@
 ./bin/project-run "$HOME/projects/video-lab"
 ```
 
-初始化器将父镜像解析为本地不可变 `sha256` ID，并同时写入 `base_image` 与 `base_digest`。删除或替换父标签不会静默改变既有项目。项目目录已有内容时初始化器拒绝覆盖。
+初始化器将父镜像解析为本地不可变 `sha256` ID，并同时写入 `base_image` 与 `base_digest`。删除或替换父标签不会静默改变既有项目。项目目录已有内容时初始化器拒绝覆盖。生成的 `.dockerignore` 是构建策略的一部分，必须保留 `.git`、`.venv`、`.cache`、`.amd-ai`、模型/输入输出/报告和 Python 缓存排除规则；为防止大目录意外重新进入上下文，项目 `.dockerignore` 不允许 `!` negation 规则。
 
-`project-run` 默认比较当前构建上下文指纹、父摘要与项目镜像标签：镜像缺失或过期时自动重建，其余情况直接复用。可显式控制：
+`project-run` 默认比较当前构建上下文指纹、父摘要与项目镜像标签：镜像缺失或过期时自动重建，其余情况直接复用。无论复用还是新建，运行前都会核对父层前缀、ROCm/Python/Torch profile 标签与环境、非 root UID、工作目录、策略入口点和 Torch 文件 manifest；项目 Dockerfile 不能把 experimental 状态伪装成 verified，也不能持久写入 `ALLOW_UNVERIFIED`。可显式控制：
 
 ```bash
 ./bin/project-run comfy-lab --build

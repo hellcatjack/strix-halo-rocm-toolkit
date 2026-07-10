@@ -7,10 +7,12 @@
 - `host-preflight` 只读运行；未知发行版也可用于采集报告，但会得到 `HOST.UNSUPPORTED_OS`，且不能执行主机写入。
 - `host-prepare plan` 只生成动作，不修改主机。
 - `host-prepare apply` 必须以 root 执行，并要求精确输入 `APPLY`。`--yes` 只确认动作计划。
+- `HOST.UNSUPPORTED_OS`、`HOST.UNSUPPORTED_ARCH`、`GPU.NOT_FOUND` 或 `GPU.WRONG_DRIVER` 属于不可由准备动作修复的阻断项；`plan` 与 `apply` 都会在任何主机写入前停止。旧内核等可修复状态仍可生成计划。
 - 加入 `docker` 组另需精确输入 `ADD_DOCKER_GROUP`。该组可控制 Docker daemon，权限近似主机 root；其他输入保留 `sudo docker`。
 - 不传 `--reboot` 时，应用器不会执行重启。建议检查报告后自行运行 `sudo reboot`。
 - 工具不会自动回滚已安装内核，也不会自动删除通用 `dkms`、`zfs-dkms`、`virtualbox-dkms` 或其他厂商模块。
 - 旧包清理仅选择 `amdgpu-dkms`，以及版本以 6.4 开头、来源可确认是 `repo.radeon.com` 的 ROCm/HIP/HSA 白名单包；不执行 `apt autoremove`。
+- 只有全部 active HTTP 源都明确属于 Radeon/ROCm 6.4 的单一 APT 文件才会整体禁用。一个文件同时包含 6.4 和其他仓库时，工具拒绝改名，操作员必须先人工删除对应行或 deb822 stanza，再重新运行预检和计划。
 
 ## 2. BIOS 与统一内存
 
@@ -77,10 +79,10 @@ sudo ./bin/host-prepare apply --target-user "$USER" \
 2. 禁用确认属于 ROCm 6.4 的源，清理确认的旧包和 `amdgpu-dkms`。
 3. 安装 `linux-oem-24.04`、匹配 headers、firmware 和主机工具。
 4. Docker 缺失时，校验官方密钥完整指纹后安装 Engine、Buildx 和 Compose 插件。
-5. 补充实际 `/dev/kfd`、render node 所属设备组。
+5. 按 `--target-user` 的 passwd/group 数据补充实际 `/dev/kfd`、render node 所属设备组，不以调用 sudo 的 root 进程组作为判断依据。
 6. 校验固定 SHA-256 后安装 `amd-debug-tools==0.2.19`，设置 AI Max TTM 上限。
 
-`amd-ttm` 的重启提示始终由包装器拒绝，重启策略由本工具统一控制。仅在该版本因“归一后的标称容量略高于可见 MemTotal”而拒绝时，才写入等价的 `ttm.conf`；其他错误立即停止。
+`amd-ttm` 的重启提示始终由包装器拒绝，重启策略由本工具统一控制。仅在该版本因“归一后的标称容量略高于可见 MemTotal”而拒绝时，才写入等价的 `ttm.conf`，并立即执行 `update-initramfs -u`；其他错误立即停止。
 
 自动化确认可使用 `--yes`，但它不会替用户授权 Docker 组，也不会自动重启：
 
@@ -115,7 +117,7 @@ sudo reboot
 - 容器输出包含 `gfx1151`；
 - 当前启动的 `dmesg` 中没有 MES timeout、GPU reset、amdgpu page fault、firmware 加载失败或 ring timeout。
 
-`host-verify` 只有在宿主检查和容器探针均正式通过时返回 0。满足最低要求但未登记的 OEM 内核保持 `unverified` 并返回 1；阻断错误返回 2。
+`dmesg` 无法读取时会得到 `HOST.DMESG_UNAVAILABLE`，不会把空输出当成“没有 GPU 错误”。`host-verify` 只有在宿主检查和容器探针均正式通过时返回 0。满足最低要求但未登记的 OEM 内核保持 `unverified` 并返回 1；阻断错误返回 2。
 
 ## 4. 备份与恢复
 
@@ -153,7 +155,7 @@ sudo update-grub
 sudo reboot
 ```
 
-源文件备份位于相同相对路径。应用器将旧 ROCm 源重命名为 `.amd-ai-disabled`；恢复前需同时检查备份、禁用文件和当前发行版源，避免重新启用不兼容的 6.4 仓库。
+源文件备份位于相同相对路径。应用器只会把内容完全属于旧 ROCm 6.4 的源文件重命名为 `.amd-ai-disabled`；混合源文件必须人工按行或 stanza 清理。恢复前需同时检查备份、禁用文件和当前发行版源，避免重新启用不兼容的 6.4 仓库。
 
 内核包安装不自动回滚。内核无法启动时，从 GRUB 的 Advanced options 选择先前可启动内核，再根据 Ubuntu 包状态人工处理；不要在无法确认其他 DKMS 依赖时删除通用 `dkms`。
 
@@ -166,4 +168,3 @@ sudo reboot
 ```
 
 报告会保留硬件、内存、设备和容器 runtime 事实，同时返回 `HOST.UNSUPPORTED_OS` 或 `HOST.UNSUPPORTED_ARCH`。没有显式匹配的发行版适配器时，`host-prepare plan/apply` 均拒绝生成写入计划。不要通过修改 `/etc/os-release` 或绕过 CLI 强行套用 Ubuntu APT、内核及 systemd 动作。
-
