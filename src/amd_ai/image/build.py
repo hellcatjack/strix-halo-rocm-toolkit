@@ -429,7 +429,10 @@ def prune_images(
     if older_than_hours <= 0:
         raise BuildError("older-than-hours must be positive")
     repo_root = repo_root.resolve()
-    roots = tuple(project_roots or (repo_root / "projects",))
+    roots = tuple(
+        project_roots
+        or default_project_roots(repo_root=repo_root, current_dir=Path.cwd())
+    )
     protected = set(project_base_image_ids(roots))
     docker = Docker.detect()
     for reference in (ROCM_PYTHON_TAG, STABLE_TORCH_TAG):
@@ -469,6 +472,13 @@ def run_image_check(
     runtime: bool,
     json_path: str | None,
 ) -> int:
+    if (
+        not image
+        or image.startswith("-")
+        or "\0" in image
+        or any(character.isspace() for character in image)
+    ):
+        raise BuildError("container-check image reference is invalid")
     if metadata_only and runtime:
         raise BuildError("metadata-only and runtime checks are mutually exclusive")
     docker = Docker.detect()
@@ -498,6 +508,15 @@ def run_image_check(
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="")
     return result.returncode
+
+
+def default_project_roots(
+    *,
+    repo_root: Path,
+    current_dir: Path,
+) -> tuple[Path, ...]:
+    roots = (current_dir.resolve(), (repo_root / "projects").resolve())
+    return tuple(dict.fromkeys(roots))
 
 
 def _prepare_profile_artifacts(

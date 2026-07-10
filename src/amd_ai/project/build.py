@@ -29,6 +29,7 @@ DEFAULT_IGNORES = (
     "*.pyc",
 )
 REQUIRED_BUILD_FILES = (
+    ".dockerignore",
     "Dockerfile",
     "project-entrypoint",
     "amd-ai-project.toml",
@@ -50,6 +51,7 @@ class ParentImageMetadata:
     rocm_version: str
     python_version: str
     torch_version: str
+    layers: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -151,6 +153,7 @@ def build_or_reuse_project(
     for name in REQUIRED_BUILD_FILES:
         if not (context / name).is_file():
             raise ProjectBuildError(f"project build file is missing: {name}")
+    validate_dockerignore(context)
     fingerprint = build_context_fingerprint(context)
     parent = inspect_parent_image(config, runner, docker_prefix)
     current = _inspect_image(config.image, runner, docker_prefix, required=False)
@@ -161,6 +164,12 @@ def build_or_reuse_project(
             and labels.get("org.amd-ai.base.digest") == config.base_digest
         )
         if fresh and not force:
+            validate_project_image_contract(current, parent)
+            _verify_project_torch_manifest(
+                config.image,
+                runner,
+                docker_prefix,
+            )
             return ProjectBuildResult(
                 image=config.image,
                 image_id=_image_id(current, config.image),
@@ -207,6 +216,8 @@ def build_or_reuse_project(
         or labels.get("org.amd-ai.base.digest") != config.base_digest
     ):
         raise ProjectBuildError("built project image labels do not match its inputs")
+    validate_project_image_contract(built, parent)
+    _verify_project_torch_manifest(config.image, runner, docker_prefix)
     return ProjectBuildResult(
         image=config.image,
         image_id=_image_id(built, config.image),
@@ -240,6 +251,93 @@ def inspect_parent_image(
         rocm_version=_required_label(labels, "org.amd-ai.rocm.version"),
         python_version=_required_label(labels, "org.amd-ai.python.version"),
         torch_version=_required_label(labels, "org.amd-ai.torch.version"),
+        layers=_rootfs_layers(record, config.base_image),
+    )
+
+
+def validate_dockerignore(context: Path) -> None:
+    path = context / ".dockerignore"
+    if not path.is_file():
+        raise ProjectBuildError("project .dockerignore is missing")
+    try:
+        lines = [
+            line.strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+    except OSError as error:
+        raise ProjectBuildError(f"cannot read project .dockerignore: {error}") from error
+    if any(line.startswith("!") for line in lines):
+        raise ProjectBuildError(
+            "project .dockerignore negation rules are forbidden by storage policy"
+        )
+    missing = sorted(set(DEFAULT_IGNORES).difference(lines))
+    if missing:
+        raise ProjectBuildError(
+            "project .dockerignore is missing mandatory rules: " + ", ".join(missing)
+        )
+
+
+def validate_project_image_contract(
+    record: Mapping[str, object],
+    parent: ParentImageMetadata,
+) -> None:
+    layers = _rootfs_layers(record, "project image")
+    if layers[: len(parent.layers)] != parent.layers:
+        raise ProjectBuildError(
+            "project image does not inherit the configured parent layer prefix"
+        )
+    labels = _labels(record, "project image")
+    expected_labels = {
+        "org.amd-ai.profile.id": parent.profile_id,
+        "org.amd-ai.profile.status": parent.profile_status,
+        "org.amd-ai.rocm.version": parent.rocm_version,
+        "org.amd-ai.python.version": parent.python_version,
+        "org.amd-ai.torch.version": parent.torch_version,
+    }
+    for name, expected in expected_labels.items():
+        if labels.get(name) != expected:
+            label = name.removeprefix("org.amd-ai.").replace(".", " ")
+            raise ProjectBuildError(
+                f"project image {label} does not match its parent"
+            )
+    config = record.get("Config")
+    assert isinstance(config, dict)
+    environment = _environment(config, "project image")
+    for name, expected in {
+        "AMD_AI_PROFILE_ID": parent.profile_id,
+        "AMD_AI_PROFILE_STATUS": parent.profile_status,
+    }.items():
+        if environment.get(name) != expected:
+            label = name.removeprefix("AMD_AI_").lower().replace("_", " ")
+            raise ProjectBuildError(
+                f"project image {label} environment does not match its parent"
+            )
+    if "ALLOW_UNVERIFIED" in environment:
+        raise ProjectBuildError("project image must not persist ALLOW_UNVERIFIED")
+    if config.get("User") != "1000:1000":
+        raise ProjectBuildError("project image must run as user 1000:1000")
+    if config.get("WorkingDir") != "/workspace":
+        raise ProjectBuildError("project image workdir must be /workspace")
+    if config.get("Entrypoint") != ["/usr/local/bin/project-entrypoint"]:
+        raise ProjectBuildError("project image entrypoint is not the policy guard")
+
+
+def project_manifest_argv(
+    image: str,
+    *,
+    docker_prefix: Sequence[str] = ("docker",),
+) -> tuple[str, ...]:
+    return (
+        *docker_prefix,
+        "run",
+        "--rm",
+        "--entrypoint",
+        "/opt/venv/bin/python",
+        image,
+        "/opt/amd-ai/torch-manifest.py",
+        "verify",
+        "/opt/amd-ai/torch-manifest.json",
     )
 
 
@@ -360,6 +458,23 @@ def _image_id(record: Mapping[str, object], reference: str) -> str:
     return image_id
 
 
+def _rootfs_layers(
+    record: Mapping[str, object],
+    reference: str,
+) -> tuple[str, ...]:
+    rootfs = record.get("RootFS")
+    if not isinstance(rootfs, dict):
+        raise ProjectBuildError(f"image has no RootFS metadata: {reference}")
+    layers = rootfs.get("Layers")
+    if (
+        not isinstance(layers, list)
+        or not layers
+        or any(not isinstance(layer, str) or not layer for layer in layers)
+    ):
+        raise ProjectBuildError(f"image RootFS layers are invalid: {reference}")
+    return tuple(layers)
+
+
 def _labels(record: Mapping[str, object], reference: str) -> Mapping[str, str]:
     config = record.get("Config")
     if not isinstance(config, dict):
@@ -368,6 +483,35 @@ def _labels(record: Mapping[str, object], reference: str) -> Mapping[str, str]:
     if not isinstance(labels, dict):
         raise ProjectBuildError(f"image labels are invalid: {reference}")
     return MappingProxyType({str(key): str(value) for key, value in labels.items()})
+
+
+def _environment(config: Mapping[str, object], reference: str) -> Mapping[str, str]:
+    raw_environment = config.get("Env") or []
+    if not isinstance(raw_environment, list) or any(
+        not isinstance(value, str) or "=" not in value
+        for value in raw_environment
+    ):
+        raise ProjectBuildError(f"image environment is invalid: {reference}")
+    values = {}
+    for assignment in raw_environment:
+        name, _, value = assignment.partition("=")
+        values[name] = value
+    return MappingProxyType(values)
+
+
+def _verify_project_torch_manifest(
+    image: str,
+    runner: Runner,
+    docker_prefix: Sequence[str],
+) -> None:
+    result = runner.run(
+        list(project_manifest_argv(image, docker_prefix=docker_prefix)),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ProjectBuildError(
+            f"project image changed protected Torch files: {_evidence(result)}"
+        )
 
 
 def _required_label(labels: Mapping[str, str], name: str) -> str:

@@ -10,6 +10,7 @@ from amd_ai.image.build import (
     build_rocm_python_argv,
     build_torch_argv,
     driver_supports_attestations,
+    default_project_roots,
     immutable_parent_alias,
     materialize_profile_context,
     project_base_image_ids,
@@ -164,6 +165,32 @@ def test_prune_selection_excludes_protected_running_or_recent_images():
     )
 
     assert [image.image_id for image in selected] == ["sha256:" + "a" * 64]
+
+
+def test_default_prune_roots_include_cli_default_project_location(tmp_path):
+    repo_root = tmp_path / "repo"
+    current_dir = tmp_path / "operator"
+
+    assert default_project_roots(
+        repo_root=repo_root,
+        current_dir=current_dir,
+    ) == (current_dir.resolve(), (repo_root / "projects").resolve())
+
+
+def test_image_check_rejects_option_like_image_before_docker_detection(monkeypatch):
+    def fail_detect(cls):
+        raise AssertionError("Docker detection must not run")
+
+    monkeypatch.setattr(build.Docker, "detect", classmethod(fail_detect))
+
+    with pytest.raises(build.BuildError, match="image"):
+        build.run_image_check(
+            image="--privileged",
+            mode="torch",
+            metadata_only=True,
+            runtime=False,
+            json_path=None,
+        )
 
 
 def test_prune_preview_never_issues_a_mutating_docker_command(tmp_path, monkeypatch):

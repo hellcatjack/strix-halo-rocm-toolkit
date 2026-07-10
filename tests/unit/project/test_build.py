@@ -1,9 +1,16 @@
 from pathlib import Path
 
+import pytest
+
 from amd_ai.project.build import (
+    ParentImageMetadata,
+    ProjectBuildError,
     build_context_fingerprint,
+    project_manifest_argv,
     project_build_argv,
     project_parent_alias,
+    validate_dockerignore,
+    validate_project_image_contract,
 )
 
 
@@ -52,3 +59,67 @@ def test_build_uses_content_addressed_parent_alias_and_labels():
     assert "org.amd-ai.project.fingerprint=" + "f" * 64 in argv
     assert "org.amd-ai.base.digest=" + parent in argv
     assert "--load" in argv
+
+
+def test_dockerignore_must_preserve_mandatory_storage_exclusions(tmp_path):
+    dockerignore = tmp_path / ".dockerignore"
+    dockerignore.write_text(
+        ".git\n.venv\n.cache\n.amd-ai\nmodels\ninput\noutput\nreports\n"
+        "__pycache__\n*.pyc\n",
+        encoding="utf-8",
+    )
+    validate_dockerignore(tmp_path)
+
+    dockerignore.write_text(dockerignore.read_text() + "!.venv\n", encoding="utf-8")
+    with pytest.raises(ProjectBuildError, match="negation"):
+        validate_dockerignore(tmp_path)
+    dockerignore.unlink()
+    with pytest.raises(ProjectBuildError, match="missing"):
+        validate_dockerignore(tmp_path)
+
+
+def test_project_image_cannot_override_experimental_parent_contract():
+    parent = ParentImageMetadata(
+        image_id="sha256:" + "a" * 64,
+        profile_id="custom",
+        profile_status="experimental",
+        rocm_version="7.2.1",
+        python_version="3.12",
+        torch_version="2.9.1",
+        layers=("layer-a", "layer-b"),
+    )
+    record = {
+        "RootFS": {"Layers": ["layer-a", "layer-b", "project-layer"]},
+        "Config": {
+            "User": "1000:1000",
+            "WorkingDir": "/workspace",
+            "Entrypoint": ["/usr/local/bin/project-entrypoint"],
+            "Env": [
+                "AMD_AI_PROFILE_ID=custom",
+                "AMD_AI_PROFILE_STATUS=verified",
+            ],
+            "Labels": {
+                "org.amd-ai.profile.id": "custom",
+                "org.amd-ai.profile.status": "verified",
+                "org.amd-ai.rocm.version": "7.2.1",
+                "org.amd-ai.python.version": "3.12",
+                "org.amd-ai.torch.version": "2.9.1",
+            },
+        },
+    }
+
+    with pytest.raises(ProjectBuildError, match="profile status"):
+        validate_project_image_contract(record, parent)
+
+
+def test_project_image_must_reuse_parent_layers_and_manifest_command():
+    parent_id = "sha256:" + "a" * 64
+    argv = project_manifest_argv(
+        "demo:runtime",
+        docker_prefix=("sudo", "-n", "docker"),
+    )
+
+    assert argv[:5] == ("sudo", "-n", "docker", "run", "--rm")
+    assert "/opt/amd-ai/torch-manifest.py" in argv
+    assert "verify" in argv
+    assert parent_id not in argv
