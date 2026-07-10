@@ -1,7 +1,7 @@
 # 交互式一键安装与 Torch 防覆盖修复设计
 
 - 日期：2026-07-10
-- 状态：交互设计已确认，书面规格待复核
+- 状态：已确认，可进入实施
 - 项目：`hellcatjack/strix-halo-rocm-toolkit`
 - 正式平台：Ubuntu 24.04.x AMD64、Ryzen AI Max+ 395 / Radeon 8060S (`gfx1151`)
 - 正式基线：ROCm 7.2.1、Python 3.12、PyTorch 2.9.1
