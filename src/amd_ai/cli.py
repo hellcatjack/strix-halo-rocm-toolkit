@@ -53,6 +53,7 @@ from amd_ai.qualification.run import (
     QualificationError,
     run_profile as run_qualification_profile,
 )
+from amd_ai.qualification.release import main as qualification_release_main
 from amd_ai.report import Report, Status
 from amd_ai.runner import Runner, SubprocessRunner
 
@@ -146,6 +147,15 @@ def build_parser() -> argparse.ArgumentParser:
     project_run.add_argument("--dry-run", action="store_true")
     project_run.add_argument("--debug", action="store_true")
     project_run.add_argument("--shm-size-gib", type=_shm_gib)
+
+    gpu_release = subparsers.add_parser("gpu-release")
+    gpu_release.add_argument("--qualification", type=Path, required=True)
+    gpu_release.add_argument("--image", required=True)
+    gpu_release.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("reports/releases"),
+    )
     return parser
 
 
@@ -201,6 +211,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         ) as error:
             print(f"{args.command}: {error}", file=sys.stderr)
             return 2
+    if args.command == "gpu-release":
+        return _gpu_release(args)
     raise AssertionError(f"unhandled command: {args.command}")
 
 
@@ -266,6 +278,19 @@ def _qualification_suite(args: argparse.Namespace) -> int:
     if output_path is None:
         print(json.dumps(report.to_dict(), sort_keys=True))
     return 0 if report.status == "pass" else 2
+
+
+def _gpu_release(args: argparse.Namespace) -> int:
+    return qualification_release_main(
+        [
+            "--qualification",
+            str(args.qualification),
+            "--image",
+            args.image,
+            "--output-dir",
+            str(args.output_dir),
+        ]
+    )
 
 
 def _project_lock(args: argparse.Namespace) -> int:

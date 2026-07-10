@@ -1,0 +1,10 @@
+profile_id = "manual-comfy-video"
+project_path = "/srv/projects/comfy-video"
+runs = 2
+timeout_seconds = 7200
+required_observations = [
+  "first-run-seconds",
+  "second-run-seconds",
+  "peak-allocated-bytes",
+  "kernel-log",
+]

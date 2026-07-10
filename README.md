@@ -36,6 +36,8 @@ sudo reboot
 - `bin/host-verify`：重启后检查 live TTM、内核 GPU 错误和容器内 `gfx1151`。
 - `bin/image-build`：按固定锁构建 ROCm/Python、稳定或 experimental PyTorch 镜像，并提供安全清理预览。
 - `bin/container-check`：在指定镜像中执行元数据或 GPU runtime 检查。
+- `bin/container-check --suite stable`：执行完整 `gfx1151` 硬件资格门禁。
+- `bin/gpu-release`：验证摘要与 SBOM 后创建不可变 verified 发布记录。
 - `bin/project-init`：创建父镜像摘要锁定的独立项目。
 - `bin/project-lock`：为项目依赖生成哈希锁，并保护父层 Torch 组合。
 - `bin/project-run`：按指纹构建/复用项目镜像并安全映射 GPU 设备。
@@ -46,10 +48,19 @@ sudo reboot
 
 ```bash
 uv sync --dev
-uv run pytest -q
+uv run pytest -m "not hardware" -q
 bash -n bin/_dispatch bin/host-preflight bin/host-prepare bin/host-verify \
   bin/image-build bin/container-check bin/project-init bin/project-lock \
-  bin/project-run
+  bin/project-run bin/gpu-release
 ```
+
+目标主机的 300 秒 GPU 门禁需显式运行：
+
+```bash
+sudo -v
+uv run pytest tests/hardware/test_release.py -m hardware -v
+```
+
+检查顺序、失败证据、单变量 workaround 规则和发布步骤见 [GPU 资格与发布手册](docs/gpu-qualification.md)。
 
 设计规格和分阶段实施计划位于 `docs/superpowers/`。

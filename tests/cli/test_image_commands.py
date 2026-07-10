@@ -104,8 +104,42 @@ def test_container_check_stable_suite_forwards_profile_and_report_path(
     assert captured["gids"] == (109, 110)
 
 
+def test_gpu_release_wrapper_forwards_qualification_and_image(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_release(argv):
+        captured["argv"] = argv
+        return 0
+
+    monkeypatch.setattr(cli, "qualification_release_main", fake_release)
+    qualification = tmp_path / "qualification.json"
+    output = tmp_path / "releases"
+
+    code = cli.main(
+        [
+            "gpu-release",
+            "--qualification",
+            str(qualification),
+            "--image",
+            "rocm-pytorch:stable",
+            "--output-dir",
+            str(output),
+        ]
+    )
+
+    assert code == 0
+    assert captured["argv"] == [
+        "--qualification",
+        str(qualification),
+        "--image",
+        "rocm-pytorch:stable",
+        "--output-dir",
+        str(output),
+    ]
+
+
 def test_image_command_wrappers_are_executable_and_dispatch_expected_command():
-    for name in ("image-build", "container-check"):
+    for name in ("image-build", "container-check", "gpu-release"):
         path = Path("bin") / name
         assert path.is_file()
         assert os.access(path, os.X_OK)
