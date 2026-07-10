@@ -5,6 +5,7 @@ import getpass
 import json
 import os
 import pwd
+import re
 import shlex
 import subprocess
 import sys
@@ -31,6 +32,23 @@ from amd_ai.image.build import (
     build_rocm_pytorch,
     prune_images,
     run_image_check,
+    ROCM_PYTHON_TAG,
+    STABLE_TORCH_TAG,
+)
+from amd_ai.image.publish import (
+    DockerPublishRegistry,
+    PublishError,
+    observe_pushed_release,
+    publish_images,
+    publish_stable_release,
+    validate_publish_inputs,
+    verify_publish_candidate_local_images,
+    write_observed_release,
+)
+from amd_ai.installer.release import (
+    ReleaseError,
+    load_stable_release,
+    pull_and_verify_release,
 )
 from amd_ai.project.build import ProjectBuildError, build_or_reuse_project
 from amd_ai.project.config import ConfigError, load_project_config
@@ -161,6 +179,35 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("reports/releases"),
     )
+
+    release = subparsers.add_parser("release")
+    release_modes = release.add_subparsers(dest="release_mode", required=True)
+    release_verify = release_modes.add_parser("verify")
+    release_verify.add_argument(
+        "--manifest",
+        dest="manifest_path",
+        type=Path,
+        default=Path("profiles/releases/stable.json"),
+    )
+    release_publish = release_modes.add_parser("publish")
+    release_publish.add_argument("--release-id", required=True)
+    release_publish.add_argument(
+        "--qualification", type=Path, required=True
+    )
+    release_publish.add_argument("--sbom", type=Path, required=True)
+    release_publish.add_argument(
+        "--output",
+        type=Path,
+        default=Path("profiles/releases/stable.json"),
+    )
+    release_publish.add_argument(
+        "--publish-report",
+        type=Path,
+        default=Path("reports/publish-candidate.json"),
+    )
+    publication_stage = release_publish.add_mutually_exclusive_group()
+    publication_stage.add_argument("--dry-run", action="store_true")
+    publication_stage.add_argument("--push-only", action="store_true")
     return parser
 
 
@@ -218,6 +265,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
     if args.command == "gpu-release":
         return _gpu_release(args)
+    if args.command == "release":
+        try:
+            if args.release_mode == "verify":
+                return verify_release_command(
+                    manifest_path=args.manifest_path
+                )
+            return publish_release_command(
+                release_id=args.release_id,
+                qualification_path=args.qualification,
+                sbom_path=args.sbom,
+                output=args.output,
+                publish_report=args.publish_report,
+                dry_run=args.dry_run,
+                push_only=args.push_only,
+            )
+        except (BuildError, PublishError, ReleaseError, OSError) as error:
+            print(
+                "release: " + _redact_release_error(str(error)),
+                file=sys.stderr,
+            )
+            return 2
     raise AssertionError(f"unhandled command: {args.command}")
 
 
@@ -295,6 +363,106 @@ def _gpu_release(args: argparse.Namespace) -> int:
             "--output-dir",
             str(args.output_dir),
         ]
+    )
+
+
+def verify_release_command(*, manifest_path: Path) -> int:
+    release = load_stable_release(manifest_path)
+    docker = Docker.detect()
+    registry = DockerPublishRegistry(docker.prefix)
+    pull_and_verify_release(release, docker=registry)
+    print(f"verified {release.base.reference}")
+    print(f"verified {release.torch.reference}")
+    return 0
+
+
+def publish_release_command(
+    *,
+    release_id: str,
+    qualification_path: Path,
+    sbom_path: Path,
+    output: Path,
+    publish_report: Path,
+    dry_run: bool,
+    push_only: bool,
+) -> int:
+    revision = _clean_release_revision()
+    docker = Docker.detect()
+    base_image_id = docker.image_id(ROCM_PYTHON_TAG)
+    torch_image_id = docker.image_id(STABLE_TORCH_TAG)
+    assert base_image_id is not None and torch_image_id is not None
+    registry = DockerPublishRegistry(docker.prefix)
+    candidate = validate_publish_inputs(
+        release_id=release_id,
+        qualification_path=qualification_path,
+        sbom_path=sbom_path,
+        current_revision=revision,
+        base_image_id=base_image_id,
+        torch_image_id=torch_image_id,
+    )
+    candidate = verify_publish_candidate_local_images(
+        candidate, registry=registry
+    )
+    if dry_run:
+        print(
+            f"release evidence valid for {candidate.source_revision} "
+            f"({candidate.torch_local_id})"
+        )
+        return 0
+    if push_only:
+        observed = publish_images(candidate, registry=registry)
+        write_observed_release(publish_report, observed)
+        print(f"published {observed.base.reference}")
+        print(f"published {observed.torch.reference}")
+        print(f"publication report: {publish_report}")
+        return 0
+
+    observed = observe_pushed_release(publish_report)
+    release = publish_stable_release(
+        candidate,
+        registry=registry,
+        output=output,
+        observed=observed,
+    )
+    print(f"anonymous pull verified {release.base.reference}")
+    print(f"anonymous pull verified {release.torch.reference}")
+    print(f"stable release manifest: {output}")
+    return 0
+
+
+def _clean_release_revision() -> str:
+    status = subprocess.run(
+        ("git", "status", "--porcelain", "--untracked-files=no"),
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if status.returncode != 0:
+        raise PublishError(
+            "cannot inspect source worktree: "
+            + (status.stderr.strip() or "git status failed")
+        )
+    if status.stdout.strip():
+        raise PublishError("tracked source files are modified")
+    revision = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    value = revision.stdout.strip()
+    if revision.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", value) is None:
+        raise PublishError("cannot determine exact source revision")
+    return value
+
+
+def _redact_release_error(value: str) -> str:
+    return re.sub(
+        r"(https?://)[^\s/@]+@",
+        r"\1<redacted>@",
+        value,
     )
 
 

@@ -113,6 +113,7 @@ class FakeRegistry:
             if (
                 f"{observation.image}@{observation.manifest_digest}"
                 == reference
+                or observation.config_digest == reference
             ):
                 return observation
         raise KeyError(reference)

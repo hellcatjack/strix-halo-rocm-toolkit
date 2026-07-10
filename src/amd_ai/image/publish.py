@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
@@ -443,6 +443,9 @@ def validate_publish_inputs(
 def publish_images(
     candidate: PublishCandidate, *, registry: PublishRegistry
 ) -> StableRelease:
+    candidate = verify_publish_candidate_local_images(
+        candidate, registry=registry
+    )
     if candidate.base_local_id is None:
         raise PublishError("base local image ID is required for publication")
     _require_image_id(candidate.base_local_id, "base")
@@ -492,6 +495,79 @@ def publish_images(
         base=base,
         torch=torch,
         published_at=candidate.published_at,
+    )
+
+
+def verify_publish_candidate_local_images(
+    candidate: PublishCandidate, *, registry: PublishRegistry
+) -> PublishCandidate:
+    if candidate.base_local_id is None:
+        raise PublishError("base local image ID is required for publication")
+    artifacts_by_kind: dict[str, dict[str, str]] = {}
+    for kind, image_id, paths in (
+        ("base", candidate.base_local_id, BASE_ARTIFACT_PATHS),
+        ("torch", candidate.torch_local_id, TORCH_ARTIFACT_PATHS),
+    ):
+        _require_image_id(image_id, kind)
+        try:
+            record = registry.inspect(image_id)
+        except PublishError:
+            raise
+        except Exception as error:
+            raise PublishError(f"cannot inspect local {kind} image: {error}") from error
+        if not isinstance(record, Mapping) or record.get("Id") != image_id:
+            raise PublishError(f"local {kind} image config ID does not match")
+        config = record.get("Config")
+        labels = config.get("Labels") if isinstance(config, Mapping) else None
+        if not isinstance(labels, Mapping):
+            raise PublishError(f"local {kind} image labels are invalid")
+        expected_labels = {
+            "org.opencontainers.image.source": candidate.source_repository,
+            "org.opencontainers.image.revision": candidate.source_revision,
+            "org.amd-ai.rocm.version": "7.2.1",
+            "org.amd-ai.python.version": "3.12",
+        }
+        if kind == "torch":
+            expected_labels.update(
+                {
+                    "org.amd-ai.profile.id": candidate.torch_profile_id,
+                    "org.amd-ai.profile.status": "verified",
+                    "org.amd-ai.torch.version": "2.9.1",
+                }
+            )
+        for name, expected in expected_labels.items():
+            if labels.get(name) != expected:
+                raise PublishError(
+                    f"local {kind} image label does not match: {name}"
+                )
+        observed_artifacts: dict[str, str] = {}
+        for name, path in paths.items():
+            try:
+                digest = registry.hash_file(image_id, path)
+            except PublishError:
+                raise
+            except Exception as error:
+                raise PublishError(
+                    f"cannot hash local {kind} artifact {path}: {error}"
+                ) from error
+            if IMAGE_ID_PATTERN.fullmatch(digest) is None:
+                raise PublishError(f"local {kind} artifact digest is invalid: {name}")
+            observed_artifacts[name] = digest
+        expected_artifacts = (
+            candidate.base_artifact_digests
+            if kind == "base"
+            else candidate.torch_artifact_digests
+        )
+        for name, expected in expected_artifacts.items():
+            if observed_artifacts.get(name) != expected:
+                raise PublishError(
+                    f"local {kind} artifact differs from source evidence: {name}"
+                )
+        artifacts_by_kind[kind] = observed_artifacts
+    return replace(
+        candidate,
+        base_artifact_digests=artifacts_by_kind["base"],
+        torch_artifact_digests=artifacts_by_kind["torch"],
     )
 
 
