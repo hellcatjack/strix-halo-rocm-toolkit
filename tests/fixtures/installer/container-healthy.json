@@ -1,0 +1,12 @@
+{
+  "adapter_id": "ubuntu-24.04",
+  "architecture": "x86_64",
+  "device_gids": {
+    "/dev/dri/renderD128": 110,
+    "/dev/kfd": 109
+  },
+  "docker_version": "28.3.3",
+  "gpu_driver": "amdgpu",
+  "gpu_pci_id": "1002:1586",
+  "schema_version": 1
+}

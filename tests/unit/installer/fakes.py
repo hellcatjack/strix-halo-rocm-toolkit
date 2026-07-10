@@ -4,7 +4,11 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from amd_ai.host.models import HostSnapshot, PlannedAction, PreparePlan
-from amd_ai.installer.actions import HostPlanResult, prepare_plan_payload
+from amd_ai.installer.actions import (
+    HostPlanResult,
+    LocalBuildResult,
+    prepare_plan_payload,
+)
 from amd_ai.installer.models import (
     DiskSpaceEstimate,
     InstallOptions,
@@ -99,6 +103,7 @@ class FakeInstallerActions:
             payload_bytes=10 * 1024**3,
             available_bytes=100 * 1024**3,
         )
+        self.build_image_estimate = self.image_estimate
         self.project_estimate = DiskSpaceEstimate(
             location=Path("/tmp"),
             payload_bytes=1024**3,
@@ -107,6 +112,8 @@ class FakeInstallerActions:
         self.snapshot = healthy_snapshot()
         self.host_apply_include_docker_group: bool | None = None
         self.host_plan_result = self._make_host_plan(reboot_required=True)
+        self.pull_error: BaseException | None = None
+        self.project_init_kwargs: dict[str, object] = {}
 
     @classmethod
     def healthy(cls) -> FakeInstallerActions:
@@ -173,16 +180,34 @@ class FakeInstallerActions:
     def pull_release(self, release: StableRelease) -> object:
         self._raise_if_needed(InstallStage.IMAGE_PULL_OR_BUILD)
         self.calls.append("pull_release")
+        if self.pull_error is not None:
+            raise self.pull_error
         self.image_calls.extend(
             (("pull", release.base.reference), ("pull", release.torch.reference))
         )
         return object()
+
+    def build_local_images(self, **kwargs: object) -> LocalBuildResult:
+        del kwargs
+        self._raise_if_needed(InstallStage.IMAGE_PULL_OR_BUILD)
+        self.calls.append("build_local_images")
+        self.image_calls.extend(
+            (("build", "rocm-python"), ("build", "rocm-pytorch"))
+        )
+        return LocalBuildResult(
+            base_reference="rocm-python:7.2.1-py3.12",
+            base_config_digest="sha256:" + "8" * 64,
+            torch_reference="rocm-pytorch:7.2.1-py3.12-torch2.9.1",
+            torch_config_digest="sha256:" + "9" * 64,
+            source_revision="d" * 40,
+        )
 
     def verify_torch_image(self, image: str) -> StageResult:
         del image
         return self._record(InstallStage.IMAGE_VERIFY, "verify_torch_image")
 
     def initialize_project(self, **kwargs: object) -> StageResult:
+        self.project_init_kwargs = dict(kwargs)
         project_dir = kwargs["project_dir"]
         assert isinstance(project_dir, Path)
         project_dir.mkdir(parents=True, exist_ok=True)
@@ -193,8 +218,12 @@ class FakeInstallerActions:
         return self._record(InstallStage.PROJECT_VERIFY, "verify_project")
 
     def image_disk_estimate(self, **kwargs: object) -> DiskSpaceEstimate:
-        del kwargs
-        return self.image_estimate
+        source = kwargs.get("image_source")
+        return (
+            self.build_image_estimate
+            if source == "build"
+            else self.image_estimate
+        )
 
     def project_disk_estimate(self, **kwargs: object) -> DiskSpaceEstimate:
         del kwargs

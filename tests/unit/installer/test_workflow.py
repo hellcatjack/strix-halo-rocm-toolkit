@@ -7,9 +7,12 @@ from pathlib import Path
 from amd_ai.host.models import PlannedAction
 from amd_ai.installer.actions import prepare_plan_payload
 from amd_ai.installer.models import InstallMode, InstallOptions, InstallStage
+from amd_ai.installer.release import (
+    ReleaseAcquisitionError,
+    ReleaseIdentityError,
+)
 from amd_ai.installer.state import (
     install_lock,
-    load_state,
     save_state,
     stage_input_digest,
 )
@@ -80,6 +83,16 @@ def full_options(
             "tests/fixtures/releases/stable.json"
         ).resolve(),
         state_path=tmp_path / "install-state.json",
+    )
+
+
+def noninteractive_container_options(
+    tmp_path: Path, *, image_source: str
+) -> InstallOptions:
+    return replace(
+        workflow_options(tmp_path),
+        non_interactive=True,
+        image_source=image_source,
     )
 
 
@@ -504,3 +517,110 @@ def test_changed_host_plan_after_checkpoint_requires_replanning(
     assert result.exit_code == 2
     assert "host plan digest changed" in result.message
     assert "host_apply" not in resumed_actions.calls
+
+
+def test_interactive_pull_failure_requires_explicit_build_choice(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+    actions.pull_error = ReleaseAcquisitionError("registry unavailable")
+    prompts = FakePrompts(image_fallback="build")
+
+    result = installer_workflow(
+        tmp_path, actions=actions, prompts=prompts
+    ).run()
+
+    assert result.exit_code == 0
+    assert "build_local_images" in actions.calls
+    assert result.state is not None
+    assert result.state.release_id == "local"
+
+
+def test_noninteractive_pull_failure_never_implicitly_builds(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+    actions.pull_error = ReleaseAcquisitionError("registry unavailable")
+
+    result = installer_workflow(
+        tmp_path,
+        actions=actions,
+        options=noninteractive_container_options(
+            tmp_path, image_source="pull"
+        ),
+    ).run()
+
+    assert result.exit_code == 2
+    assert "build_local_images" not in actions.calls
+
+
+def test_pulled_identity_mismatch_never_offers_local_build(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+    actions.pull_error = ReleaseIdentityError("config digest changed")
+    prompts = FakePrompts(image_fallback="build")
+
+    result = installer_workflow(
+        tmp_path, actions=actions, prompts=prompts
+    ).run()
+
+    assert result.exit_code == 2
+    assert "identity" in result.message
+    assert "build_local_images" not in actions.calls
+
+
+def test_noninteractive_build_source_never_attempts_pull(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+
+    result = installer_workflow(
+        tmp_path,
+        actions=actions,
+        options=noninteractive_container_options(
+            tmp_path, image_source="build"
+        ),
+    ).run()
+
+    assert result.exit_code == 0
+    assert "pull_release" not in actions.calls
+    assert "build_local_images" in actions.calls
+
+
+def test_project_initialization_receives_selected_exact_parent_identity(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+
+    result = installer_workflow(tmp_path, actions=actions).run()
+
+    assert result.exit_code == 0
+    assert actions.project_init_kwargs["base_image_reference"] == (
+        actions.release.torch.reference
+    )
+    assert actions.project_init_kwargs["base_config_digest"] == (
+        actions.release.torch.config_digest
+    )
+
+
+def test_interactive_build_fallback_rechecks_build_disk_requirement(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+    actions.pull_error = ReleaseAcquisitionError("registry unavailable")
+    actions.build_image_estimate = replace(
+        actions.build_image_estimate,
+        payload_bytes=40 * 1024**3,
+        available_bytes=44 * 1024**3,
+    )
+
+    result = installer_workflow(
+        tmp_path,
+        actions=actions,
+        prompts=FakePrompts(image_fallback="build"),
+    ).run()
+
+    assert result.exit_code == 2
+    assert "image build disk space" in result.message
+    assert "build_local_images" not in actions.calls

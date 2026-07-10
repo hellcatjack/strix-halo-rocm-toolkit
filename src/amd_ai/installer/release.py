@@ -77,6 +77,14 @@ class ReleaseError(RuntimeError):
     pass
 
 
+class ReleaseAcquisitionError(ReleaseError):
+    pass
+
+
+class ReleaseIdentityError(ReleaseError):
+    pass
+
+
 class ReleaseDocker(Protocol):
     def pull(self, reference: str) -> None:
         pass
@@ -219,25 +227,25 @@ def verify_release_image(
     docker: ReleaseDocker,
 ) -> VerifiedImageIdentity:
     if kind not in {"base", "torch"}:
-        raise ReleaseError(f"unsupported release image kind: {kind}")
+        raise ReleaseIdentityError(f"unsupported release image kind: {kind}")
     expected_image = release.base if kind == "base" else release.torch
     if image != expected_image:
-        raise ReleaseError(
+        raise ReleaseIdentityError(
             f"stable release {kind} verifier received the wrong image identity"
         )
     try:
         record = docker.inspect(image.reference)
-    except ReleaseError:
-        raise
     except Exception as error:
-        raise ReleaseError(
+        raise ReleaseIdentityError(
             f"cannot inspect exact release image {image.reference}: {error}"
         ) from error
     if not isinstance(record, Mapping):
-        raise ReleaseError(f"release {kind} image inspect record is invalid")
+        raise ReleaseIdentityError(
+            f"release {kind} image inspect record is invalid"
+        )
     config_digest = record.get("Id")
     if config_digest != image.config_digest:
-        raise ReleaseError(
+        raise ReleaseIdentityError(
             f"release {kind} config digest does not match: {config_digest}"
         )
     raw_repo_digests = record.get("RepoDigests")
@@ -246,18 +254,18 @@ def verify_release_image(
         or any(not isinstance(value, str) for value in raw_repo_digests)
         or image.reference not in raw_repo_digests
     ):
-        raise ReleaseError(
+        raise ReleaseIdentityError(
             f"release {kind} RepoDigest does not include {image.reference}"
         )
     raw_config = record.get("Config")
     if not isinstance(raw_config, Mapping):
-        raise ReleaseError(f"release {kind} image config is invalid")
+        raise ReleaseIdentityError(f"release {kind} image config is invalid")
     raw_labels = raw_config.get("Labels")
     if not isinstance(raw_labels, Mapping) or any(
         not isinstance(name, str) or not isinstance(value, str)
         for name, value in raw_labels.items()
     ):
-        raise ReleaseError(f"release {kind} image labels are invalid")
+        raise ReleaseIdentityError(f"release {kind} image labels are invalid")
     labels = dict(raw_labels)
     expected_labels = {
         "org.opencontainers.image.source": release.source_repository,
@@ -277,21 +285,19 @@ def verify_release_image(
         artifact_paths = TORCH_ARTIFACT_PATHS
     for name, expected in expected_labels.items():
         if labels.get(name) != expected:
-            raise ReleaseError(
+            raise ReleaseIdentityError(
                 f"release {kind} image label {name} does not match"
             )
     for name, path in artifact_paths.items():
         try:
             actual = docker.hash_file(image.reference, path)
-        except ReleaseError:
-            raise
         except Exception as error:
-            raise ReleaseError(
+            raise ReleaseIdentityError(
                 f"cannot hash release {kind} artifact {path}: {error}"
             ) from error
         expected = image.artifact_digests[name]
         if actual != expected:
-            raise ReleaseError(
+            raise ReleaseIdentityError(
                 f"release {kind} artifact digest does not match: {path}"
             )
     return VerifiedImageIdentity(
@@ -309,10 +315,8 @@ def pull_and_verify_release(
     for kind, image in (("base", release.base), ("torch", release.torch)):
         try:
             docker.pull(image.reference)
-        except ReleaseError:
-            raise
         except Exception as error:
-            raise ReleaseError(
+            raise ReleaseAcquisitionError(
                 f"cannot pull exact {kind} release image {image.reference}: {error}"
             ) from error
         identities.append(

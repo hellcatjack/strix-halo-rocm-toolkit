@@ -30,19 +30,23 @@ from amd_ai.installer.prompts import (
     PromptError,
     TerminalPrompts,
 )
-from amd_ai.installer.release import load_stable_release
+from amd_ai.installer.release import (
+    ReleaseAcquisitionError,
+    ReleaseIdentityError,
+    load_stable_release,
+)
 from amd_ai.installer.state import (
     CorruptInstallState,
     InstallAlreadyRunning,
     InstallerStateError,
     ResumeInputChanged,
+    boot_id_changed,
     install_lock,
     load_state,
+    read_boot_id,
     save_state,
     stage_input_digest,
     validate_completed_stage,
-    boot_id_changed,
-    read_boot_id,
 )
 from amd_ai.report import Report, Status
 
@@ -168,6 +172,8 @@ class InstallerWorkflow:
             host_plan_digest=None,
             host_adapter_id=None,
             docker_group_accepted=False,
+            base_config_digest=None,
+            torch_config_digest=None,
             last_report_paths=(),
         )
 
@@ -295,7 +301,41 @@ class InstallerWorkflow:
             release = self._resolved_release(state)
             source = self.options.image_source or "pull"
             if source == "pull":
-                return self.actions.pull_release(release)
+                try:
+                    return self.actions.pull_release(release)
+                except ReleaseIdentityError as error:
+                    raise WorkflowError(
+                        "release image identity verification failed; "
+                        f"local fallback is forbidden: {error}"
+                    ) from error
+                except ReleaseAcquisitionError as error:
+                    if self.options.non_interactive:
+                        raise WorkflowError(
+                            f"exact release pull failed: {error}"
+                        ) from error
+                    fallback = self.prompts.choose_image_fallback()
+                    if fallback != "build":
+                        raise WorkflowError(
+                            f"exact release pull failed and local build was refused: {error}"
+                        ) from error
+                    self._status(
+                        "WARN",
+                        "exact release pull failed; using explicit local build",
+                    )
+                    estimate = self.actions.image_disk_estimate(
+                        release=release, image_source="build"
+                    )
+                    shortage = _require_disk_space(
+                        estimate,
+                        required_bytes=estimate.payload_bytes + 5 * GIB,
+                        operation="image build",
+                    )
+                    if shortage is not None:
+                        raise WorkflowError(shortage)
+                    return self.actions.build_local_images(
+                        source_root=self.options.source_root,
+                        installer_source_revision=self.installer_source_revision,
+                    )
             return self.actions.build_local_images(
                 source_root=self.options.source_root,
                 installer_source_revision=self.installer_source_revision,
@@ -311,11 +351,16 @@ class InstallerWorkflow:
                 project_dir=self.options.project_dir,
                 project_name=self.options.project_name,
                 base_profile="stable",
+                base_image_reference=state.torch_image_reference,
+                base_config_digest=state.torch_config_digest,
+                target_user=state.target_user,
             )
         if stage is InstallStage.PROJECT_VERIFY:
             return self.actions.verify_project(
                 project_dir=self.options.project_dir,
                 manifest_path=self.options.manifest_path,
+                qualified=state.release_id != "local",
+                target_user=state.target_user,
             )
         if stage is InstallStage.COMPLETE:
             return StageResult()
@@ -404,8 +449,10 @@ class InstallerWorkflow:
                     "source_revision": state.source_revision,
                     "base_reference": state.base_image_reference,
                     "base_manifest_digest": state.base_manifest_digest,
+                    "base_config_digest": state.base_config_digest,
                     "torch_reference": state.torch_image_reference,
                     "torch_manifest_digest": state.torch_manifest_digest,
+                    "torch_config_digest": state.torch_config_digest,
                     "image_source": self.options.image_source or "pull",
                 }
             )
@@ -414,6 +461,7 @@ class InstallerWorkflow:
                 {
                     "torch_reference": state.torch_image_reference,
                     "torch_manifest_digest": state.torch_manifest_digest,
+                    "torch_config_digest": state.torch_config_digest,
                 }
             )
         elif stage is InstallStage.PROJECT_INIT:
@@ -423,6 +471,7 @@ class InstallerWorkflow:
                     "project_name": self.options.project_name,
                     "torch_reference": state.torch_image_reference,
                     "torch_manifest_digest": state.torch_manifest_digest,
+                    "torch_config_digest": state.torch_config_digest,
                 }
             )
         elif stage in (InstallStage.PROJECT_VERIFY, InstallStage.COMPLETE):
@@ -519,8 +568,10 @@ class InstallerWorkflow:
                     "source_revision": output.source_revision,
                     "base_image_reference": output.base.reference,
                     "base_manifest_digest": output.base.manifest_digest,
+                    "base_config_digest": output.base.config_digest,
                     "torch_image_reference": output.torch.reference,
                     "torch_manifest_digest": output.torch.manifest_digest,
+                    "torch_config_digest": output.torch.config_digest,
                 }
             )
         elif stage is InstallStage.IMAGE_PULL_OR_BUILD and isinstance(
@@ -531,8 +582,10 @@ class InstallerWorkflow:
                     "release_id": "local",
                     "base_image_reference": output.base_reference,
                     "base_manifest_digest": output.base_config_digest,
+                    "base_config_digest": output.base_config_digest,
                     "torch_image_reference": output.torch_reference,
                     "torch_manifest_digest": output.torch_config_digest,
+                    "torch_config_digest": output.torch_config_digest,
                 }
             )
         reports = tuple(dict.fromkeys((*state.last_report_paths, *outcome.report_paths)))

@@ -192,6 +192,8 @@ class InstallState:
     host_plan_digest: str | None = None
     host_adapter_id: str | None = None
     docker_group_accepted: bool = False
+    base_config_digest: str | None = None
+    torch_config_digest: str | None = None
     last_report_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -224,6 +226,12 @@ class InstallState:
             "torch_manifest_digest", self.torch_manifest_digest, prefixed=True
         )
         _require_optional_sha256("host_plan_digest", self.host_plan_digest)
+        _require_optional_sha256(
+            "base_config_digest", self.base_config_digest, prefixed=True
+        )
+        _require_optional_sha256(
+            "torch_config_digest", self.torch_config_digest, prefixed=True
+        )
         if self.host_adapter_id is not None and (
             not isinstance(self.host_adapter_id, str)
             or not self.host_adapter_id

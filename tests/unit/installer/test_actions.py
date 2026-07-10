@@ -10,12 +10,15 @@ from amd_ai.host.models import PreparePlan
 from amd_ai.installer import actions
 from amd_ai.installer.actions import (
     ActionError,
+    AnonymousReleaseRegistry,
     ProductionInstallerActions,
+    bind_selected_parent,
     prepare_plan_payload,
     validate_local_build_source,
 )
 from amd_ai.installer.release import load_stable_release
 from amd_ai.installer.state import stage_input_digest
+from amd_ai.runner import CommandResult
 from tests.unit.host.fakes import healthy_snapshot
 from tests.unit.installer.fakes import FakeReleaseDocker
 
@@ -71,8 +74,8 @@ def test_release_pull_calls_exact_release_api(
     docker = FakeReleaseDocker.for_release(release)
     captured: dict[str, object] = {}
 
-    def pull(value, registry):
-        captured.update(release=value, registry=registry)
+    def pull(value, *, docker):
+        captured.update(release=value, registry=docker)
         return "verified"
 
     monkeypatch.setattr(actions, "pull_and_verify_release", pull)
@@ -194,3 +197,72 @@ def test_project_disk_estimate_counts_resolved_artifacts(
     assert estimate.location == project.resolve()
     assert estimate.payload_bytes == 24
     assert estimate.available_bytes == 900
+
+
+def test_selected_parent_alias_is_bound_only_after_exact_config_check() -> None:
+    expected = "sha256:" + "a" * 64
+    reference = "ghcr.io/example/torch@sha256:" + "b" * 64
+
+    class Runner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        def run(self, args, *, check=True, input_text=None):
+            del check, input_text
+            call = tuple(args)
+            self.calls.append(call)
+            if call[1:4] == ("image", "inspect", "--format"):
+                return CommandResult(call, 0, expected + "\n", "")
+            return CommandResult(call, 0, "", "")
+
+    runner = Runner()
+
+    bind_selected_parent(
+        reference=reference,
+        config_digest=expected,
+        runner=runner,
+        docker_prefix=("docker",),
+    )
+
+    assert ("docker", "tag", reference, actions.STABLE_TORCH_TAG) in runner.calls
+
+
+def test_selected_parent_alias_rejects_config_drift_before_tagging() -> None:
+    expected = "sha256:" + "a" * 64
+    reference = "ghcr.io/example/torch@sha256:" + "b" * 64
+
+    class Runner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        def run(self, args, *, check=True, input_text=None):
+            del check, input_text
+            call = tuple(args)
+            self.calls.append(call)
+            return CommandResult(call, 0, "sha256:" + "c" * 64 + "\n", "")
+
+    runner = Runner()
+
+    with pytest.raises(ActionError, match="config digest"):
+        bind_selected_parent(
+            reference=reference,
+            config_digest=expected,
+            runner=runner,
+            docker_prefix=("docker",),
+        )
+
+    assert not any(call[1:2] == ("tag",) for call in runner.calls)
+
+
+def test_default_release_registry_pull_uses_empty_auth_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = AnonymousReleaseRegistry(("docker",))
+    captured: list[str] = []
+    monkeypatch.setattr(
+        registry, "authless_pull", lambda reference: captured.append(reference)
+    )
+
+    registry.pull("ghcr.io/example/image@sha256:" + "a" * 64)
+
+    assert captured == ["ghcr.io/example/image@sha256:" + "a" * 64]

@@ -80,6 +80,7 @@ from amd_ai.project.run import (
     build_run_argv,
     ensure_project_home,
     inspect_project_image,
+    load_project_protected_profile,
     redact_run_argv,
     require_profile_allowed,
 )
@@ -679,55 +680,12 @@ def _project_protected_profile(
     runner: Runner,
     docker_prefix: Sequence[str],
 ) -> ProtectedProfile:
-    args = [
-        *docker_prefix,
-        "run",
-        "--rm",
-        "--entrypoint",
-        "/bin/cat",
-        config.image,
-        "/opt/amd-ai/torch-manifest.json",
-    ]
-    result = runner.run(args, check=False)
-    if result.returncode != 0:
-        evidence = result.stderr.strip() or result.stdout.strip() or "no output"
-        raise ProjectRunError(
-            f"cannot read project Torch manifest: {evidence}"
-        )
-    try:
-        manifest = json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        raise ProjectRunError("cannot parse project Torch manifest") from error
-    packages = manifest.get("packages") if isinstance(manifest, dict) else None
-    if (
-        not isinstance(manifest, dict)
-        or manifest.get("schema_version") != 1
-        or not isinstance(packages, list)
-    ):
-        raise ProjectRunError("project Torch manifest schema is invalid")
-    components: list[ProtectedComponent] = []
-    for package in packages:
-        if not isinstance(package, dict):
-            raise ProjectRunError("project Torch manifest package is invalid")
-        name = package.get("name")
-        version = package.get("version")
-        if name in PROTECTED_DISTRIBUTIONS and isinstance(version, str):
-            try:
-                components.append(ProtectedComponent(name, version))
-            except OverlayError as error:
-                raise ProjectRunError(
-                    f"project Torch manifest package is invalid: {name}"
-                ) from error
-    try:
-        return ProtectedProfile(
-            metadata.profile_id,
-            config.base_digest,
-            tuple(components),
-        )
-    except OverlayError as error:
-        raise ProjectRunError(
-            f"project protected profile is invalid: {error}"
-        ) from error
+    return load_project_protected_profile(
+        config=config,
+        metadata=metadata,
+        runner=runner,
+        docker_prefix=docker_prefix,
+    )
 
 
 def _project_config_path(project: Path) -> Path:

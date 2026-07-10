@@ -18,16 +18,16 @@ from amd_ai.host.models import HostSnapshot, PreparePlan
 from amd_ai.host.policy import evaluate_preflight
 from amd_ai.host.prepare import create_prepare_plan, with_docker_group_action
 from amd_ai.host.probe import HostProbe
-from amd_ai.host.verify import verify_host
+from amd_ai.host.verify import evaluate_post_reboot
 from amd_ai.image.build import (
     ROCM_PYTHON_TAG,
+    STABLE_TORCH_TAG,
     build_rocm_python,
     build_rocm_pytorch,
     run_image_check,
 )
 from amd_ai.image.publish import DockerPublishRegistry
-from amd_ai.installer.models import StageResult, StableRelease
-from amd_ai.installer.models import DiskSpaceEstimate
+from amd_ai.installer.models import DiskSpaceEstimate, StageResult, StableRelease
 from amd_ai.installer.release import (
     ReleaseDocker,
     VerifiedReleaseImages,
@@ -35,9 +35,22 @@ from amd_ai.installer.release import (
     pull_and_verify_release,
 )
 from amd_ai.installer.state import stage_input_digest
+from amd_ai.overlay.models import OverlayPaths
+from amd_ai.overlay.transaction import initialize_overlay
 from amd_ai.project.build import ProjectBuildResult, build_or_reuse_project
 from amd_ai.project.config import ProjectConfig, load_project_config
 from amd_ai.project.init import initialize_project as create_project
+from amd_ai.project.run import (
+    build_run_argv,
+    ensure_project_home,
+    inspect_project_image,
+    load_project_protected_profile,
+)
+from amd_ai.project.runtime import (
+    compute_shm_gib,
+    discover_gpu_access,
+    read_mem_total_kib,
+)
 from amd_ai.report import Report, Status
 from amd_ai.runner import Runner, SubprocessRunner
 
@@ -89,6 +102,11 @@ class ProjectInstallResult:
     build: ProjectBuildResult
 
 
+class AnonymousReleaseRegistry(DockerPublishRegistry):
+    def pull(self, reference: str) -> None:
+        self.authless_pull(reference)
+
+
 class ProductionInstallerActions:
     def __init__(
         self,
@@ -107,7 +125,7 @@ class ProductionInstallerActions:
         self.runner = runner or SubprocessRunner()
         self.root = Path(root)
         self.docker_prefix = tuple(docker_prefix)
-        self.release_docker = release_docker or DockerPublishRegistry(
+        self.release_docker = release_docker or AnonymousReleaseRegistry(
             self.docker_prefix
         )
         self.effective_uid = (
@@ -178,13 +196,8 @@ class ProductionInstallerActions:
         )
 
     def host_verify(self, *, image: str = ROCM_PYTHON_TAG) -> Report:
-        snapshot = self._snapshot()
-        return verify_host(
-            snapshot,
-            image=image,
-            runner=self.runner,
-            docker_prefix=self.docker_prefix,
-        )
+        del image
+        return evaluate_post_reboot(self._snapshot())
 
     def container_host_check(self) -> StageResult:
         snapshot = self._snapshot()
@@ -232,7 +245,7 @@ class ProductionInstallerActions:
         return load_stable_release(manifest_path)
 
     def pull_release(self, release: StableRelease) -> VerifiedReleaseImages:
-        return pull_and_verify_release(release, self.release_docker)
+        return pull_and_verify_release(release, docker=self.release_docker)
 
     def build_local_images(
         self,
@@ -333,12 +346,33 @@ class ProductionInstallerActions:
         project_dir: Path,
         project_name: str,
         base_profile: str = "stable",
+        base_image_reference: str | None = None,
+        base_config_digest: str | None = None,
+        target_user: str | None = None,
         owner_uid: int | None = None,
         owner_gid: int | None = None,
     ) -> ProjectInstallResult:
+        if base_profile != "stable":
+            raise ActionError("the installer only initializes the stable profile")
+        if base_image_reference is None or base_config_digest is None:
+            raise ActionError("selected parent image identity is unavailable")
+        bind_selected_parent(
+            reference=base_image_reference,
+            config_digest=base_config_digest,
+            runner=self.runner,
+            docker_prefix=self.docker_prefix,
+        )
+        if (owner_uid is None) != (owner_gid is None):
+            raise ActionError("project owner UID and GID must be supplied together")
+        if owner_uid is None or owner_gid is None:
+            owner_uid, owner_gid = _user_identity(target_user)
         config_path = project_dir / "amd-ai-project.toml"
         if config_path.exists():
             config = load_project_config(config_path)
+            if config.base_digest != base_config_digest:
+                raise ActionError(
+                    "existing project parent config digest differs from selection"
+                )
         else:
             create_project(
                 name=project_name,
@@ -357,15 +391,83 @@ class ProductionInstallerActions:
             no_build=False,
             docker_prefix=self.docker_prefix,
         )
+        metadata = inspect_project_image(
+            config, self.runner, self.docker_prefix
+        )
+        if metadata.profile_status != "verified":
+            raise ActionError(
+                "installer project parent must use the verified Torch profile"
+            )
+        ensure_project_home(
+            config.path.parent, uid=owner_uid, gid=owner_gid
+        )
+        profile = load_project_protected_profile(
+            config=config,
+            metadata=metadata,
+            runner=self.runner,
+            docker_prefix=self.docker_prefix,
+        )
+        initialize_overlay(
+            OverlayPaths.for_project(config.path.parent), profile=profile
+        )
         return ProjectInstallResult(config=config, build=build)
 
     def verify_project(
-        self, *, project_dir: Path, manifest_path: Path
+        self,
+        *,
+        project_dir: Path,
+        manifest_path: Path,
+        qualified: bool = True,
+        target_user: str | None = None,
     ) -> StageResult:
+        config = load_project_config(project_dir / "amd-ai-project.toml")
+        metadata = inspect_project_image(
+            config, self.runner, self.docker_prefix
+        )
+        if metadata.profile_status != "verified":
+            return StageResult(
+                blocked=True,
+                message="project image does not use the verified Torch profile",
+            )
+        uid, gid = _user_identity(target_user)
+        ensure_project_home(config.path.parent, uid=uid, gid=gid)
+        access = discover_gpu_access()
+        shm_gib = config.shm_size_gib or compute_shm_gib(
+            mem_total_kib=read_mem_total_kib()
+        )
+        probe_config = replace(config, command=("/bin/true",))
+        argv = build_run_argv(
+            config=probe_config,
+            access=access,
+            uid=uid,
+            gid=gid,
+            shm_gib=shm_gib,
+            environment=os.environ,
+            terminal=False,
+            docker_prefix=self.docker_prefix,
+        )
+        result = self.runner.run(list(argv), check=False)
+        if result.returncode != 0:
+            evidence = result.stderr.strip() or result.stdout.strip() or "no output"
+            return StageResult(
+                facts={"managed_startup_returncode": result.returncode},
+                blocked=True,
+                message=f"managed project startup verification failed: {evidence}",
+            )
+        if not qualified:
+            return StageResult(
+                facts={
+                    "managed_startup_returncode": 0,
+                    "release_status": "local-unqualified",
+                }
+            )
         report = run_doctor(project_dir, manifest_path)
         blocked = report.status not in {"pass", "warning"}
         return StageResult(
-            facts={"doctor": report.to_dict()},
+            facts={
+                "managed_startup_returncode": 0,
+                "doctor": report.to_dict(),
+            },
             blocked=blocked,
             message="project verification failed" if blocked else "",
         )
@@ -478,6 +580,75 @@ def _target_user_group_ids(target_user: str) -> tuple[int, ...]:
         raise ActionError(
             f"cannot resolve groups for target user {target_user!r}"
         ) from error
+
+
+def bind_selected_parent(
+    *,
+    reference: str,
+    config_digest: str,
+    runner: Runner,
+    docker_prefix: Sequence[str] = ("docker",),
+) -> None:
+    if (
+        not reference
+        or reference.startswith("-")
+        or "\0" in reference
+        or any(character.isspace() for character in reference)
+    ):
+        raise ActionError("selected parent image reference is invalid")
+    if DIGEST_PATTERN.fullmatch(config_digest) is None:
+        raise ActionError("selected parent config digest is invalid")
+    inspected = runner.run(
+        [
+            *docker_prefix,
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            reference,
+        ],
+        check=False,
+    )
+    if inspected.returncode != 0 or inspected.stdout.strip() != config_digest:
+        evidence = (
+            inspected.stderr.strip()
+            or inspected.stdout.strip()
+            or "image is missing"
+        )
+        raise ActionError(
+            "selected parent config digest does not match exact reference: "
+            + evidence
+        )
+    tagged = runner.run(
+        [*docker_prefix, "tag", reference, STABLE_TORCH_TAG],
+        check=False,
+    )
+    if tagged.returncode != 0:
+        evidence = tagged.stderr.strip() or tagged.stdout.strip() or "no output"
+        raise ActionError(f"cannot bind selected parent alias: {evidence}")
+    alias = runner.run(
+        [
+            *docker_prefix,
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            STABLE_TORCH_TAG,
+        ],
+        check=False,
+    )
+    if alias.returncode != 0 or alias.stdout.strip() != config_digest:
+        raise ActionError("selected parent alias does not preserve config digest")
+
+
+def _user_identity(target_user: str | None) -> tuple[int, int]:
+    if target_user is None:
+        return os.getuid(), os.getgid()
+    try:
+        record = pwd.getpwnam(target_user)
+    except KeyError as error:
+        raise ActionError(f"cannot resolve target user {target_user!r}") from error
+    return record.pw_uid, record.pw_gid
 
 
 def _docker_root_and_available(

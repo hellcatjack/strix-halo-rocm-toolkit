@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 
 from amd_ai.installer.release import (
+    ReleaseAcquisitionError,
     ReleaseError,
+    ReleaseIdentityError,
     load_stable_release,
     pull_and_verify_release,
     verify_release_image,
@@ -136,6 +138,19 @@ def test_verify_release_image_rejects_friendly_tag_drift(release) -> None:
         verify_release_image(
             release, release.torch, kind="torch", docker=docker
         )
+
+
+def test_pull_failure_is_distinct_from_pulled_identity_failure(release) -> None:
+    unavailable = FakeReleaseDocker.for_release(release)
+    unavailable.pull_error = OSError("network unavailable")
+
+    with pytest.raises(ReleaseAcquisitionError):
+        pull_and_verify_release(release, docker=unavailable)
+
+    drifted = FakeReleaseDocker.for_release(release)
+    drifted.records[release.base.reference]["Id"] = "sha256:" + "8" * 64
+    with pytest.raises(ReleaseIdentityError):
+        pull_and_verify_release(release, docker=drifted)
 
 
 @pytest.mark.parametrize("damage", ("config", "label", "artifact", "kind"))

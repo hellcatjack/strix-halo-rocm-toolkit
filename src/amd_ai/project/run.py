@@ -7,6 +7,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from amd_ai.overlay.models import (
+    PROTECTED_DISTRIBUTIONS,
+    OverlayError,
+    ProtectedComponent,
+    ProtectedProfile,
+)
 from amd_ai.project.build import FINGERPRINT_PATTERN
 from amd_ai.project.config import (
     ENVIRONMENT_PATTERN,
@@ -216,6 +222,63 @@ def inspect_project_image(
         base_digest=base_digest,
         fingerprint=fingerprint,
     )
+
+
+def load_project_protected_profile(
+    *,
+    config: ProjectConfig,
+    metadata: ProjectImageMetadata,
+    runner: Runner,
+    docker_prefix: Sequence[str] = ("docker",),
+) -> ProtectedProfile:
+    args = [
+        *docker_prefix,
+        "run",
+        "--rm",
+        "--entrypoint",
+        "/bin/cat",
+        config.image,
+        "/opt/amd-ai/torch-manifest.json",
+    ]
+    result = runner.run(args, check=False)
+    if result.returncode != 0:
+        raise ProjectRunError(
+            f"cannot read project Torch manifest: {_evidence(result)}"
+        )
+    try:
+        manifest = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ProjectRunError("cannot parse project Torch manifest") from error
+    packages = manifest.get("packages") if isinstance(manifest, dict) else None
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != 1
+        or not isinstance(packages, list)
+    ):
+        raise ProjectRunError("project Torch manifest schema is invalid")
+    components: list[ProtectedComponent] = []
+    for package in packages:
+        if not isinstance(package, dict):
+            raise ProjectRunError("project Torch manifest package is invalid")
+        name = package.get("name")
+        version = package.get("version")
+        if name in PROTECTED_DISTRIBUTIONS and isinstance(version, str):
+            try:
+                components.append(ProtectedComponent(name, version))
+            except OverlayError as error:
+                raise ProjectRunError(
+                    f"project Torch manifest package is invalid: {name}"
+                ) from error
+    try:
+        return ProtectedProfile(
+            metadata.profile_id,
+            config.base_digest,
+            tuple(components),
+        )
+    except OverlayError as error:
+        raise ProjectRunError(
+            f"project protected profile is invalid: {error}"
+        ) from error
 
 
 def ensure_project_home(project_dir: Path, *, uid: int, gid: int) -> Path:

@@ -44,6 +44,8 @@ STATE_KEYS = frozenset(
         "host_plan_digest",
         "host_adapter_id",
         "docker_group_accepted",
+        "base_config_digest",
+        "torch_config_digest",
         "last_report_paths",
     }
 )
@@ -261,6 +263,8 @@ def _state_payload(state: InstallState) -> dict[str, object]:
         "host_plan_digest": state.host_plan_digest,
         "host_adapter_id": state.host_adapter_id,
         "docker_group_accepted": state.docker_group_accepted,
+        "base_config_digest": state.base_config_digest,
+        "torch_config_digest": state.torch_config_digest,
         "last_report_paths": list(state.last_report_paths),
     }
 

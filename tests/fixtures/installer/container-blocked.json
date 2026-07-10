@@ -1,0 +1,9 @@
+{
+  "adapter_id": "ubuntu-24.04",
+  "architecture": "x86_64",
+  "device_gids": {},
+  "docker_version": null,
+  "gpu_driver": "amdgpu",
+  "gpu_pci_id": "1002:1586",
+  "schema_version": 1
+}
