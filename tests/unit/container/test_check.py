@@ -83,6 +83,31 @@ def test_rocm_runtime_check_blocks_when_devices_are_not_mapped(tmp_path):
     assert {"GPU.KFD_MISSING", "GPU.RENDER_MISSING"} <= codes
 
 
+def test_rocm_runtime_requires_a_gfx1151_agent(tmp_path):
+    root = rocm_root(tmp_path)
+    kfd = root / "dev/kfd"
+    render = root / "dev/dri/renderD128"
+    kfd.parent.mkdir(parents=True)
+    render.parent.mkdir(parents=True)
+    kfd.touch()
+    render.touch()
+    runner = hipcc_runner()
+    rocminfo_args = ("/opt/rocm/bin/rocminfo",)
+    runner.responses[rocminfo_args] = CommandResult(
+        rocminfo_args,
+        0,
+        "  Name:                    gfx1100\n",
+        "",
+    )
+
+    report = run_rocm_check(root=root, runner=runner, metadata_only=False)
+
+    assert report.status.value == "blocked"
+    assert "ROCM.GFX1151_MISSING" in {
+        finding.code for finding in report.findings
+    }
+
+
 def test_public_version_retains_full_local_version_as_separate_evidence():
     assert public_version("2.9.1+rocm7.2.1.lw.gitff65f5bc") == "2.9.1"
 

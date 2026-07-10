@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import re
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -45,6 +46,7 @@ def run_rocm_check(*, root: Path, runner: Runner, metadata_only: bool) -> Report
     kfd = root / "dev/kfd"
     render_nodes = sorted((root / "dev/dri").glob("renderD*"))
     rocminfo_output = "skipped (metadata-only)"
+    rocminfo_architectures: tuple[str, ...] = ()
     if not metadata_only:
         if not kfd.exists():
             findings.append(
@@ -79,6 +81,21 @@ def run_rocm_check(*, root: Path, runner: Runner, metadata_only: bool) -> Report
                         remediation="Check device mappings, GIDs, and host amdgpu initialization.",
                     )
                 )
+            else:
+                rocminfo_architectures = _rocminfo_architectures(rocminfo.stdout)
+                if not any(
+                    architecture.startswith("gfx1151")
+                    for architecture in rocminfo_architectures
+                ):
+                    findings.append(
+                        Finding(
+                            code="ROCM.GFX1151_MISSING",
+                            severity=Severity.ERROR,
+                            summary="rocminfo did not discover a gfx1151 GPU agent",
+                            evidence=", ".join(rocminfo_architectures) or "no GPU agents",
+                            remediation="Check the host amdgpu driver and container device mappings.",
+                        )
+                    )
 
     facts = {
         "rocm_version": version,
@@ -88,6 +105,7 @@ def run_rocm_check(*, root: Path, runner: Runner, metadata_only: bool) -> Report
             "/" + str(path.relative_to(root)) for path in render_nodes
         ],
         "rocminfo": rocminfo_output,
+        "rocminfo_architectures": list(rocminfo_architectures),
         "metadata_only": metadata_only,
     }
     return Report(
@@ -263,12 +281,33 @@ def _check_torch_gpu(
         )
         return
     try:
-        tensor = torch.ones((32, 32), device="cuda", dtype=torch.float16)
-        result = (tensor @ tensor).sum().item()
+        functional = importlib.import_module("torch.nn.functional")
+        torch.manual_seed(7)
+        left_cpu = torch.randn((1024, 1024), dtype=torch.float32)
+        right_cpu = torch.randn((1024, 1024), dtype=torch.float32)
+        expected_mm = left_cpu @ right_cpu
+        actual_mm = (left_cpu.half().cuda() @ right_cpu.half().cuda()).float().cpu()
+        image_cpu = torch.randn((2, 4, 64, 64), dtype=torch.float32)
+        kernel_cpu = torch.randn((8, 4, 3, 3), dtype=torch.float32)
+        expected_conv = functional.conv2d(image_cpu, kernel_cpu, padding=1)
+        actual_conv = functional.conv2d(
+            image_cpu.half().cuda(),
+            kernel_cpu.half().cuda(),
+            padding=1,
+        ).float().cpu()
         cuda.synchronize()
-        facts["gpu_tensor_result"] = result
-        if result <= 0:
-            raise RuntimeError(f"unexpected tensor result: {result}")
+        matmul_error = (expected_mm - actual_mm).abs().max().item()
+        conv_error = (expected_conv - actual_conv).abs().max().item()
+        facts["gpu_smoke"] = {
+            "device": cuda.get_device_name(0),
+            "architecture": architecture,
+            "matmul_max_error": matmul_error,
+            "conv_max_error": conv_error,
+        }
+        if matmul_error > 0.2 or conv_error > 0.2:
+            raise RuntimeError(
+                f"FP16 error exceeded tolerance: matmul={matmul_error}, conv={conv_error}"
+            )
     except Exception as error:
         findings.append(
             Finding(
@@ -279,6 +318,20 @@ def _check_torch_gpu(
                 remediation="Inspect ROCm and kernel logs; CPU fallback is not accepted.",
             )
         )
+
+
+def _rocminfo_architectures(output: str) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            set(
+                re.findall(
+                    r"^\s*Name:\s*(gfx[0-9a-f]+[^\s]*)\s*$",
+                    output,
+                    re.IGNORECASE | re.MULTILINE,
+                )
+            )
+        )
+    )
 
 
 def _read_rocm_version(root: Path) -> str | None:
