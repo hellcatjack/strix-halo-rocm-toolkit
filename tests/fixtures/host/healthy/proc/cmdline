@@ -1,0 +1,1 @@
+quiet splash amdgpu.gttsize=131072 ttm.pages_limit=33554432 amdgpu.mcbp=0 amdgpu.gpu_recovery=1 amdgpu.cwsr_enable=0

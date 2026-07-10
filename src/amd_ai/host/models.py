@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from amd_ai.host.parsers import GpuPciInfo
+
+
+@dataclass(frozen=True)
+class InstalledPackage:
+    name: str
+    version: str
+    origin: str | None = None
+
+
+@dataclass(frozen=True)
+class AptSourceFile:
+    path: str
+    content: str
+
+
+@dataclass(frozen=True)
+class HostSnapshot:
+    os_id: str
+    os_version: str
+    architecture: str
+    kernel: str
+    gpu: GpuPciInfo
+    mem_total_kib: int
+    swap_total_kib: int
+    page_size: int
+    kernel_args: dict[str, str | None]
+    ttm_pages_limit: int | None
+    dmi_memory_bytes: int | None
+    device_gids: dict[str, int]
+    current_group_ids: tuple[int, ...]
+    packages: tuple[InstalledPackage, ...]
+    apt_sources: tuple[AptSourceFile, ...]
+    dkms_status: str
+    docker_version: str | None
+    dmesg: str
+    dedicated_vram_mib: int | None
