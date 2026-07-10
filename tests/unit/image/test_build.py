@@ -6,6 +6,7 @@ import pytest
 
 from amd_ai.image import build
 from amd_ai.image.build import (
+    IMAGE_SOURCE,
     LocalImage,
     build_rocm_python_argv,
     build_torch_argv,
@@ -76,6 +77,20 @@ def test_base_build_passes_only_pinned_images_and_source_metadata():
     assert "UBUNTU_BASE=ubuntu@sha256:" + "a" * 64 in argv
     assert "UV_IMAGE=ghcr.io/astral-sh/uv@sha256:" + "b" * 64 in argv
     assert "IMAGE_SOURCE=local" in argv
+
+
+def test_normal_builds_use_public_source_repository():
+    assert IMAGE_SOURCE == (
+        "https://github.com/hellcatjack/strix-halo-rocm-toolkit"
+    )
+
+    argv = build_rocm_python_argv(
+        ubuntu_base="ubuntu@sha256:" + "a" * 64,
+        uv_image="ghcr.io/astral-sh/uv@sha256:" + "b" * 64,
+        revision="c" * 40,
+    )
+
+    assert f"IMAGE_SOURCE={IMAGE_SOURCE}" in argv
 
 
 def test_materialized_context_contains_only_profile_and_matching_lock(tmp_path):

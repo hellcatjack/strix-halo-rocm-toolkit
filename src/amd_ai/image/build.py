@@ -31,6 +31,7 @@ STABLE_PROFILE = Path("profiles/torch/stable.env")
 STABLE_REQUIREMENTS = Path("profiles/torch/stable.requirements.lock")
 ROCM_PYTHON_TAG = "rocm-python:7.2.1-py3.12"
 STABLE_TORCH_TAG = "rocm-pytorch:7.2.1-py3.12-torch2.9.1"
+IMAGE_SOURCE = "https://github.com/hellcatjack/strix-halo-rocm-toolkit"
 IMAGE_ID_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 
 
@@ -125,7 +126,7 @@ def build_torch_argv(
     revision: str,
     profile_context: str | Path | None = None,
     docker_prefix: Sequence[str] = ("docker",),
-    image_source: str = "unknown",
+    image_source: str = IMAGE_SOURCE,
     tag: str | None = None,
     attestations: bool = True,
     metadata_file: str | Path | None = None,
@@ -182,7 +183,7 @@ def build_rocm_python_argv(
     uv_image: str,
     revision: str,
     docker_prefix: Sequence[str] = ("docker",),
-    image_source: str = "unknown",
+    image_source: str = IMAGE_SOURCE,
     attestations: bool = True,
     metadata_file: str | Path | None = None,
 ) -> tuple[str, ...]:
@@ -314,7 +315,7 @@ def build_rocm_python(*, repo_root: Path = REPOSITORY_ROOT) -> tuple[str, str]:
         uv_image=locks["UV_IMAGE"],
         revision=revision,
         docker_prefix=docker.prefix,
-        image_source="local",
+        image_source=IMAGE_SOURCE,
         attestations=attestations,
         metadata_file=metadata.relative_to(repo_root),
     )
@@ -388,7 +389,7 @@ def build_rocm_pytorch(
         profile_context=profile_context.relative_to(repo_root),
         revision=_git_revision(repo_root),
         docker_prefix=docker.prefix,
-        image_source="local",
+        image_source=IMAGE_SOURCE,
         tag=tag,
         attestations=attestations,
         metadata_file=metadata.relative_to(repo_root),
