@@ -26,7 +26,7 @@ sudo reboot
   --json reports/host-verify.json
 ```
 
-主机只安装 OEM 内核、Linux firmware、内核自带 `amdgpu`、Docker 和必要诊断工具。ROCm、HIP SDK、Python、PyTorch 与编译工具链放在容器内。完整操作、恢复步骤和安全边界见 [主机运维手册](docs/host-operations.md)。
+主机只安装 OEM 内核、Linux firmware、内核自带 `amdgpu`、Docker 和必要诊断工具。ROCm、HIP SDK、Python、PyTorch 与编译工具链放在容器内。完整操作、恢复步骤和安全边界见 [主机运维手册](docs/host-operations.md)，镜像锁定与自定义 PyTorch 流程见 [镜像构建手册](docs/image-build.md)。
 
 ## 命令
 
@@ -34,7 +34,9 @@ sudo reboot
 - `bin/host-prepare plan`：生成有序变更计划，不修改主机。
 - `bin/host-prepare apply`：备份后按计划执行；要求 root 和精确确认。
 - `bin/host-verify`：重启后检查 live TTM、内核 GPU 错误和容器内 `gfx1151`。
-- `bin/image-build`、`bin/project-init`、`bin/project-run`、`bin/container-check`：由后续镜像与项目运行层提供。
+- `bin/image-build`：按固定锁构建 ROCm/Python、稳定或 experimental PyTorch 镜像，并提供安全清理预览。
+- `bin/container-check`：在指定镜像中执行元数据或 GPU runtime 检查。
+- `bin/project-init`、`bin/project-run`：由后续项目运行层提供。
 
 未知 Linux 发行版可以运行公共只读审计，但没有写入适配器，`host-prepare` 会拒绝执行。
 
@@ -43,8 +45,8 @@ sudo reboot
 ```bash
 uv sync --dev
 uv run pytest -q
-bash -n bin/_dispatch bin/host-preflight bin/host-prepare bin/host-verify
+bash -n bin/_dispatch bin/host-preflight bin/host-prepare bin/host-verify \
+  bin/image-build bin/container-check
 ```
 
 设计规格和分阶段实施计划位于 `docs/superpowers/`。
-
