@@ -8,10 +8,79 @@ import pytest
 
 from amd_ai.image.build import IMAGE_SOURCE
 from amd_ai.image.publish import PublishError, validate_publish_inputs
+from amd_ai.image.publish import (
+    MAX_GHCR_LAYER_BYTES,
+    RegistryImageObservation,
+    observe_pushed_release,
+    publish_images,
+    write_observed_release,
+)
 from amd_ai.qualification.models import REQUIRED_CHECKS
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+
+
+class FakeRegistry:
+    def __init__(self, candidate) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.push_error: Exception | None = None
+        self.observations = {
+            "ghcr.io/hellcatjack/strix-halo-rocm-python:0.2.0": (
+                RegistryImageObservation(
+                    image="ghcr.io/hellcatjack/strix-halo-rocm-python",
+                    manifest_digest="sha256:" + "d" * 64,
+                    config_digest=candidate.base_local_id,
+                    artifact_digests=candidate.base_artifact_digests,
+                    raw_manifest=_raw_manifest(candidate.base_local_id),
+                )
+            ),
+            "ghcr.io/hellcatjack/strix-halo-rocm-pytorch:0.2.0": (
+                RegistryImageObservation(
+                    image="ghcr.io/hellcatjack/strix-halo-rocm-pytorch",
+                    manifest_digest="sha256:" + "e" * 64,
+                    config_digest=candidate.torch_local_id,
+                    artifact_digests={
+                        **candidate.torch_artifact_digests,
+                        "torch_manifest": "sha256:" + "f" * 64,
+                    },
+                    raw_manifest=_raw_manifest(candidate.torch_local_id),
+                )
+            ),
+        }
+
+    @classmethod
+    def for_candidate(cls, candidate):
+        return cls(candidate)
+
+    def tag(self, image_id: str, target: str) -> None:
+        self.calls.append(("tag", image_id, target))
+
+    def push(self, target: str) -> None:
+        self.calls.append(("push", target))
+        if self.push_error is not None:
+            raise self.push_error
+
+    def observe(self, target: str) -> RegistryImageObservation:
+        self.calls.append(("observe", target))
+        return self.observations[target]
+
+
+@pytest.fixture
+def candidate(tmp_path: Path):
+    qualification, sbom = write_publish_evidence(
+        tmp_path,
+        revision="a" * 40,
+        image_id="sha256:" + "b" * 64,
+    )
+    return validate_publish_inputs(
+        release_id="0.2.0",
+        qualification_path=qualification,
+        sbom_path=sbom,
+        current_revision="a" * 40,
+        base_image_id="sha256:" + "c" * 64,
+        torch_image_id="sha256:" + "b" * 64,
+    )
 
 
 def test_candidate_requires_matching_revision_image_and_evidence(
@@ -74,6 +143,95 @@ def test_candidate_rejects_stale_or_incomplete_evidence(
             current_revision=current_revision,
             torch_image_id=image_id,
         )
+
+
+def test_publish_tags_pushes_and_observes_each_registry_digest(
+    candidate, tmp_path: Path
+) -> None:
+    registry = FakeRegistry.for_candidate(candidate)
+
+    observed = publish_images(candidate, registry=registry)
+
+    assert registry.calls == [
+        (
+            "tag",
+            candidate.base_local_id,
+            "ghcr.io/hellcatjack/strix-halo-rocm-python:0.2.0",
+        ),
+        ("push", "ghcr.io/hellcatjack/strix-halo-rocm-python:0.2.0"),
+        ("observe", "ghcr.io/hellcatjack/strix-halo-rocm-python:0.2.0"),
+        (
+            "tag",
+            candidate.torch_local_id,
+            "ghcr.io/hellcatjack/strix-halo-rocm-pytorch:0.2.0",
+        ),
+        ("push", "ghcr.io/hellcatjack/strix-halo-rocm-pytorch:0.2.0"),
+        ("observe", "ghcr.io/hellcatjack/strix-halo-rocm-pytorch:0.2.0"),
+    ]
+    assert observed.torch.manifest_digest.startswith("sha256:")
+
+    report = tmp_path / "publish-candidate.json"
+    write_observed_release(report, observed)
+    assert observe_pushed_release(report) == observed
+
+
+@pytest.mark.parametrize(
+    "damage", ("push", "manifest", "config", "layer", "platform")
+)
+def test_publish_rejects_incomplete_registry_identity(
+    candidate, damage: str
+) -> None:
+    registry = FakeRegistry.for_candidate(candidate)
+    base_tag = "ghcr.io/hellcatjack/strix-halo-rocm-python:0.2.0"
+    observation = registry.observations[base_tag]
+    if damage == "push":
+        registry.push_error = PublishError("push stopped")
+    elif damage == "manifest":
+        registry.observations[base_tag] = RegistryImageObservation(
+            observation.image,
+            "missing",
+            observation.config_digest,
+            observation.artifact_digests,
+            observation.raw_manifest,
+        )
+    elif damage == "config":
+        registry.observations[base_tag] = RegistryImageObservation(
+            observation.image,
+            observation.manifest_digest,
+            "sha256:" + "9" * 64,
+            observation.artifact_digests,
+            _raw_manifest("sha256:" + "9" * 64),
+        )
+    elif damage == "layer":
+        raw = _raw_manifest(observation.config_digest)
+        raw["layers"][0]["size"] = MAX_GHCR_LAYER_BYTES + 1
+        registry.observations[base_tag] = RegistryImageObservation(
+            observation.image,
+            observation.manifest_digest,
+            observation.config_digest,
+            observation.artifact_digests,
+            raw,
+        )
+    else:
+        registry.observations[base_tag] = RegistryImageObservation(
+            observation.image,
+            observation.manifest_digest,
+            observation.config_digest,
+            observation.artifact_digests,
+            {
+                "schemaVersion": 2,
+                "manifests": [
+                    {
+                        "digest": "sha256:" + "8" * 64,
+                        "size": 123,
+                        "platform": {"os": "linux", "architecture": "arm64"},
+                    }
+                ],
+            },
+        )
+
+    with pytest.raises(PublishError):
+        publish_images(candidate, registry=registry)
 
 
 def write_publish_evidence(
@@ -171,3 +329,13 @@ def write_publish_evidence(
 
 def _hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _raw_manifest(config_digest: str) -> dict[str, object]:
+    return {
+        "schemaVersion": 2,
+        "config": {"digest": config_digest, "size": 1024},
+        "layers": [
+            {"digest": "sha256:" + "7" * 64, "size": 1024}
+        ],
+    }

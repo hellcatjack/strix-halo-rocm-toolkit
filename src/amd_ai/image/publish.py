@@ -2,16 +2,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import secrets
+import subprocess
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Protocol
 
 from amd_ai.image.build import IMAGE_SOURCE
-from amd_ai.installer.release import SEMVER_PATTERN
+from amd_ai.installer.models import ReleaseImage, StableRelease
+from amd_ai.installer.release import (
+    BASE_ARTIFACT_PATHS,
+    SEMVER_PATTERN,
+    TORCH_ARTIFACT_PATHS,
+    load_stable_release,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -23,6 +32,9 @@ ROCM_KEYRING = Path("profiles/rocm/rocm.gpg")
 STABLE_TORCH_IMAGE = "rocm-pytorch:7.2.1-py3.12-torch2.9.1"
 STABLE_TORCH_PROFILE = "rocm-7.2.1-py3.12-torch-2.9.1"
 VERIFIED_TAG = STABLE_TORCH_IMAGE + "-gfx1151-verified"
+BASE_PACKAGE = "ghcr.io/hellcatjack/strix-halo-rocm-python"
+TORCH_PACKAGE = "ghcr.io/hellcatjack/strix-halo-rocm-pytorch"
+MAX_GHCR_LAYER_BYTES = 10_000_000_000
 DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
 IMAGE_ID_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
@@ -121,6 +133,161 @@ class PublishCandidate:
                 field,
                 MappingProxyType(dict(getattr(self, field))),
             )
+
+
+@dataclass(frozen=True)
+class RegistryImageObservation:
+    image: str
+    manifest_digest: str
+    config_digest: str
+    artifact_digests: Mapping[str, str]
+    raw_manifest: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "artifact_digests",
+            MappingProxyType(dict(self.artifact_digests)),
+        )
+        object.__setattr__(
+            self,
+            "raw_manifest",
+            MappingProxyType(dict(self.raw_manifest)),
+        )
+
+
+class PublishRegistry(Protocol):
+    def tag(self, image_id: str, target: str) -> None:
+        pass
+
+    def push(self, target: str) -> None:
+        pass
+
+    def observe(self, target: str) -> RegistryImageObservation:
+        pass
+
+
+class DockerPublishRegistry:
+    def __init__(self, docker_prefix: tuple[str, ...] = ("docker",)) -> None:
+        if not docker_prefix or any(not value for value in docker_prefix):
+            raise PublishError("Docker command prefix is invalid")
+        self.docker_prefix = tuple(docker_prefix)
+
+    def tag(self, image_id: str, target: str) -> None:
+        _require_image_id(image_id, "publication")
+        self._completed(("tag", image_id, target))
+
+    def push(self, target: str) -> None:
+        self._completed(("push", target))
+
+    def pull(self, reference: str) -> None:
+        self._completed(("pull", reference))
+
+    def inspect(self, reference: str) -> Mapping[str, object]:
+        result = self._completed(("image", "inspect", reference))
+        try:
+            payload = json.loads(result.stdout, object_pairs_hook=_unique_object)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise PublishError("cannot parse Docker image inspection") from error
+        if (
+            not isinstance(payload, list)
+            or len(payload) != 1
+            or not isinstance(payload[0], dict)
+        ):
+            raise PublishError("Docker image inspection is not one object")
+        return payload[0]
+
+    def hash_file(self, reference: str, path: str) -> str:
+        result = self._completed(
+            (
+                "run",
+                "--rm",
+                "--entrypoint",
+                "/usr/bin/sha256sum",
+                reference,
+                path,
+            )
+        )
+        digest = result.stdout.strip().partition(" ")[0]
+        if DIGEST_PATTERN.fullmatch(digest) is None:
+            raise PublishError(f"cannot parse embedded artifact digest: {path}")
+        return "sha256:" + digest
+
+    def observe(self, target: str) -> RegistryImageObservation:
+        package = _package_from_tag(target)
+        self.pull(target)
+        record = self.inspect(target)
+        config_digest = record.get("Id")
+        if not isinstance(config_digest, str) or IMAGE_ID_PATTERN.fullmatch(
+            config_digest
+        ) is None:
+            raise PublishError("pushed image has no valid config ID")
+        raw_repo_digests = record.get("RepoDigests")
+        if not isinstance(raw_repo_digests, list) or any(
+            not isinstance(value, str) for value in raw_repo_digests
+        ):
+            raise PublishError("pushed image has no RepoDigests")
+        matches = sorted(
+            {
+                value
+                for value in raw_repo_digests
+                if value.startswith(package + "@sha256:")
+            }
+        )
+        if len(matches) != 1:
+            raise PublishError(
+                "pushed image must expose exactly one matching RepoDigest"
+            )
+        reference = matches[0]
+        manifest_digest = reference.removeprefix(package + "@")
+        raw_result = self._completed(
+            ("buildx", "imagetools", "inspect", "--raw", reference)
+        )
+        try:
+            raw_manifest = json.loads(
+                raw_result.stdout, object_pairs_hook=_unique_object
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise PublishError("cannot parse raw registry manifest") from error
+        if not isinstance(raw_manifest, dict):
+            raise PublishError("raw registry manifest must be an object")
+        paths = (
+            BASE_ARTIFACT_PATHS
+            if package == BASE_PACKAGE
+            else TORCH_ARTIFACT_PATHS
+        )
+        artifacts = {
+            name: self.hash_file(reference, path)
+            for name, path in paths.items()
+        }
+        return RegistryImageObservation(
+            image=package,
+            manifest_digest=manifest_digest,
+            config_digest=config_digest,
+            artifact_digests=artifacts,
+            raw_manifest=raw_manifest,
+        )
+
+    def _completed(
+        self,
+        args: tuple[str, ...],
+        *,
+        environment: Mapping[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            (*self.docker_prefix, *args),
+            check=False,
+            env=None if environment is None else dict(environment),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode != 0:
+            evidence = result.stderr.strip() or result.stdout.strip() or "no output"
+            raise PublishError(
+                f"Docker publication command failed ({args[0]}): {evidence}"
+            )
+        return result
 
 
 def validate_publish_inputs(
@@ -252,6 +419,237 @@ def validate_publish_inputs(
     )
 
 
+def publish_images(
+    candidate: PublishCandidate, *, registry: PublishRegistry
+) -> StableRelease:
+    if candidate.base_local_id is None:
+        raise PublishError("base local image ID is required for publication")
+    _require_image_id(candidate.base_local_id, "base")
+    _require_image_id(candidate.torch_local_id, "Torch")
+    observations: list[RegistryImageObservation] = []
+    for kind, local_id, package in (
+        ("base", candidate.base_local_id, BASE_PACKAGE),
+        ("torch", candidate.torch_local_id, TORCH_PACKAGE),
+    ):
+        target = f"{package}:{candidate.release_id}"
+        try:
+            registry.tag(local_id, target)
+            registry.push(target)
+            observation = registry.observe(target)
+        except PublishError:
+            raise
+        except Exception as error:
+            raise PublishError(
+                f"cannot publish or observe {kind} image {target}: {error}"
+            ) from error
+        _validate_registry_observation(
+            observation,
+            kind=kind,
+            package=package,
+            local_id=local_id,
+            candidate=candidate,
+        )
+        observations.append(observation)
+
+    base = _release_image(observations[0])
+    torch = _release_image(observations[1])
+    return StableRelease(
+        schema_version=1,
+        release_id=candidate.release_id,
+        source_repository=candidate.source_repository,
+        source_revision=candidate.source_revision,
+        qualification_profile_digest=candidate.qualification_profile_digest,
+        qualification_report_digest=candidate.qualification_digest,
+        sbom_digest=candidate.sbom_digest,
+        gpu_arch=candidate.gpu_arch,
+        supported_host_adapter_ids=candidate.supported_host_adapter_ids,
+        rocm_version="7.2.1",
+        python_version="3.12",
+        torch_version="2.9.1",
+        torch_profile_id=candidate.torch_profile_id,
+        torch_profile_digest=candidate.torch_profile_digest,
+        base=base,
+        torch=torch,
+        published_at=candidate.published_at,
+    )
+
+
+def write_observed_release(path: Path, release: StableRelease) -> None:
+    content = (
+        json.dumps(_stable_release_dict(release), indent=2, sort_keys=True)
+        + "\n"
+    )
+    _atomic_write(path, content, mode=0o600)
+
+
+def observe_pushed_release(path: Path) -> StableRelease:
+    return load_stable_release(path)
+
+
+def _validate_registry_observation(
+    observation: RegistryImageObservation,
+    *,
+    kind: str,
+    package: str,
+    local_id: str,
+    candidate: PublishCandidate,
+) -> None:
+    if observation.image != package:
+        raise PublishError(f"observed {kind} package name does not match")
+    if (
+        not isinstance(observation.manifest_digest, str)
+        or not observation.manifest_digest.startswith("sha256:")
+        or IMAGE_ID_PATTERN.fullmatch(observation.manifest_digest) is None
+    ):
+        raise PublishError(f"observed {kind} registry manifest digest is invalid")
+    if observation.config_digest != local_id:
+        raise PublishError(f"observed {kind} config ID differs from local image")
+    if observation.manifest_digest == observation.config_digest:
+        raise PublishError(f"observed {kind} manifest and config IDs are ambiguous")
+
+    required = (
+        {"rocm_keyring", "rocm_packages_lock"}
+        if kind == "base"
+        else {"profile", "requirements_lock", "torch_manifest"}
+    )
+    artifacts = dict(observation.artifact_digests)
+    if set(artifacts) != required:
+        raise PublishError(f"observed {kind} artifact set is incomplete")
+    for name, digest in artifacts.items():
+        if IMAGE_ID_PATTERN.fullmatch(digest) is None:
+            raise PublishError(f"observed {kind} artifact digest is invalid: {name}")
+    expected_sources = (
+        candidate.base_artifact_digests
+        if kind == "base"
+        else candidate.torch_artifact_digests
+    )
+    for name, expected in expected_sources.items():
+        if artifacts.get(name) != expected:
+            raise PublishError(
+                f"observed {kind} artifact differs from source evidence: {name}"
+            )
+    _validate_raw_manifest(
+        observation.raw_manifest,
+        config_digest=observation.config_digest,
+    )
+
+
+def _validate_raw_manifest(
+    manifest: Mapping[str, object], *, config_digest: str
+) -> None:
+    if manifest.get("schemaVersion") != 2:
+        raise PublishError("registry manifest schema is invalid")
+    if "manifests" in manifest:
+        descriptors = manifest.get("manifests")
+        if not isinstance(descriptors, list) or len(descriptors) != 1:
+            raise PublishError("registry manifest must contain exactly one platform")
+        descriptor = descriptors[0]
+        if not isinstance(descriptor, Mapping):
+            raise PublishError("registry platform descriptor is invalid")
+        platform = descriptor.get("platform")
+        if not isinstance(platform, Mapping) or (
+            platform.get("os"), platform.get("architecture")
+        ) != ("linux", "amd64"):
+            raise PublishError("registry platform must be linux/amd64")
+        _validate_descriptor(descriptor, label="platform manifest")
+        return
+
+    config = manifest.get("config")
+    if not isinstance(config, Mapping) or config.get("digest") != config_digest:
+        raise PublishError("registry image config descriptor does not match")
+    _validate_descriptor(config, label="config")
+    layers = manifest.get("layers")
+    if not isinstance(layers, list) or not layers:
+        raise PublishError("registry image manifest has no layers")
+    for layer in layers:
+        if not isinstance(layer, Mapping):
+            raise PublishError("registry layer descriptor is invalid")
+        _validate_descriptor(layer, label="layer")
+        size = layer.get("size")
+        if type(size) is not int or size > MAX_GHCR_LAYER_BYTES:
+            raise PublishError("registry layer exceeds GHCR size limit")
+
+
+def _validate_descriptor(
+    descriptor: Mapping[str, object], *, label: str
+) -> None:
+    digest = descriptor.get("digest")
+    size = descriptor.get("size")
+    if (
+        not isinstance(digest, str)
+        or IMAGE_ID_PATTERN.fullmatch(digest) is None
+        or type(size) is not int
+        or size < 0
+    ):
+        raise PublishError(f"registry {label} descriptor is invalid")
+
+
+def _release_image(observation: RegistryImageObservation) -> ReleaseImage:
+    return ReleaseImage(
+        image=observation.image,
+        manifest_digest=observation.manifest_digest,
+        config_digest=observation.config_digest,
+        artifact_digests=observation.artifact_digests,
+    )
+
+
+def _stable_release_dict(release: StableRelease) -> dict[str, object]:
+    def image_dict(image: ReleaseImage) -> dict[str, object]:
+        return {
+            "image": image.image,
+            "manifest_digest": image.manifest_digest,
+            "config_digest": image.config_digest,
+            "artifact_digests": dict(image.artifact_digests),
+        }
+
+    return {
+        "schema_version": release.schema_version,
+        "release_id": release.release_id,
+        "source_repository": release.source_repository,
+        "source_revision": release.source_revision,
+        "qualification_profile_digest": release.qualification_profile_digest,
+        "qualification_report_digest": release.qualification_report_digest,
+        "sbom_digest": release.sbom_digest,
+        "gpu_arch": release.gpu_arch,
+        "supported_host_adapter_ids": list(release.supported_host_adapter_ids),
+        "rocm_version": release.rocm_version,
+        "python_version": release.python_version,
+        "torch_version": release.torch_version,
+        "torch_profile_id": release.torch_profile_id,
+        "torch_profile_digest": release.torch_profile_digest,
+        "base": image_dict(release.base),
+        "torch": image_dict(release.torch),
+        "published_at": release.published_at,
+    }
+
+
+def _atomic_write(path: Path, content: str, *, mode: int) -> None:
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            mode,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = -1
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
 def _validate_qualification(
     report: dict[str, Any],
     *,
@@ -364,6 +762,15 @@ def _require_string_mapping(
 def _require_image_id(value: str, label: str) -> None:
     if IMAGE_ID_PATTERN.fullmatch(value) is None:
         raise PublishError(f"{label} local image ID is invalid")
+
+
+def _package_from_tag(target: str) -> str:
+    for package in (BASE_PACKAGE, TORCH_PACKAGE):
+        if target.startswith(package + ":"):
+            tag = target.removeprefix(package + ":")
+            if ":" not in tag and SEMVER_PATTERN.fullmatch(tag) is not None:
+                return package
+    raise PublishError(f"publication target is not an approved release tag: {target}")
 
 
 def _resolve_evidence_path(
