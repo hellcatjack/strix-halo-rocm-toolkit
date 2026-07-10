@@ -1,0 +1,17 @@
+profile_id = "stable-gfx1151"
+image = "rocm-pytorch:7.2.1-py3.12-torch2.9.1"
+rocm_version = "7.2.1"
+torch_version = "2.9.1"
+gpu_arch = "gfx1151"
+stress_seconds = 300
+repeated_starts = 5
+required_checks = [
+  "rocm",
+  "torch-fp16",
+  "hip",
+  "torch-extension",
+  "triton",
+  "repeated-start",
+  "stress",
+  "kernel-log",
+]
