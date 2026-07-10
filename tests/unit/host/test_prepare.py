@@ -10,6 +10,7 @@ from amd_ai.host.prepare import (
     UnsupportedHostError,
     cleanup_candidates,
     create_prepare_plan,
+    with_docker_group_action,
 )
 from tests.unit.host.fakes import healthy_snapshot
 
@@ -205,3 +206,26 @@ def test_missing_target_gpu_refuses_to_create_a_write_plan():
             ),
             target_user="customer",
         )
+
+
+def test_docker_group_action_is_pure_explicit_and_idempotent():
+    plan = create_prepare_plan(
+        healthy_snapshot(docker_version=None), target_user="customer"
+    )
+
+    extended = with_docker_group_action(plan)
+    repeated = with_docker_group_action(extended)
+
+    assert "DOCKER.ADD_USER_TO_GROUP" not in action_codes(plan)
+    assert action_codes(extended).count("DOCKER.ADD_USER_TO_GROUP") == 1
+    assert repeated == extended
+    docker_index = action_codes(extended).index("DOCKER.INSTALL_IF_MISSING")
+    assert action_codes(extended)[docker_index + 1] == "DOCKER.ADD_USER_TO_GROUP"
+    action = extended.actions[docker_index + 1]
+    assert action.argv == ("usermod", "-a", "-G", "docker", "customer")
+
+
+def test_docker_group_action_is_not_added_for_root():
+    plan = create_prepare_plan(healthy_snapshot(), target_user="root")
+
+    assert with_docker_group_action(plan) == plan

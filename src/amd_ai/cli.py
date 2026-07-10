@@ -31,6 +31,7 @@ from amd_ai.host.prepare import (
     HostPlanningError,
     UnsupportedHostError,
     create_prepare_plan,
+    with_docker_group_action,
 )
 from amd_ai.host.probe import FixtureRunner, HostProbe, load_fixture_device_gids
 from amd_ai.host.verify import verify_host
@@ -940,31 +941,7 @@ def _offer_docker_group(plan: PreparePlan) -> PreparePlan:
         response = ""
     if response != "ADD_DOCKER_GROUP":
         return plan
-
-    action = PlannedAction(
-        code="DOCKER.ADD_USER_TO_GROUP",
-        summary="Grant the target user access to the Docker daemon",
-        argv=("usermod", "-a", "-G", "docker", plan.target_user),
-        privileged=True,
-    )
-    actions = list(plan.actions)
-    insertion = next(
-        (
-            index + 1
-            for index, existing in enumerate(actions)
-            if existing.code == "DOCKER.INSTALL_IF_MISSING"
-        ),
-        next(
-            (
-                index + 1
-                for index, existing in enumerate(actions)
-                if existing.code == "APT.INSTALL_HOST_TOOLS"
-            ),
-            1,
-        ),
-    )
-    actions.insert(insertion, action)
-    return replace(plan, actions=tuple(actions))
+    return with_docker_group_action(plan)
 
 
 def _prepare_report(plan: PreparePlan, *, mode: str, applied: bool) -> Report:

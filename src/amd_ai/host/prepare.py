@@ -3,6 +3,7 @@ from __future__ import annotations
 import grp
 import json
 import re
+from dataclasses import replace
 from urllib.parse import urlparse
 
 from amd_ai.host.adapters.base import select_adapter
@@ -89,6 +90,37 @@ def create_prepare_plan(
             "host preparation is blocked by preflight: " + ", ".join(blocking_codes)
         )
     return adapter.create_prepare_plan(snapshot, target_user, memory_gib)
+
+
+def with_docker_group_action(plan: PreparePlan) -> PreparePlan:
+    if plan.target_user == "root" or any(
+        action.code == "DOCKER.ADD_USER_TO_GROUP" for action in plan.actions
+    ):
+        return plan
+    action = PlannedAction(
+        code="DOCKER.ADD_USER_TO_GROUP",
+        summary="Grant the target user access to the Docker daemon",
+        argv=("usermod", "-a", "-G", "docker", plan.target_user),
+        privileged=True,
+    )
+    actions = list(plan.actions)
+    insertion = next(
+        (
+            index + 1
+            for index, existing in enumerate(actions)
+            if existing.code == "DOCKER.INSTALL_IF_MISSING"
+        ),
+        next(
+            (
+                index + 1
+                for index, existing in enumerate(actions)
+                if existing.code == "APT.INSTALL_HOST_TOOLS"
+            ),
+            1,
+        ),
+    )
+    actions.insert(insertion, action)
+    return replace(plan, actions=tuple(actions))
 
 
 def create_ubuntu_prepare_plan(

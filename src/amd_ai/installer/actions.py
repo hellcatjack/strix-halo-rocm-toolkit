@@ -1,0 +1,427 @@
+from __future__ import annotations
+
+import os
+import pwd
+import re
+import subprocess
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path
+
+from amd_ai.doctor.checks import run_doctor
+from amd_ai.doctor.models import DoctorReport
+from amd_ai.host.adapters.base import select_adapter
+from amd_ai.host.apply import execute_plan
+from amd_ai.host.models import HostSnapshot, PreparePlan
+from amd_ai.host.policy import evaluate_preflight
+from amd_ai.host.prepare import create_prepare_plan, with_docker_group_action
+from amd_ai.host.probe import HostProbe
+from amd_ai.host.verify import verify_host
+from amd_ai.image.build import (
+    ROCM_PYTHON_TAG,
+    build_rocm_python,
+    build_rocm_pytorch,
+    run_image_check,
+)
+from amd_ai.image.publish import DockerPublishRegistry
+from amd_ai.installer.models import StageResult, StableRelease
+from amd_ai.installer.release import (
+    ReleaseDocker,
+    VerifiedReleaseImages,
+    load_stable_release,
+    pull_and_verify_release,
+)
+from amd_ai.installer.state import stage_input_digest
+from amd_ai.project.build import ProjectBuildResult, build_or_reuse_project
+from amd_ai.project.config import ProjectConfig, load_project_config
+from amd_ai.project.init import initialize_project as create_project
+from amd_ai.report import Report, Status
+from amd_ai.runner import Runner, SubprocessRunner
+
+
+REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
+REQUIRED_LOCAL_BUILD_PATHS = (
+    "images/common/container-check",
+    "images/common/torch-manifest.py",
+    "images/rocm-python/Dockerfile",
+    "images/rocm-pytorch/Dockerfile",
+    "profiles/base-images.lock",
+    "profiles/rocm/7.2.1-packages.lock",
+    "profiles/rocm/rocm.gpg",
+    "profiles/torch/stable.env",
+    "profiles/torch/stable.requirements.lock",
+    "profiles/torch/stable.sources.env",
+    "pyproject.toml",
+)
+
+
+class ActionError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class HostPlanResult:
+    snapshot: HostSnapshot
+    plan: PreparePlan
+    plan_digest: str
+    adapter_id: str
+
+
+@dataclass(frozen=True)
+class LocalBuildResult:
+    base_reference: str
+    base_config_digest: str
+    torch_reference: str
+    torch_config_digest: str
+    source_revision: str
+    qualified: bool = False
+
+
+@dataclass(frozen=True)
+class ProjectInstallResult:
+    config: ProjectConfig
+    build: ProjectBuildResult
+
+
+class ProductionInstallerActions:
+    def __init__(
+        self,
+        *,
+        runner: Runner | None = None,
+        root: Path = Path("/"),
+        docker_prefix: Sequence[str] = ("docker",),
+        release_docker: ReleaseDocker | None = None,
+        effective_uid: int | None = None,
+    ) -> None:
+        if not docker_prefix or any(
+            not isinstance(value, str) or not value or "\0" in value
+            for value in docker_prefix
+        ):
+            raise ActionError("Docker command prefix is invalid")
+        self.runner = runner or SubprocessRunner()
+        self.root = Path(root)
+        self.docker_prefix = tuple(docker_prefix)
+        self.release_docker = release_docker or DockerPublishRegistry(
+            self.docker_prefix
+        )
+        self.effective_uid = (
+            os.geteuid() if effective_uid is None else effective_uid
+        )
+
+    def bootstrap(self, *, source_root: Path, revision: str) -> StageResult:
+        return StageResult(
+            facts={
+                "source_root": str(source_root.resolve()),
+                "installer_source_revision": revision,
+            }
+        )
+
+    def host_preflight(self, *, target_user: str | None = None) -> Report:
+        return evaluate_preflight(self._snapshot(target_user=target_user))
+
+    def host_plan(
+        self,
+        *,
+        target_user: str,
+        memory_gib: int | None = None,
+    ) -> HostPlanResult:
+        snapshot = self._snapshot(target_user=target_user)
+        adapter = select_adapter(snapshot)
+        if adapter is None:
+            raise ActionError("no formal host write adapter is available")
+        plan = create_prepare_plan(
+            snapshot,
+            target_user=target_user,
+            memory_gib=memory_gib,
+        )
+        return HostPlanResult(
+            snapshot=snapshot,
+            plan=plan,
+            plan_digest=stage_input_digest(prepare_plan_payload(plan)),
+            adapter_id=adapter.adapter_id,
+        )
+
+    def host_apply(
+        self,
+        host_plan: HostPlanResult,
+        *,
+        include_docker_group: bool,
+    ) -> StageResult:
+        plan = (
+            with_docker_group_action(host_plan.plan)
+            if include_docker_group
+            else host_plan.plan
+        )
+        result = execute_plan(
+            plan,
+            self.runner,
+            effective_uid=self.effective_uid,
+            confirmed=True,
+            reboot=False,
+            snapshot=host_plan.snapshot,
+            root=self.root,
+        )
+        return StageResult(
+            facts={
+                "backup_path": str(result.backup_path),
+                "executed_codes": list(result.executed_codes),
+                "skipped_codes": list(result.skipped_codes),
+                "reboot_required": plan.reboot_required,
+                "docker_group_added": include_docker_group,
+            }
+        )
+
+    def host_verify(self, *, image: str = ROCM_PYTHON_TAG) -> Report:
+        snapshot = self._snapshot()
+        return verify_host(
+            snapshot,
+            image=image,
+            runner=self.runner,
+            docker_prefix=self.docker_prefix,
+        )
+
+    def container_host_check(self) -> StageResult:
+        snapshot = self._snapshot()
+        report = evaluate_preflight(snapshot)
+        adapter = select_adapter(snapshot)
+        reasons: list[str] = []
+        if snapshot.docker_version is None:
+            reasons.append("Docker daemon is unavailable")
+        if report.status not in (Status.PASS, Status.UNVERIFIED):
+            reasons.append(
+                "host policy: "
+                + ", ".join(finding.code for finding in report.findings)
+            )
+        has_kfd = "/dev/kfd" in snapshot.device_gids
+        has_render = any(
+            path.startswith("/dev/dri/render")
+            for path in snapshot.device_gids
+        )
+        if not has_kfd or not has_render:
+            reasons.append(
+                f"GPU device mapping is incomplete (kfd={has_kfd}, render={has_render})"
+            )
+        missing_gids = sorted(
+            set(snapshot.device_gids.values()).difference(
+                snapshot.current_group_ids
+            )
+        )
+        if missing_gids:
+            reasons.append(
+                "current user lacks GPU GIDs: "
+                + ", ".join(str(value) for value in missing_gids)
+            )
+        return StageResult(
+            facts={
+                "adapter_id": None if adapter is None else adapter.adapter_id,
+                "host_report": report.to_dict(),
+                "docker_version": snapshot.docker_version,
+                "device_gids": dict(snapshot.device_gids),
+            },
+            blocked=bool(reasons),
+            message="; ".join(reasons),
+        )
+
+    def resolve_release(self, manifest_path: Path) -> StableRelease:
+        return load_stable_release(manifest_path)
+
+    def pull_release(self, release: StableRelease) -> VerifiedReleaseImages:
+        return pull_and_verify_release(release, self.release_docker)
+
+    def build_local_images(
+        self,
+        *,
+        source_root: Path,
+        installer_source_revision: str,
+    ) -> LocalBuildResult:
+        source = validate_local_build_source(
+            source_root,
+            expected_revision=installer_source_revision,
+        )
+        base_reference, base_digest = build_rocm_python(repo_root=source)
+        torch_reference, torch_digest = build_rocm_pytorch(
+            profile_path=source / "profiles/torch/stable.env",
+            allow_experimental=False,
+            repo_root=source,
+        )
+        validate_local_build_source(
+            source,
+            expected_revision=installer_source_revision,
+        )
+        return LocalBuildResult(
+            base_reference=base_reference,
+            base_config_digest=base_digest,
+            torch_reference=torch_reference,
+            torch_config_digest=torch_digest,
+            source_revision=installer_source_revision,
+        )
+
+    def verify_torch_image(self, image: str) -> StageResult:
+        returncode = run_image_check(
+            image=image,
+            mode="torch",
+            metadata_only=False,
+            runtime=True,
+            json_path="-",
+        )
+        return StageResult(
+            facts={"image": image, "runtime_returncode": returncode},
+            blocked=returncode != 0,
+            message=(
+                "gfx1151 Torch runtime verification failed"
+                if returncode != 0
+                else ""
+            ),
+        )
+
+    def initialize_project(
+        self,
+        *,
+        project_dir: Path,
+        project_name: str,
+        base_profile: str = "stable",
+        owner_uid: int | None = None,
+        owner_gid: int | None = None,
+    ) -> ProjectInstallResult:
+        config_path = project_dir / "amd-ai-project.toml"
+        if config_path.exists():
+            config = load_project_config(config_path)
+        else:
+            create_project(
+                name=project_name,
+                destination=project_dir,
+                base_profile=base_profile,
+                runner=self.runner,
+                docker_prefix=self.docker_prefix,
+                owner_uid=owner_uid,
+                owner_gid=owner_gid,
+            )
+            config = load_project_config(config_path)
+        build = build_or_reuse_project(
+            config=config,
+            runner=self.runner,
+            force=False,
+            no_build=False,
+            docker_prefix=self.docker_prefix,
+        )
+        return ProjectInstallResult(config=config, build=build)
+
+    def verify_project(
+        self, *, project_dir: Path, manifest_path: Path
+    ) -> StageResult:
+        report = run_doctor(project_dir, manifest_path)
+        blocked = report.status not in {"pass", "warning"}
+        return StageResult(
+            facts={"doctor": report.to_dict()},
+            blocked=blocked,
+            message="project verification failed" if blocked else "",
+        )
+
+    def doctor(
+        self, *, project: Path | None, manifest_path: Path
+    ) -> DoctorReport:
+        return run_doctor(project, manifest_path)
+
+    def _snapshot(self, *, target_user: str | None = None) -> HostSnapshot:
+        group_ids = (
+            None
+            if target_user is None
+            else _target_user_group_ids(target_user)
+        )
+        return HostProbe(
+            root=self.root,
+            runner=self.runner,
+            current_group_ids=group_ids,
+            docker_prefix=self.docker_prefix,
+            dmesg_fallback=("sudo", "-n", "dmesg", "--color=never"),
+        ).collect()
+
+
+def prepare_plan_payload(plan: PreparePlan) -> dict[str, object]:
+    return {
+        "supported": plan.supported,
+        "target_user": plan.target_user,
+        "actions": [asdict(action) for action in plan.actions],
+        "reboot_required": plan.reboot_required,
+    }
+
+
+def validate_local_build_source(
+    source_root: Path,
+    *,
+    expected_revision: str,
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> Path:
+    raw = Path(source_root).expanduser()
+    if raw.is_symlink():
+        raise ActionError("local build source root must not be a symlink")
+    try:
+        source = raw.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ActionError(f"cannot resolve local build source: {error}") from error
+    if not source.is_dir():
+        raise ActionError("local build source is not a directory")
+    if REVISION_PATTERN.fullmatch(expected_revision) is None:
+        raise ActionError("expected installer source revision is invalid")
+    missing = [
+        relative
+        for relative in REQUIRED_LOCAL_BUILD_PATHS
+        if not (source / relative).is_file()
+        or (source / relative).is_symlink()
+    ]
+    if missing:
+        raise ActionError(
+            "local build source is incomplete: " + ", ".join(missing)
+        )
+
+    revision = _run_git(
+        run,
+        ("git", "-C", str(source), "rev-parse", "HEAD"),
+        "read local build source revision",
+    ).stdout.strip()
+    if revision != expected_revision:
+        raise ActionError(
+            "local build source revision differs from installer state: "
+            f"expected {expected_revision}, got {revision or '<unknown>'}"
+        )
+    status = _run_git(
+        run,
+        ("git", "-C", str(source), "status", "--porcelain"),
+        "inspect local build source status",
+    )
+    if status.stdout.strip():
+        raise ActionError("local build source checkout is not clean")
+    return source
+
+
+def _run_git(
+    run: Callable[..., subprocess.CompletedProcess[str]],
+    argv: tuple[str, ...],
+    operation: str,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ActionError(f"cannot {operation}: {error}") from error
+    if result.returncode != 0:
+        evidence = result.stderr.strip() or result.stdout.strip() or "no output"
+        raise ActionError(f"cannot {operation}: {evidence}")
+    return result
+
+
+def _target_user_group_ids(target_user: str) -> tuple[int, ...]:
+    try:
+        record = pwd.getpwnam(target_user)
+        return tuple(
+            sorted(set(os.getgrouplist(target_user, record.pw_gid)))
+        )
+    except (KeyError, OSError) as error:
+        raise ActionError(
+            f"cannot resolve groups for target user {target_user!r}"
+        ) from error
