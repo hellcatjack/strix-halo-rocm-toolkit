@@ -33,10 +33,12 @@ from amd_ai.overlay.transaction import (
 from amd_ai.overlay.verify import OverlayVerificationError, scan_protected_entries
 from amd_ai.project.build import build_context_fingerprint
 from amd_ai.project.config import ConfigError, ProjectConfig, load_project_config
+from amd_ai.project.runtime import RuntimePolicyError, discover_gpu_access
 
 
 BASE_FRIENDLY_TAG = "rocm-python:7.2.1-py3.12"
 TORCH_FRIENDLY_TAG = "rocm-pytorch:7.2.1-py3.12-torch2.9.1"
+DOCTOR_TMPFS = "/tmp:rw,nosuid,nodev,size=1g,mode=1777"
 
 
 @dataclass(frozen=True)
@@ -441,11 +443,25 @@ class SubprocessDoctorBackend:
         return "missing GPU devices: " + ", ".join(missing) if missing else None
 
     def gpu_runtime(self, reference: str) -> str | None:
-        args = ["run", "--rm", "--read-only", "--ipc=private", "--shm-size=1g"]
-        for device in (Path("/dev/kfd"), Path("/dev/dri")):
-            if device.exists():
-                args.extend(("--device", str(device)))
-        args.extend((reference, "container-check", "--mode", "torch", "--runtime"))
+        try:
+            access = discover_gpu_access()
+        except RuntimePolicyError as error:
+            return str(error)
+        args = [
+            "run",
+            "--rm",
+            "--read-only",
+            "--ipc=private",
+            "--shm-size=1g",
+            *_readonly_probe_arguments(),
+        ]
+        for device in access.devices:
+            args.extend(("--device", str(device)))
+        for group_id in access.group_ids:
+            args.extend(("--group-add", str(group_id)))
+        args.extend(
+            (reference, "container-check", "--mode", "torch", "--runtime")
+        )
         result = self._completed(tuple(args))
         return None if result.returncode == 0 else _evidence(result)
 
@@ -491,6 +507,7 @@ class SubprocessDoctorBackend:
             "run",
             "--rm",
             "--read-only",
+            *_readonly_probe_arguments(),
             "--entrypoint",
             "container-check",
             "--env",
@@ -550,6 +567,19 @@ def _image_inspection(record: Mapping[str, object]) -> DoctorImageInspection:
         config_digest,
         {str(name): str(value) for name, value in labels.items()},
         tuple(str(value) for value in repo_digests),
+    )
+
+
+def _readonly_probe_arguments() -> tuple[str, ...]:
+    return (
+        "--tmpfs",
+        DOCTOR_TMPFS,
+        "--env",
+        "HOME=/tmp/amd-ai-home",
+        "--env",
+        "PYTHONNOUSERSITE=1",
+        "--env",
+        "PYTHONDONTWRITEBYTECODE=1",
     )
 
 

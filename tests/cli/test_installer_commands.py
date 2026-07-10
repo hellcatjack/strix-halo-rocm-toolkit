@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 from amd_ai import cli
 
@@ -95,3 +96,52 @@ def test_install_dispatch_constructs_workflow_once(
     assert code == 0
     assert captured["actions"] == "actions"
     assert captured["installer_source_revision"] == "a" * 40
+
+
+def test_install_dispatch_uses_detected_sudo_docker_prefix(
+    tmp_path: Path, monkeypatch
+) -> None:
+    action_arguments: dict[str, object] = {}
+
+    class Result:
+        exit_code = 0
+        message = ""
+
+    class Workflow:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def run(self):
+            return Result()
+
+    monkeypatch.setenv("AMD_AI_INSTALLER_SOURCE_REVISION", "a" * 40)
+    monkeypatch.setattr(
+        cli.Docker,
+        "detect",
+        lambda: SimpleNamespace(prefix=("sudo", "-n", "docker")),
+    )
+    monkeypatch.setattr(cli, "InstallerWorkflow", Workflow)
+    monkeypatch.setattr(
+        cli,
+        "ProductionInstallerActions",
+        lambda **kwargs: action_arguments.update(kwargs) or "actions",
+    )
+
+    code = cli.main(
+        [
+            "install",
+            "--mode",
+            "container",
+            "--project-dir",
+            str(tmp_path / "project"),
+            "--image-source",
+            "pull",
+            "--source-root",
+            str(Path.cwd()),
+            "--state-path",
+            str(tmp_path / "state.json"),
+        ]
+    )
+
+    assert code == 0
+    assert action_arguments["docker_prefix"] == ("sudo", "-n", "docker")

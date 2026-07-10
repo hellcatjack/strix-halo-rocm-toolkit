@@ -493,8 +493,13 @@ def _install_command(args: argparse.Namespace) -> int:
         actions = FixtureInstallerActions(Path(fixture_root))
         workflow_arguments["boot_id_reader"] = actions.read_boot_id
     else:
+        try:
+            docker_prefix = Docker.detect().prefix
+        except BuildError:
+            docker_prefix = ("docker",)
         actions = ProductionInstallerActions(
-            non_interactive=args.non_interactive
+            non_interactive=args.non_interactive,
+            docker_prefix=docker_prefix,
         )
     workflow = InstallerWorkflow(
         options=options,

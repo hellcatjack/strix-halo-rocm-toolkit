@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from amd_ai.doctor import checks
-from amd_ai.doctor.checks import doctor_platform, doctor_project
+from amd_ai.doctor.checks import (
+    SubprocessDoctorBackend,
+    doctor_platform,
+    doctor_project,
+)
 from amd_ai.installer.release import load_stable_release
 from amd_ai.overlay.models import (
     OverlayPaths,
@@ -14,6 +19,7 @@ from amd_ai.overlay.models import (
     ProtectedProfile,
 )
 from amd_ai.overlay.transaction import initialize_overlay, resolve_current_generation
+from amd_ai.project.runtime import GpuAccess
 from tests.unit.doctor.fakes import FakeDoctorBackend
 from tests.unit.project.fakes import project_config
 
@@ -106,6 +112,62 @@ def test_project_classification_is_stable_and_read_only(
 
     assert expected_code in {item.code for item in report.diagnostics}
     assert backend.mutations == []
+
+
+def test_subprocess_gpu_probe_supplies_tmp_home_and_device_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    access = GpuAccess(
+        devices=(Path("/dev/kfd"), Path("/dev/dri")),
+        render_nodes=(Path("/dev/dri/renderD128"),),
+        group_ids=(993,),
+    )
+    monkeypatch.setattr(checks, "discover_gpu_access", lambda: access)
+
+    def completed(argv, **kwargs):
+        del kwargs
+        calls.append(tuple(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(checks.subprocess, "run", completed)
+
+    error = SubprocessDoctorBackend(("sudo", "-n", "docker")).gpu_runtime(
+        "ghcr.io/example/torch@sha256:" + "a" * 64
+    )
+
+    assert error is None
+    command = calls[0]
+    assert ("--group-add", "993") == command[
+        command.index("--group-add") : command.index("--group-add") + 2
+    ]
+    assert "/tmp:rw,nosuid,nodev,size=1g,mode=1777" in command
+    assert "HOME=/tmp/amd-ai-home" in command
+
+
+def test_subprocess_overlay_probe_supplies_writable_tmp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def completed(argv, **kwargs):
+        del kwargs
+        calls.append(tuple(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(checks.subprocess, "run", completed)
+    config = project_config(tmp_path / "demo")
+
+    error = SubprocessDoctorBackend(
+        ("sudo", "-n", "docker")
+    ).verify_effective_overlay(
+        config, config.path.parent / ".amd-ai/current/site-packages"
+    )
+
+    assert error is None
+    command = calls[0]
+    assert "/tmp:rw,nosuid,nodev,size=1g,mode=1777" in command
+    assert "HOME=/tmp/amd-ai-home" in command
 
 
 def _profile(parent_digest: str) -> ProtectedProfile:
