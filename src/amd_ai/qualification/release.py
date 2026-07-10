@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -48,6 +49,9 @@ class ReleaseInputs:
     image_labels: Mapping[str, str]
     wheel_hashes: Mapping[str, str]
     rocm_package_lock_digest: str
+    embedded_rocm_package_lock_digest: str
+    torch_profile_digest: str
+    embedded_torch_profile_digest: str
     sbom_digest: str
     git_revision: str
     git_clean: bool
@@ -69,6 +73,7 @@ class ReleaseRecord:
     image_labels: Mapping[str, str]
     wheel_hashes: Mapping[str, str]
     rocm_package_lock_digest: str
+    torch_profile_digest: str
     sbom_digest: str
     git_revision: str
     verified_tag: str
@@ -92,6 +97,7 @@ class ReleaseRecord:
             "image_labels": dict(self.image_labels),
             "wheel_hashes": dict(self.wheel_hashes),
             "rocm_package_lock_digest": self.rocm_package_lock_digest,
+            "torch_profile_digest": self.torch_profile_digest,
             "sbom_digest": self.sbom_digest,
             "git_revision": self.git_revision,
             "verified_tag": self.verified_tag,
@@ -130,6 +136,8 @@ def verify_release(inputs: ReleaseInputs) -> ReleaseRecord:
         raise ReleaseBlocked("qualification profile digest does not match")
     if qualification.get("image") != inputs.image_reference:
         raise ReleaseBlocked("qualification image reference does not match")
+    if qualification.get("image_id") != inputs.image_id:
+        raise ReleaseBlocked("qualification image ID does not match release image ID")
     if qualification.get("gpu_arch") != "gfx1151":
         raise ReleaseBlocked("qualification did not record gfx1151")
 
@@ -159,6 +167,19 @@ def verify_release(inputs: ReleaseInputs) -> ReleaseRecord:
     _require_digest(inputs.profile_digest, "qualification profile")
     _require_digest(inputs.design_digest, "approved design")
     _require_digest(inputs.rocm_package_lock_digest, "ROCm package lock")
+    _require_digest(
+        inputs.embedded_rocm_package_lock_digest,
+        "embedded ROCm package lock",
+    )
+    _require_digest(inputs.torch_profile_digest, "Torch profile")
+    _require_digest(inputs.embedded_torch_profile_digest, "embedded Torch profile")
+    if (
+        inputs.embedded_rocm_package_lock_digest
+        != inputs.rocm_package_lock_digest
+    ):
+        raise ReleaseBlocked("embedded ROCm package lock does not match approved lock")
+    if inputs.embedded_torch_profile_digest != inputs.torch_profile_digest:
+        raise ReleaseBlocked("embedded Torch profile does not match approved profile")
     _require_digest(inputs.sbom_digest, "SPDX document")
     if GIT_REVISION_PATTERN.fullmatch(inputs.git_revision) is None:
         raise ReleaseBlocked("Git revision is invalid")
@@ -181,6 +202,7 @@ def verify_release(inputs: ReleaseInputs) -> ReleaseRecord:
         image_labels=MappingProxyType(dict(inputs.image_labels)),
         wheel_hashes=MappingProxyType(dict(inputs.wheel_hashes)),
         rocm_package_lock_digest=inputs.rocm_package_lock_digest,
+        torch_profile_digest=inputs.torch_profile_digest,
         sbom_digest=inputs.sbom_digest,
         git_revision=inputs.git_revision,
         verified_tag=VERIFIED_TAG,
@@ -225,7 +247,8 @@ def create_release(
     image_id, repo_digest, labels = _inspect_image(docker, image)
     sbom_document, sbom_bytes = _generate_sbom(
         docker,
-        image=image,
+        runtime_image=image_id,
+        name=image,
         created=generated_at,
     )
     if sbom_document.get("spdxVersion") != "SPDX-2.3":
@@ -235,6 +258,16 @@ def create_release(
         name: wheel.sha256 for name, wheel in profile.wheels.items()
     }
     git_revision, git_clean = _git_state()
+    embedded_rocm_lock = _read_image_file(
+        docker,
+        image_id,
+        "/opt/amd-ai/locks/rocm-packages.lock",
+    )
+    embedded_torch_profile = _read_image_file(
+        docker,
+        image_id,
+        "/opt/amd-ai/profile.env",
+    )
     inputs = ReleaseInputs(
         qualification=qualification,
         qualification_digest=hashlib.sha256(qualification_bytes).hexdigest(),
@@ -246,13 +279,19 @@ def create_release(
         image_labels=labels,
         wheel_hashes=wheel_hashes,
         rocm_package_lock_digest=_hash_file(ROCM_PACKAGE_LOCK),
+        embedded_rocm_package_lock_digest=hashlib.sha256(
+            embedded_rocm_lock
+        ).hexdigest(),
+        torch_profile_digest=_hash_file(TORCH_PROFILE),
+        embedded_torch_profile_digest=hashlib.sha256(
+            embedded_torch_profile
+        ).hexdigest(),
         sbom_digest=hashlib.sha256(sbom_bytes).hexdigest(),
         git_revision=git_revision,
         git_clean=git_clean,
         generated_at=generated_at,
     )
     record = verify_release(inputs)
-    _tag_verified_image(docker, record.image_id, record.verified_tag)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = _release_stem(generated_at)
@@ -263,12 +302,65 @@ def create_release(
         qualification_file=str(qualification_path),
         sbom_file=sbom_path.name,
     )
-    sbom_path.write_bytes(sbom_bytes)
-    release_path.write_text(
-        json.dumps(record.to_dict(), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    publish_release_artifacts(
+        docker=docker,
+        record=record,
+        sbom_bytes=sbom_bytes,
+        release_path=release_path,
+        sbom_path=sbom_path,
     )
     return release_path, sbom_path
+
+
+def publish_release_artifacts(
+    *,
+    docker: Docker,
+    record: ReleaseRecord,
+    sbom_bytes: bytes,
+    release_path: Path,
+    sbom_path: Path,
+) -> None:
+    if release_path.exists() or sbom_path.exists():
+        raise ReleaseBlocked("release artifact path already exists")
+    release_temporary = release_path.with_name(f".{release_path.name}.tmp")
+    sbom_temporary = sbom_path.with_name(f".{sbom_path.name}.tmp")
+    release_rendered = (
+        json.dumps(record.to_dict(), indent=2, sort_keys=True) + "\n"
+    )
+    previous_tag_id: str | None = None
+    tag_changed = False
+    sbom_published = False
+    try:
+        sbom_temporary.write_bytes(sbom_bytes)
+        release_temporary.write_text(release_rendered, encoding="utf-8")
+        previous_tag_id = _tag_verified_image(
+            docker,
+            record.image_id,
+            record.verified_tag,
+        )
+        tag_changed = previous_tag_id != record.image_id
+        os.replace(sbom_temporary, sbom_path)
+        sbom_published = True
+        os.replace(release_temporary, release_path)
+    except Exception as error:
+        if tag_changed:
+            try:
+                _restore_verified_tag(
+                    docker,
+                    tag=record.verified_tag,
+                    previous_image_id=previous_tag_id,
+                )
+            except ReleaseBlocked as rollback_error:
+                raise ReleaseBlocked(
+                    "release artifact failure also failed to restore verified tag"
+                ) from rollback_error
+        if sbom_published:
+            sbom_path.unlink(missing_ok=True)
+        release_path.unlink(missing_ok=True)
+        raise error
+    finally:
+        sbom_temporary.unlink(missing_ok=True)
+        release_temporary.unlink(missing_ok=True)
 
 
 def _inspect_image(
@@ -311,7 +403,8 @@ def _inspect_image(
 def _generate_sbom(
     docker: Docker,
     *,
-    image: str,
+    runtime_image: str,
+    name: str,
     created: str,
 ) -> tuple[dict[str, object], bytes]:
     mount = (
@@ -326,10 +419,10 @@ def _generate_sbom(
             mount,
             "--entrypoint",
             "/opt/venv/bin/python",
-            image,
+            runtime_image,
             "/opt/amd-ai/generate-sbom.py",
             "--name",
-            image,
+            name,
             "--created",
             created,
             "--output",
@@ -352,19 +445,42 @@ def _generate_sbom(
     return document, rendered
 
 
+def _read_image_file(docker: Docker, image_id: str, path: str) -> bytes:
+    result = docker.capture(
+        (
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/bin/cat",
+            image_id,
+            path,
+        ),
+        check=False,
+    )
+    if result.returncode != 0:
+        evidence = result.stderr.strip() or result.stdout.strip()
+        raise ReleaseBlocked(f"cannot read embedded build input {path}: {evidence}")
+    return result.stdout.encode("utf-8")
+
+
 def _git_state() -> tuple[str, bool]:
     revision = _completed(("git", "rev-parse", "HEAD"))
     if revision.returncode != 0:
         raise ReleaseBlocked("cannot read Git revision")
-    status = _completed(
-        ("git", "status", "--porcelain", "--untracked-files=no")
-    )
+    status = _completed(git_status_argv())
     if status.returncode != 0:
         raise ReleaseBlocked("cannot read Git tracked-file status")
     return revision.stdout.strip(), not status.stdout.strip()
 
 
-def _tag_verified_image(docker: Docker, image_id: str, tag: str) -> None:
+def git_status_argv() -> tuple[str, ...]:
+    return ("git", "status", "--porcelain", "--untracked-files=all")
+
+
+def _tag_verified_image(docker: Docker, image_id: str, tag: str) -> str | None:
+    previous_image_id = docker.image_id(tag, required=False)
+    if previous_image_id == image_id:
+        return previous_image_id
     tagged = docker.capture(("image", "tag", image_id, tag), check=False)
     if tagged.returncode != 0:
         raise ReleaseBlocked(
@@ -375,6 +491,26 @@ def _tag_verified_image(docker: Docker, image_id: str, tag: str) -> None:
         raise ReleaseBlocked(
             "verified tag did not resolve to the qualified image ID"
         )
+    return previous_image_id
+
+
+def _restore_verified_tag(
+    docker: Docker,
+    *,
+    tag: str,
+    previous_image_id: str | None,
+) -> None:
+    if previous_image_id is None:
+        result = docker.capture(("image", "rm", tag), check=False)
+    else:
+        result = docker.capture(
+            ("image", "tag", previous_image_id, tag),
+            check=False,
+        )
+    if result.returncode != 0:
+        raise ReleaseBlocked("cannot restore the previous verified tag")
+    if docker.image_id(tag, required=False) != previous_image_id:
+        raise ReleaseBlocked("verified tag rollback did not restore prior state")
 
 
 def _hash_file(path: Path) -> str:

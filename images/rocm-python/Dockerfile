@@ -37,6 +37,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     while IFS='=' read -r package version; do \
       test "$(dpkg-query -W -f='${Version}' "${package}")" = "${version}"; \
     done < /tmp/rocm-lock/packages.lock; \
+    install -D -m 0644 /tmp/rocm-lock/packages.lock \
+      /opt/amd-ai/locks/rocm-packages.lock; \
     dpkg-query -W rocm-hip-sdk rocm-ml-sdk; \
     python3 -m venv /opt/venv; \
     /opt/rocm/bin/hipcc --version; \

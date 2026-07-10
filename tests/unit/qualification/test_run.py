@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 
 from amd_ai.qualification.models import load_profile
-from amd_ai.qualification.run import build_suite_commands, execute_suite
+from amd_ai.qualification.run import (
+    build_suite_commands,
+    execute_suite,
+    resolve_image_id,
+)
 from amd_ai.runner import CommandResult
 
 
@@ -96,6 +100,38 @@ def test_new_gpu_reset_blocks_kernel_log_result(tmp_path):
     assert kernel.details["blocking_codes"] == ["GPU.RESET"]
 
 
+def test_qualification_resolves_tag_once_and_commands_use_image_id(tmp_path):
+    image = "rocm-pytorch:stable"
+    image_id = "sha256:" + "d" * 64
+    inspect_args = (
+        "docker",
+        "image",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        image,
+    )
+    runner = ExactRunner(
+        {
+            inspect_args: CommandResult(inspect_args, 0, image_id + "\n", "")
+        }
+    )
+
+    resolved = resolve_image_id(image, runner, ("docker",))
+    commands = build_suite_commands(
+        image=resolved,
+        gids=(109,),
+        stress_seconds=60,
+        repeated_starts=2,
+        test_root=tmp_path / "tests",
+        cache_dir=tmp_path / "cache",
+    )
+
+    assert resolved == image_id
+    assert all(image_id in command.argv for command in commands)
+    assert all(image not in command.argv for command in commands)
+
+
 class SequenceRunner:
     def __init__(self, *, container_results, dmesg_results):
         self.container_results = list(container_results)
@@ -113,3 +149,11 @@ class SequenceRunner:
         self.container_calls += 1
         stdout = json.dumps(payload) + "\n" if payload else ""
         return CommandResult(argv, returncode, stdout, stderr)
+
+
+class ExactRunner:
+    def __init__(self, responses):
+        self.responses = responses
+
+    def run(self, args, *, check=True, input_text=None):
+        return self.responses[tuple(args)]

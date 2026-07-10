@@ -40,13 +40,24 @@ GPU_EVIDENCE_PATTERN = re.compile(
 )
 
 
+class KernelLogDiscontinuity(RuntimeError):
+    pass
+
+
 def new_kernel_lines(before: str, after: str) -> tuple[str, ...]:
     before_lines = tuple(before.splitlines())
     after_lines = tuple(after.splitlines())
+    if before_lines and not after_lines:
+        raise KernelLogDiscontinuity("post-run kernel log is empty")
     if after_lines[: len(before_lines)] == before_lines:
         return after_lines[len(before_lines) :]
 
     remaining = Counter(before_lines)
+    overlap = sum((Counter(before_lines) & Counter(after_lines)).values())
+    if before_lines and overlap == 0:
+        raise KernelLogDiscontinuity(
+            "pre-run and post-run kernel logs have no common lines"
+        )
     new_lines: list[str] = []
     for line in after_lines:
         if remaining[line] > 0:

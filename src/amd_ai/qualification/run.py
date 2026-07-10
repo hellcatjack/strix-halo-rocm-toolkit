@@ -9,10 +9,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from amd_ai.qualification.kernel_log import (
+    KernelLogDiscontinuity,
     classify_new_lines,
     new_kernel_lines,
     relevant_gpu_lines,
 )
+from amd_ai.project.config import IMAGE_ID_PATTERN
 from amd_ai.qualification.models import (
     CheckResult,
     QualificationProfile,
@@ -151,6 +153,7 @@ def execute_suite(
     profile_digest: str,
     commands: Sequence[SuiteCommand],
     runner: Runner,
+    image_id: str | None = None,
     dmesg_argv: Sequence[str] = DEFAULT_DMESG_ARGV,
 ) -> QualificationReport:
     generated_at = datetime.now(UTC).isoformat(timespec="seconds").replace(
@@ -158,9 +161,15 @@ def execute_suite(
     )
     results: list[CheckResult] = []
     before, before_seconds = _capture_dmesg(runner, dmesg_argv)
-    if before.returncode != 0:
+    if before.returncode != 0 or not before.stdout.strip():
         results.append(_dmesg_unavailable(before, before_seconds))
-        return _report(profile, profile_digest, generated_at, results)
+        return _report(
+            profile,
+            profile_digest,
+            generated_at,
+            results,
+            image_id=image_id,
+        )
 
     for command in commands:
         result = _run_command(command, profile.gpu_arch, runner)
@@ -169,25 +178,43 @@ def execute_suite(
             break
 
     after, after_seconds = _capture_dmesg(runner, dmesg_argv)
-    if after.returncode != 0:
+    if after.returncode != 0 or not after.stdout.strip():
         results.append(_dmesg_unavailable(after, after_seconds))
     else:
-        lines = new_kernel_lines(before.stdout, after.stdout)
-        relevant = relevant_gpu_lines(lines)
-        findings = classify_new_lines(lines)
-        results.append(
-            CheckResult(
-                "kernel-log",
-                not findings,
-                before_seconds + after_seconds,
-                {
-                    "new_relevant_lines": list(relevant),
-                    "blocking_codes": [finding.code for finding in findings],
-                },
-                "\n".join(relevant),
+        try:
+            lines = new_kernel_lines(before.stdout, after.stdout)
+        except KernelLogDiscontinuity as error:
+            results.append(
+                CheckResult(
+                    "kernel-log",
+                    False,
+                    before_seconds + after_seconds,
+                    {"blocking_codes": ["HOST.DMESG_DISCONTINUITY"]},
+                    str(error),
+                )
             )
-        )
-    return _report(profile, profile_digest, generated_at, results)
+        else:
+            relevant = relevant_gpu_lines(lines)
+            findings = classify_new_lines(lines)
+            results.append(
+                CheckResult(
+                    "kernel-log",
+                    not findings,
+                    before_seconds + after_seconds,
+                    {
+                        "new_relevant_lines": list(relevant),
+                        "blocking_codes": [finding.code for finding in findings],
+                    },
+                    "\n".join(relevant),
+                )
+            )
+    return _report(
+        profile,
+        profile_digest,
+        generated_at,
+        results,
+        image_id=image_id,
+    )
 
 
 def run_profile(
@@ -208,8 +235,9 @@ def run_profile(
     cache_dir.mkdir(parents=True, exist_ok=True)
     (cache_dir / "home").mkdir(mode=0o700, exist_ok=True)
     profile_digest = hashlib.sha256(profile_path.read_bytes()).hexdigest()
+    image_id = resolve_image_id(profile.image, runner, docker_prefix)
     commands = build_suite_commands(
-        image=profile.image,
+        image=image_id,
         gids=gids,
         stress_seconds=profile.stress_seconds,
         repeated_starts=profile.repeated_starts,
@@ -224,6 +252,7 @@ def run_profile(
         profile_digest=profile_digest,
         commands=commands,
         runner=runner,
+        image_id=image_id,
     )
     if output_path is not None:
         report.write_json(output_path)
@@ -286,6 +315,8 @@ def _report(
     profile_digest: str,
     generated_at: str,
     results: Sequence[CheckResult],
+    *,
+    image_id: str | None,
 ) -> QualificationReport:
     return QualificationReport.from_results(
         profile_id=profile.profile_id,
@@ -294,8 +325,30 @@ def _report(
         generated_at=generated_at,
         profile_digest=profile_digest,
         image=profile.image,
+        image_id=image_id,
         gpu_arch=profile.gpu_arch,
     )
+
+
+def resolve_image_id(
+    image: str,
+    runner: Runner,
+    docker_prefix: Sequence[str],
+) -> str:
+    args = [
+        *docker_prefix,
+        "image",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        image,
+    ]
+    result = runner.run(args, check=False)
+    image_id = result.stdout.strip()
+    if result.returncode != 0 or IMAGE_ID_PATTERN.fullmatch(image_id) is None:
+        evidence = result.stderr.strip() or result.stdout.strip() or "image is missing"
+        raise QualificationError(f"cannot resolve qualification image: {evidence}")
+    return image_id
 
 
 def _last_json_object(output: str) -> dict[str, object] | None:

@@ -99,6 +99,7 @@ class QualificationReport:
     generated_at: str | None = None
     profile_digest: str | None = None
     image: str | None = None
+    image_id: str | None = None
     gpu_arch: str | None = None
     schema_version: int = 1
 
@@ -112,6 +113,7 @@ class QualificationReport:
         generated_at: str | None = None,
         profile_digest: str | None = None,
         image: str | None = None,
+        image_id: str | None = None,
         gpu_arch: str | None = None,
     ) -> QualificationReport:
         result_tuple = tuple(results)
@@ -129,6 +131,7 @@ class QualificationReport:
             generated_at=generated_at,
             profile_digest=profile_digest,
             image=image,
+            image_id=image_id,
             gpu_arch=gpu_arch,
         )
 
@@ -142,6 +145,7 @@ class QualificationReport:
             "generated_at": self.generated_at,
             "profile_digest": self.profile_digest,
             "image": self.image,
+            "image_id": self.image_id,
             "gpu_arch": self.gpu_arch,
         }
 

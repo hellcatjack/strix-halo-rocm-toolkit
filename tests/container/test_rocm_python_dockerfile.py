@@ -68,3 +68,9 @@ def test_developer_identity_handles_ubuntu_base_uid_1000():
     assert "groupmod --new-name developer" in text
     assert "getent passwd 1000" in text
     assert "usermod --login developer" in text
+
+
+def test_rocm_package_lock_is_preserved_for_release_verification():
+    text = Path("images/rocm-python/Dockerfile").read_text(encoding="utf-8")
+
+    assert "/opt/amd-ai/locks/rocm-packages.lock" in text

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from amd_ai.qualification.kernel_log import (
+    KernelLogDiscontinuity,
     classify_new_lines,
     new_kernel_lines,
     relevant_gpu_lines,
 )
+import pytest
 
 
 def test_known_gpu_failures_are_blocking():
@@ -55,3 +57,8 @@ def test_relevant_evidence_keeps_nonblocking_gpu_subsystem_lines():
     )
 
     assert relevant_gpu_lines(lines) == lines[1:]
+
+
+def test_cleared_post_run_log_is_a_blocking_discontinuity():
+    with pytest.raises(KernelLogDiscontinuity):
+        new_kernel_lines("amdgpu: initialized\n", "")
