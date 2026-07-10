@@ -370,7 +370,7 @@ git commit -m "fix: serialize multi-project installer workflows"
 
 - Verify only; no planned source edits
 
-- [ ] **Step 1: Run static and complete automated verification**
+- [x] **Step 1: Run static and complete automated verification**
 
 ```bash
 # v0.2.1 baseline exclusions: F401, F541, and F811 outside this diff.
@@ -387,7 +387,7 @@ Expected: Ruff with documented baseline exclusions, Markdown, and diff checks
 pass; the non-hardware suite has no failures. The affected files must also pass
 Ruff without exclusions except the pre-existing `cli.py` F401 findings.
 
-- [ ] **Step 2: Verify stable image identities are unchanged**
+- [x] **Step 2: Verify stable image identities are unchanged**
 
 ```bash
 PYTHONPATH=src bin/strix-halo-rocm release verify \
@@ -401,7 +401,7 @@ sha256:e9991f97f578156c8620fbb587d2d34504eb632f165cc5597deaadaa3e692a12
 sha256:dc0bb217474cfd4f602423bd3bf4fe8714b03e900cf3c6b4417b99e622ebcf8b
 ```
 
-- [ ] **Step 3: Exercise the user's legacy state without mutation**
+- [x] **Step 3: Exercise the user's legacy state without mutation**
 
 Record the SHA-256 of
 `~/.local/state/strix-halo-rocm-toolkit/install-state.json`, copy it and the
