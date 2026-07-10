@@ -1,7 +1,9 @@
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 from amd_ai import cli
+from tests.unit.project.fakes import FakeRunner, runtime_access
 
 
 def test_image_build_parser_defaults_to_repository_stable_profile():
@@ -54,6 +56,52 @@ def test_container_check_wrapper_forwards_image_mode_and_metadata(monkeypatch):
     assert captured["mode"] == "torch"
     assert captured["metadata_only"] is True
     assert captured["runtime"] is False
+
+
+def test_container_check_stable_suite_forwards_profile_and_report_path(
+    tmp_path,
+    monkeypatch,
+):
+    captured = {}
+
+    class FakeDocker:
+        prefix = ("docker",)
+
+    monkeypatch.setattr(
+        cli.Docker,
+        "detect",
+        classmethod(lambda cls: FakeDocker()),
+    )
+    runner = FakeRunner()
+    monkeypatch.setattr(cli, "SubprocessRunner", lambda: runner)
+    monkeypatch.setattr(cli, "discover_gpu_access", runtime_access)
+    monkeypatch.setattr(cli, "_runtime_identity", lambda: (1000, 1000))
+
+    def fake_run_profile(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(status="pass", to_dict=lambda: {"status": "pass"})
+
+    monkeypatch.setattr(cli, "run_qualification_profile", fake_run_profile)
+    output = tmp_path / "qualification.json"
+
+    code = cli.main(
+        [
+            "container-check",
+            "--suite",
+            "stable",
+            "--profile",
+            "profiles/qualification/stable.toml",
+            "--json",
+            str(output),
+        ]
+    )
+
+    assert code == 0
+    assert captured["profile_path"] == Path("profiles/qualification/stable.toml")
+    assert captured["output_path"] == output
+    assert captured["runner"] is runner
+    assert captured["docker_prefix"] == ("docker",)
+    assert captured["gids"] == (109, 110)
 
 
 def test_image_command_wrappers_are_executable_and_dispatch_expected_command():

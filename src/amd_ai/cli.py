@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import os
 import shlex
 import subprocess
@@ -46,6 +47,11 @@ from amd_ai.project.runtime import (
     compute_shm_gib,
     discover_gpu_access,
     read_mem_total_kib,
+)
+from amd_ai.qualification.models import ProfileError as QualificationProfileError
+from amd_ai.qualification.run import (
+    QualificationError,
+    run_profile as run_qualification_profile,
 )
 from amd_ai.report import Report, Status
 from amd_ai.runner import Runner, SubprocessRunner
@@ -117,6 +123,12 @@ def build_parser() -> argparse.ArgumentParser:
     check_kind.add_argument("--metadata-only", action="store_true")
     check_kind.add_argument("--runtime", action="store_true")
     container_check.add_argument("--json", dest="json_path")
+    container_check.add_argument("--suite", choices=("stable",))
+    container_check.add_argument(
+        "--profile",
+        type=Path,
+        default=Path("profiles/qualification/stable.toml"),
+    )
 
     project_init = subparsers.add_parser("project-init")
     project_init.add_argument("name")
@@ -153,6 +165,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
     if args.command == "container-check":
         try:
+            if args.suite == "stable":
+                return _qualification_suite(args)
             return run_image_check(
                 image=args.image,
                 mode=args.mode,
@@ -160,7 +174,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 runtime=args.runtime,
                 json_path=args.json_path,
             )
-        except BuildError as error:
+        except (
+            BuildError,
+            ProjectRunError,
+            QualificationError,
+            QualificationProfileError,
+            RuntimePolicyError,
+        ) as error:
             print(f"container-check: {error}", file=sys.stderr)
             return 2
     if args.command in {"project-init", "project-lock", "project-run"}:
@@ -218,6 +238,34 @@ def _project_init(args: argparse.Namespace) -> int:
     )
     print(f"initialized {project_dir}")
     return 0
+
+
+def _qualification_suite(args: argparse.Namespace) -> int:
+    if args.metadata_only or args.runtime:
+        raise QualificationError(
+            "--suite cannot be combined with --metadata-only or --runtime"
+        )
+    docker = Docker.detect()
+    runner = SubprocessRunner()
+    access = discover_gpu_access()
+    uid, gid = _runtime_identity()
+    output_path = (
+        None
+        if args.json_path in {None, "-"}
+        else Path(args.json_path)
+    )
+    report = run_qualification_profile(
+        profile_path=args.profile,
+        output_path=output_path,
+        runner=runner,
+        docker_prefix=docker.prefix,
+        gids=access.group_ids,
+        uid=uid,
+        gid=gid,
+    )
+    if output_path is None:
+        print(json.dumps(report.to_dict(), sort_keys=True))
+    return 0 if report.status == "pass" else 2
 
 
 def _project_lock(args: argparse.Namespace) -> int:

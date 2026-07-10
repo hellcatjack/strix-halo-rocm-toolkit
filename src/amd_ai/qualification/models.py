@@ -96,6 +96,10 @@ class QualificationReport:
     status: str
     results: tuple[CheckResult, ...]
     required_checks: tuple[str, ...]
+    generated_at: str | None = None
+    profile_digest: str | None = None
+    image: str | None = None
+    gpu_arch: str | None = None
     schema_version: int = 1
 
     @classmethod
@@ -105,6 +109,10 @@ class QualificationReport:
         profile_id: str,
         results: Sequence[CheckResult],
         required_checks: Sequence[str],
+        generated_at: str | None = None,
+        profile_digest: str | None = None,
+        image: str | None = None,
+        gpu_arch: str | None = None,
     ) -> QualificationReport:
         result_tuple = tuple(results)
         required_tuple = tuple(required_checks)
@@ -118,6 +126,10 @@ class QualificationReport:
             status="pass" if passed else "blocked",
             results=result_tuple,
             required_checks=required_tuple,
+            generated_at=generated_at,
+            profile_digest=profile_digest,
+            image=image,
+            gpu_arch=gpu_arch,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -127,6 +139,10 @@ class QualificationReport:
             "status": self.status,
             "required_checks": list(self.required_checks),
             "results": [result.to_dict() for result in self.results],
+            "generated_at": self.generated_at,
+            "profile_digest": self.profile_digest,
+            "image": self.image,
+            "gpu_arch": self.gpu_arch,
         }
 
     def write_json(self, path: Path) -> None:
