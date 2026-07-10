@@ -328,9 +328,9 @@ class ProductionInstallerActions:
             raise ActionError("privileged host apply facts are invalid")
         return StageResult(facts=facts)
 
-    def _sudo_host_verify(self) -> Report:
+    def _sudo_host_verify(self, *, target_user: str) -> Report:
         command = self._sudo_helper_command()
-        command.append("verify")
+        command.extend(("--target-user", target_user, "verify"))
         payload = self._run_sudo_helper(command, operation="host verify")
         _require_exact_keys(
             "privileged host verify",
@@ -383,11 +383,18 @@ class ProductionInstallerActions:
             raise ActionError(f"privileged {operation} result is not an object")
         return payload
 
-    def host_verify(self, *, image: str = ROCM_PYTHON_TAG) -> Report:
+    def host_verify(
+        self,
+        *,
+        image: str = ROCM_PYTHON_TAG,
+        target_user: str,
+    ) -> Report:
         del image
         if self.effective_uid != 0:
-            return self._sudo_host_verify()
-        return evaluate_post_reboot(self._snapshot())
+            return self._sudo_host_verify(target_user=target_user)
+        return evaluate_post_reboot(
+            self._snapshot(target_user=target_user)
+        )
 
     def container_host_check(self) -> StageResult:
         snapshot = self._input_snapshots.pop(

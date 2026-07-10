@@ -376,8 +376,9 @@ def test_nonroot_host_verify_uses_privileged_read_only_helper() -> None:
     result = ProductionInstallerActions(
         effective_uid=1000,
         sudo_run=sudo_run,
-    ).host_verify()
+    ).host_verify(target_user="developer")
 
     assert result.status.value == "pass"
     assert captured[0][-1] == "verify"
+    assert captured[0][captured[0].index("--target-user") + 1] == "developer"
     assert "apply" not in captured[0]

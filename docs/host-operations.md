@@ -38,7 +38,9 @@ mkdir -p reports
 ./bin/host-preflight --json reports/preflight.json
 ```
 
-退出码：`0` 表示通过或明确的 `unverified`，`1` 表示需要修改/重启，`2` 表示阻断。`6.17.0-1025-oem` 满足最低内核要求，但在纳入版本化已测内核清单前会报告 `HOST.UPSTREAM_UNVERIFIED`。
+退出码：`0` 表示通过或明确的 `unverified`，`1` 表示需要修改/重启，`2` 表示阻断。高于最低版本但未纳入版本化已测内核清单的 OEM patch kernel 会报告 `HOST.UPSTREAM_UNVERIFIED`。
+
+只有当前内核低于最低要求或不是 OEM kernel 时，才应引导安装/启动 `linux-oem-24.04`。对更新但尚未登记的 OEM patch kernel，不自动升级、降级或固定旧包；先执行设备与容器探针，普通安装可带 `unverified` 记录继续，正式发布前再运行完整硬件资格测试。
 
 预检核对：
 
@@ -118,7 +120,7 @@ sudo -v
 - 容器输出包含 `gfx1151`；
 - 当前启动的 `dmesg` 中没有 MES timeout、GPU reset、amdgpu page fault、firmware 加载失败或 ring timeout。
 
-`host-verify` 本身保持以普通目标用户运行，以便正确判断该用户的设备组；普通 `dmesg` 或 Docker daemon 不可访问时，只回退到固定的 `sudo -n dmesg` 与 `sudo -n docker` 命令。先运行 `sudo -v` 可刷新凭据，但不会让整条验证流程以 root 身份误判用户权限。两条路径都无法读取 dmesg 时会得到 `HOST.DMESG_UNAVAILABLE`，不会把空输出当成“没有 GPU 错误”。`host-verify` 只有在宿主检查和容器探针均正式通过时返回 0。满足最低要求但未登记的 OEM 内核保持 `unverified` 并返回 1；阻断错误返回 2。
+`host-verify` 本身保持以普通目标用户运行，以便正确判断该用户的设备组；普通 `dmesg` 或 Docker daemon 不可访问时，只回退到固定的 `sudo -n dmesg` 与 `sudo -n docker` 命令。先运行 `sudo -v` 可刷新凭据，但不会让整条验证流程以 root 身份误判用户权限。两条路径都无法读取 dmesg 时会得到 `HOST.DMESG_UNAVAILABLE`，不会把空输出当成“没有 GPU 错误”。独立 `host-verify` 命令只有在宿主检查和容器探针均正式通过时返回 0；满足最低要求但未登记的 OEM 内核保持 `unverified` 并返回 1，阻断错误返回 2。交互安装器从 `v0.2.1` 起会明确记录该 `unverified` 状态并继续普通部署。
 
 ## 4. 备份与恢复
 

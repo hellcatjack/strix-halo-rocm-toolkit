@@ -13,7 +13,10 @@ SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 PROJECT_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
 USER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,31}")
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
+HOST_VERIFICATION_STATUSES = frozenset({"pass", "unverified"})
+FINDING_CODE_PATTERN = re.compile(r"[A-Z][A-Z0-9_.-]{1,127}")
+KERNEL_NAME_PATTERN = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}")
 
 
 class InstallerModelError(ValueError):
@@ -195,6 +198,9 @@ class InstallState:
     base_config_digest: str | None = None
     torch_config_digest: str | None = None
     last_report_paths: tuple[str, ...] = ()
+    host_verification_status: str | None = None
+    host_kernel: str | None = None
+    host_verification_findings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or (
@@ -242,6 +248,45 @@ class InstallState:
             raise InstallerModelError(
                 "install state Docker group acceptance is invalid"
             )
+        if (
+            self.host_verification_status is not None
+            and self.host_verification_status not in HOST_VERIFICATION_STATUSES
+        ):
+            raise InstallerModelError(
+                "install state host verification status is invalid"
+            )
+        if self.host_kernel is not None and (
+            not isinstance(self.host_kernel, str)
+            or KERNEL_NAME_PATTERN.fullmatch(self.host_kernel) is None
+        ):
+            raise InstallerModelError("install state host kernel is invalid")
+        if (self.host_verification_status is None) != (self.host_kernel is None):
+            raise InstallerModelError(
+                "install state host verification identity is incomplete"
+            )
+        finding_codes: list[str] = []
+        for code in self.host_verification_findings:
+            if (
+                not isinstance(code, str)
+                or FINDING_CODE_PATTERN.fullmatch(code) is None
+            ):
+                raise InstallerModelError(
+                    "install state host verification finding is invalid"
+                )
+            finding_codes.append(code)
+        if len(finding_codes) != len(set(finding_codes)):
+            raise InstallerModelError(
+                "install state host verification findings contain duplicates"
+            )
+        if self.host_verification_status is None and finding_codes:
+            raise InstallerModelError(
+                "install state host verification findings have no status"
+            )
+        object.__setattr__(
+            self,
+            "host_verification_findings",
+            tuple(finding_codes),
+        )
 
         source_root = _absolute_path(Path(self.source_root))
         if str(source_root) != self.source_root:

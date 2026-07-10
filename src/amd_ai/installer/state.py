@@ -17,11 +17,12 @@ from amd_ai.installer.models import (
     InstallStage,
     InstallState,
     InstallerModelError,
+    STATE_SCHEMA_VERSION,
 )
 
 
 BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
-STATE_KEYS = frozenset(
+STATE_KEYS_V1 = frozenset(
     {
         "schema_version",
         "installer_version",
@@ -47,6 +48,13 @@ STATE_KEYS = frozenset(
         "base_config_digest",
         "torch_config_digest",
         "last_report_paths",
+    }
+)
+STATE_KEYS = STATE_KEYS_V1 | frozenset(
+    {
+        "host_verification_status",
+        "host_kernel",
+        "host_verification_findings",
     }
 )
 
@@ -147,6 +155,7 @@ def load_state(path: Path) -> InstallState | None:
         payload = json.loads(raw, object_pairs_hook=_unique_object)
         if not isinstance(payload, dict):
             raise ValueError("install state must be a JSON object")
+        payload = _migrate_payload(payload)
         unknown = sorted(set(payload).difference(STATE_KEYS))
         if unknown:
             raise ValueError("unknown install state keys: " + ", ".join(unknown))
@@ -155,15 +164,19 @@ def load_state(path: Path) -> InstallState | None:
             raise ValueError("missing install state keys: " + ", ".join(missing))
         completed = payload["completed_stage_input_digests"]
         reports = payload["last_report_paths"]
+        host_findings = payload["host_verification_findings"]
         if not isinstance(completed, dict):
             raise ValueError("completed stage digests must be an object")
         if not isinstance(reports, list):
             raise ValueError("last report paths must be an array")
+        if not isinstance(host_findings, list):
+            raise ValueError("host verification findings must be an array")
         return InstallState(
             **{
                 **payload,
                 "completed_stage_input_digests": completed,
                 "last_report_paths": tuple(reports),
+                "host_verification_findings": tuple(host_findings),
             }
         )
     except (KeyError, TypeError, ValueError, InstallerModelError) as error:
@@ -266,6 +279,32 @@ def _state_payload(state: InstallState) -> dict[str, object]:
         "base_config_digest": state.base_config_digest,
         "torch_config_digest": state.torch_config_digest,
         "last_report_paths": list(state.last_report_paths),
+        "host_verification_status": state.host_verification_status,
+        "host_kernel": state.host_kernel,
+        "host_verification_findings": list(state.host_verification_findings),
+    }
+
+
+def _migrate_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    version = payload.get("schema_version")
+    if type(version) is not int:
+        raise ValueError("install state schema version is invalid")
+    if version == STATE_SCHEMA_VERSION:
+        return payload
+    if version != 1:
+        raise ValueError("install state schema version is invalid")
+    unknown = sorted(set(payload).difference(STATE_KEYS_V1))
+    if unknown:
+        raise ValueError("unknown install state keys: " + ", ".join(unknown))
+    missing = sorted(STATE_KEYS_V1.difference(payload))
+    if missing:
+        raise ValueError("missing install state keys: " + ", ".join(missing))
+    return {
+        **payload,
+        "schema_version": STATE_SCHEMA_VERSION,
+        "host_verification_status": None,
+        "host_kernel": None,
+        "host_verification_findings": [],
     }
 
 

@@ -4,6 +4,7 @@ import getpass
 import hashlib
 import os
 import re
+import shlex
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from amd_ai.installer.models import (
     InstallStage,
     InstallState,
     InstallerModelError,
+    STATE_SCHEMA_VERSION,
     StageResult,
     StableRelease,
 )
@@ -39,7 +41,6 @@ from amd_ai.installer.state import (
     CorruptInstallState,
     InstallAlreadyRunning,
     InstallerStateError,
-    ResumeInputChanged,
     boot_id_changed,
     install_lock,
     load_state,
@@ -116,6 +117,8 @@ class InstallerWorkflow:
                     state = self._new_state()
                     if not self.options.dry_run:
                         save_state(self.options.state_path, state)
+                elif not self.options.dry_run:
+                    state = self._adopt_compatible_installer_update(state)
                 self._validate_transition(state)
                 if self.options.dry_run:
                     return self._run_dry(state)
@@ -151,7 +154,7 @@ class InstallerWorkflow:
         assert self.options.project_dir is not None
         assert self.options.source_root is not None
         return InstallState(
-            schema_version=1,
+            schema_version=STATE_SCHEMA_VERSION,
             installer_version=self.installer_version,
             mode=self.options.mode,
             target_user=target_user,
@@ -175,6 +178,9 @@ class InstallerWorkflow:
             base_config_digest=None,
             torch_config_digest=None,
             last_report_paths=(),
+            host_verification_status=None,
+            host_kernel=None,
+            host_verification_findings=(),
         )
 
     def _run_stages(self, state: InstallState) -> WorkflowResult:
@@ -228,14 +234,27 @@ class InstallerWorkflow:
                 next_stage=(order[index + 1] if index + 1 < len(order) else stage),
             )
             save_state(self.options.state_path, state)
-            self._status("PASS", stage.value)
+            if (
+                stage is InstallStage.HOST_VERIFY
+                and isinstance(output, Report)
+                and output.status is Status.UNVERIFIED
+            ):
+                self._status("WARN", outcome.message)
+            else:
+                self._status("PASS", stage.value)
             if outcome.action_required:
                 return WorkflowResult(
                     1,
                     state,
                     outcome.message or f"{stage.value} requires operator action",
                 )
-        return WorkflowResult(0, state, "installation complete")
+        message = "installation complete"
+        if state.host_verification_status == Status.UNVERIFIED.value:
+            message += (
+                f"; host remains unverified on {state.host_kernel}; "
+                "run the displayed full qualification before release promotion"
+            )
+        return WorkflowResult(0, state, message)
 
     def _run_dry(self, state: InstallState) -> WorkflowResult:
         mutating = {
@@ -291,7 +310,9 @@ class InstallerWorkflow:
                 )
             return StageResult()
         if stage is InstallStage.HOST_VERIFY:
-            return self.actions.host_verify()
+            if state.target_user is None:
+                raise WorkflowError("host target user is unavailable")
+            return self.actions.host_verify(target_user=state.target_user)
         if stage is InstallStage.RELEASE_RESOLVE:
             self._release = self.actions.resolve_release(
                 self.options.manifest_path
@@ -503,17 +524,25 @@ class InstallerWorkflow:
             if stage is InstallStage.HOST_PREFLIGHT:
                 blocked = output.status is Status.BLOCKED
             elif stage is InstallStage.HOST_VERIFY:
-                blocked = output.status is not Status.PASS
+                blocked = output.status not in (
+                    Status.PASS,
+                    Status.UNVERIFIED,
+                )
             else:
                 blocked = False
+            if (
+                stage is InstallStage.HOST_VERIFY
+                and output.status is Status.UNVERIFIED
+            ):
+                message = self._unverified_host_message(output)
+            elif blocked:
+                message = f"{output.command} returned {output.status.value}"
+            else:
+                message = ""
             return StageResult(
                 facts={"report": output.to_dict()},
                 blocked=blocked,
-                message=(
-                    f"{output.command} returned {output.status.value}"
-                    if blocked
-                    else ""
-                ),
+                message=message,
             )
         hook = getattr(self.actions, "stage_result", None)
         if hook is None:
@@ -550,6 +579,19 @@ class InstallerWorkflow:
             plan = self._resolved_host_plan(state).plan
             changes["reboot_boot_id"] = (
                 self._boot_id_reader() if plan.reboot_required else None
+            )
+        elif stage is InstallStage.HOST_VERIFY and isinstance(output, Report):
+            kernel = output.facts.get("kernel")
+            if not isinstance(kernel, str) or not kernel:
+                raise WorkflowError("host verification report has no kernel identity")
+            changes.update(
+                {
+                    "host_verification_status": output.status.value,
+                    "host_kernel": kernel,
+                    "host_verification_findings": tuple(
+                        finding.code for finding in output.findings
+                    ),
+                }
             )
         elif stage is InstallStage.RELEASE_RESOLVE:
             if not isinstance(output, StableRelease):
@@ -590,6 +632,91 @@ class InstallerWorkflow:
             )
         reports = tuple(dict.fromkeys((*state.last_report_paths, *outcome.report_paths)))
         return replace(state, last_report_paths=reports, **changes)
+
+    def _adopt_compatible_installer_update(self, state: InstallState) -> InstallState:
+        assert self.options.source_root is not None
+        current_root = str(self.options.source_root)
+        if (
+            state.installer_version == self.installer_version
+            and state.installer_source_revision == self.installer_source_revision
+            and state.source_root == current_root
+        ):
+            return state
+        if not self._can_adopt_installer_update(state):
+            return state
+        expected = state.completed_stage_input_digests.get(InstallStage.BOOTSTRAP.value)
+        if expected is None:
+            return state
+        current_inputs = self._stage_inputs(InstallStage.BOOTSTRAP, state)
+        previous_inputs = dict(current_inputs)
+        previous_inputs.update(
+            {
+                "installer_version": state.installer_version,
+                "installer_source_revision": state.installer_source_revision,
+                "source_root": state.source_root,
+            }
+        )
+        if stage_input_digest(previous_inputs) != expected:
+            return state
+        completed = dict(state.completed_stage_input_digests)
+        completed[InstallStage.BOOTSTRAP.value] = stage_input_digest(current_inputs)
+        updated = replace(
+            state,
+            installer_version=self.installer_version,
+            installer_source_revision=self.installer_source_revision,
+            source_root=current_root,
+            completed_stage_input_digests=completed,
+            updated_at=_utc_timestamp(),
+        )
+        self._status(
+            "WARN",
+            "resuming after compatible installer update "
+            f"{state.installer_version}@{state.installer_source_revision[:12]} "
+            f"-> {self.installer_version}@{self.installer_source_revision[:12]}",
+        )
+        return updated
+
+    def _can_adopt_installer_update(self, state: InstallState) -> bool:
+        if state.mode is not InstallMode.FULL:
+            return False
+        start = FULL_STAGE_ORDER.index(InstallStage.HOST_VERIFY)
+        if state.current_stage not in FULL_STAGE_ORDER[start:]:
+            return False
+        previous_series = _installer_series(state.installer_version)
+        return previous_series is not None and previous_series == _installer_series(
+            self.installer_version
+        )
+
+    def _unverified_host_message(self, report: Report) -> str:
+        assert self.options.source_root is not None
+        kernel = report.facts.get("kernel")
+        if (
+            not isinstance(kernel, str)
+            or re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}", kernel) is None
+        ):
+            raise WorkflowError("host verification report has no valid kernel identity")
+        codes = ",".join(finding.code for finding in report.findings)
+        root = self.options.source_root
+        report_path = root / "reports" / f"qualification-{kernel}.json"
+        qualification = shlex.join(
+            (
+                str(root / "bin/container-check"),
+                "--suite",
+                "stable",
+                "--profile",
+                str(root / "profiles/qualification/stable.toml"),
+                "--json",
+                str(report_path),
+            )
+        )
+        return (
+            f"HOST_VERIFY unverified on {kernel} ({codes}); "
+            "post-reboot host checks passed, so installation will continue; "
+            "IMAGE_VERIFY will still enforce the gfx1151 GPU runtime. "
+            "Optional full qualification after image acquisition and before "
+            "release promotion: "
+            f"sudo -v && {qualification}"
+        )
 
     def _record_reports(
         self, state: InstallState, outcome: StageResult
@@ -772,6 +899,16 @@ def _file_digest(path: Path) -> str | None:
     except OSError as error:
         raise WorkflowError(f"cannot hash stage input {path}: {error}") from error
     return hashlib.sha256(data).hexdigest()
+
+
+def _installer_series(version: str) -> tuple[int, int] | None:
+    match = re.fullmatch(
+        r"(\d+)\.(\d+)\.\d+(?:[+.-][0-9A-Za-z.-]+)?",
+        version,
+    )
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def _utc_timestamp() -> str:

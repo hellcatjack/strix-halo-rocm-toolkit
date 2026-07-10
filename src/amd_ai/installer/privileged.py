@@ -33,9 +33,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         actions = ProductionInstallerActions(effective_uid=0)
         if args.operation == "verify":
+            if not args.target_user:
+                raise ActionError("verify mode requires --target-user")
             if any(
                 (
-                    args.target_user is not None,
                     args.memory_gib is not None,
                     args.expected_plan_digest is not None,
                     args.include_docker_group,
@@ -43,7 +44,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             ):
                 raise ActionError("verify mode received plan/apply arguments")
             payload = {
-                "report": actions.host_verify().to_dict(),
+                "report": actions.host_verify(
+                    target_user=args.target_user
+                ).to_dict(),
                 "schema_version": 1,
             }
         else:

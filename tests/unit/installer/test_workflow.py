@@ -17,6 +17,7 @@ from amd_ai.installer.state import (
     stage_input_digest,
 )
 from amd_ai.installer.workflow import InstallerWorkflow
+from amd_ai.report import Finding, Report, Severity, Status
 from tests.unit.installer.fakes import FakeInstallerActions, FakePrompts
 
 
@@ -48,6 +49,8 @@ def installer_workflow(
     options: InstallOptions | None = None,
     prompts: FakePrompts | None = None,
     boot_id_reader=None,
+    installer_version: str = "0.2.0",
+    installer_source_revision: str = "d" * 40,
 ) -> InstallerWorkflow:
     kwargs = {}
     if boot_id_reader is not None:
@@ -55,11 +58,51 @@ def installer_workflow(
     return InstallerWorkflow(
         options=options or workflow_options(tmp_path),
         actions=actions,
-        installer_version="0.2.0",
-        installer_source_revision="d" * 40,
+        installer_version=installer_version,
+        installer_source_revision=installer_source_revision,
         prompts=prompts,
         **kwargs,
     )
+
+
+def host_verify_report(status: Status) -> Report:
+    findings = ()
+    if status is Status.UNVERIFIED:
+        findings = (
+            Finding(
+                code="HOST.UPSTREAM_UNVERIFIED",
+                severity=Severity.WARNING,
+                summary="The OEM kernel is newer than the tested set",
+                evidence="running kernel: 6.17.0-1028-oem",
+                remediation="Run the full hardware qualification before promotion.",
+            ),
+        )
+    elif status is Status.CHANGE_REQUIRED:
+        findings = (
+            Finding(
+                code="GPU.PERMISSION",
+                severity=Severity.WARNING,
+                summary="GPU groups are missing",
+                evidence="missing GID: 993",
+                remediation="Start a new login session.",
+            ),
+        )
+    return Report(
+        command="host-verify",
+        status=status,
+        generated_at="2026-07-10T20:28:14Z",
+        facts={"kernel": "6.17.0-1028-oem"},
+        findings=findings,
+    )
+
+
+def returning_host_report(actions: FakeInstallerActions, report: Report) -> None:
+    def host_verify(**kwargs: object) -> Report:
+        assert kwargs == {"target_user": "developer"}
+        actions.calls.append("host_verify")
+        return report
+
+    actions.host_verify = host_verify  # type: ignore[method-assign]
 
 
 def full_options(
@@ -401,6 +444,148 @@ def test_changed_boot_resumes_at_host_verify_and_completes(
     assert resumed.exit_code == 0
     assert "host_apply" not in resumed_actions.calls
     assert resumed_actions.calls[0] == "host_verify"
+
+
+def test_unverified_newer_oem_kernel_warns_records_and_continues(
+    tmp_path: Path,
+) -> None:
+    first_boot = "12345678-1234-4abc-8def-1234567890ab"
+    second_boot = "87654321-4321-4abc-8def-ba0987654321"
+    first = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.host_change_requires_reboot(),
+        options=full_options(tmp_path),
+        prompts=FakePrompts(exact={"APPLY": True}),
+        boot_id_reader=lambda: first_boot,
+    ).run()
+    assert first.exit_code == 1
+
+    prompts = FakePrompts()
+    resumed_actions = FakeInstallerActions.host_change_requires_reboot()
+    returning_host_report(resumed_actions, host_verify_report(Status.UNVERIFIED))
+    result = installer_workflow(
+        tmp_path,
+        actions=resumed_actions,
+        options=full_options(tmp_path),
+        prompts=prompts,
+        boot_id_reader=lambda: second_boot,
+    ).run()
+
+    assert result.exit_code == 0
+    assert result.state is not None
+    assert result.state.host_verification_status == "unverified"
+    assert result.state.host_kernel == "6.17.0-1028-oem"
+    assert result.state.host_verification_findings == ("HOST.UPSTREAM_UNVERIFIED",)
+    assert any(
+        prefix == "WARN"
+        and "6.17.0-1028-oem" in message
+        and "container-check --suite stable" in message
+        for prefix, message in prompts.statuses
+    )
+    assert "host remains unverified" in result.message
+    assert "resolve_release" in resumed_actions.calls
+
+
+def test_host_verify_change_required_remains_blocked(
+    tmp_path: Path,
+) -> None:
+    first_boot = "12345678-1234-4abc-8def-1234567890ab"
+    second_boot = "87654321-4321-4abc-8def-ba0987654321"
+    first = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.host_change_requires_reboot(),
+        options=full_options(tmp_path),
+        prompts=FakePrompts(exact={"APPLY": True}),
+        boot_id_reader=lambda: first_boot,
+    ).run()
+    assert first.exit_code == 1
+
+    resumed_actions = FakeInstallerActions.host_change_requires_reboot()
+    returning_host_report(resumed_actions, host_verify_report(Status.CHANGE_REQUIRED))
+    result = installer_workflow(
+        tmp_path,
+        actions=resumed_actions,
+        options=full_options(tmp_path),
+        prompts=FakePrompts(),
+        boot_id_reader=lambda: second_boot,
+    ).run()
+
+    assert result.exit_code == 2
+    assert result.state is not None
+    assert result.state.current_stage is InstallStage.HOST_VERIFY
+    assert "resolve_release" not in resumed_actions.calls
+
+
+def test_compatible_patch_installer_resumes_old_host_verify_state(
+    tmp_path: Path,
+) -> None:
+    first_boot = "12345678-1234-4abc-8def-1234567890ab"
+    second_boot = "87654321-4321-4abc-8def-ba0987654321"
+    first = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.host_change_requires_reboot(),
+        options=full_options(tmp_path),
+        prompts=FakePrompts(exact={"APPLY": True}),
+        boot_id_reader=lambda: first_boot,
+        installer_version="0.2.0",
+        installer_source_revision="d" * 40,
+    ).run()
+    assert first.exit_code == 1
+
+    old_actions = FakeInstallerActions.host_change_requires_reboot()
+    old_actions.failures[InstallStage.HOST_VERIFY] = RuntimeError(
+        "old installer rejected unverified host"
+    )
+    old_result = installer_workflow(
+        tmp_path,
+        actions=old_actions,
+        options=full_options(tmp_path),
+        prompts=FakePrompts(),
+        boot_id_reader=lambda: second_boot,
+        installer_version="0.2.0",
+        installer_source_revision="d" * 40,
+    ).run()
+    assert old_result.exit_code == 2
+    assert old_result.state is not None
+    assert old_result.state.current_stage is InstallStage.HOST_VERIFY
+
+    incompatible_actions = FakeInstallerActions.host_change_requires_reboot()
+    incompatible = installer_workflow(
+        tmp_path,
+        actions=incompatible_actions,
+        options=full_options(tmp_path),
+        prompts=FakePrompts(),
+        boot_id_reader=lambda: second_boot,
+        installer_version="0.3.0",
+        installer_source_revision="a" * 40,
+    ).run()
+    assert incompatible.exit_code == 2
+    assert "inputs changed" in incompatible.message
+    assert incompatible_actions.calls == []
+
+    new_actions = FakeInstallerActions.host_change_requires_reboot()
+    returning_host_report(new_actions, host_verify_report(Status.UNVERIFIED))
+    prompts = FakePrompts()
+    resumed = installer_workflow(
+        tmp_path,
+        actions=new_actions,
+        options=full_options(tmp_path),
+        prompts=prompts,
+        boot_id_reader=lambda: second_boot,
+        installer_version="0.2.1",
+        installer_source_revision="e" * 40,
+    ).run()
+
+    assert resumed.exit_code == 0
+    assert resumed.state is not None
+    assert resumed.state.installer_version == "0.2.1"
+    assert resumed.state.installer_source_revision == "e" * 40
+    assert "host_apply" not in new_actions.calls
+    assert new_actions.calls[0] == "host_verify"
+    assert any(
+        prefix == "WARN" and "compatible installer update" in message
+        for prefix, message in prompts.statuses
+    )
 
 
 def test_release_must_support_applied_host_adapter(tmp_path: Path) -> None:

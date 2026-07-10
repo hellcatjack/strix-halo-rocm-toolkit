@@ -16,6 +16,10 @@ Python 安装器必须使用 3.12。ROCm 与 PyTorch 只存在于容器镜像中
 
 如果变更要求重启，安装器记录当前 boot ID 和 `REBOOT_PENDING` 后以状态 1 退出。它不会运行 `reboot`。手工重启后再次执行原命令；boot ID 未变化时不会重复 apply，变化后从 host verify 继续。
 
+Host verify 的 `pass` 正常继续。满足最低 OEM 版本，且 TTM、GPU 设备权限和内核日志检查通过，但内核 patch 尚未列入已测清单时，报告为 `unverified`；安装器输出 `WARN`、记录内核与诊断码并继续。后续 `IMAGE_VERIFY` 仍强制执行 exact stable 镜像的 `gfx1151` Torch runtime 探针。`change-required`、`reboot-required` 或 `blocked` 仍然阻断。该放宽只适用于普通部署，不改变 stable release 的完整硬件资格门禁。
+
+sudo host verify helper 要求显式的 `target_user`。root 只承担受限事实采集，设备组始终按目标用户的 passwd/group 数据计算，避免把 root 缺少 render 组错误报告为 `GPU.PERMISSION`。
+
 容器模式可直接指定：
 
 ```bash
@@ -71,6 +75,8 @@ Python 安装器必须使用 3.12。ROCm 与 PyTorch 只存在于容器镜像中
 ```
 
 每个成功阶段保存其规范 JSON 输入的 SHA-256。状态采用 `0600` 临时文件、文件 `fsync`、`os.replace` 和目录 `fsync`。并发安装由非阻塞锁拒绝。损坏状态会保留为 `install-state.corrupt.<UTC>.json`，不会猜测已完成动作。
+
+`v0.2.1` 使用状态 schema 2，并可迁移 schema 1。若 `v0.2.0` 状态已经到达 `HOST_VERIFY` 或更后阶段，同一 `0.2.x` 补丁更新可以在旧 `BOOTSTRAP` 摘要与所有非版本输入完全匹配时接管状态。迁移只更新安装器版本、源码 revision、source root 和对应引导摘要，不重放已完成的宿主动作。更换模式、项目、目标用户，或跨 minor 版本更新仍会阻断。
 
 | 退出码 | 含义 |
 | --- | --- |

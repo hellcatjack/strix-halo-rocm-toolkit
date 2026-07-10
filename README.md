@@ -2,9 +2,10 @@
 
 面向 **AMD Ryzen AI Max+ 395 / Radeon 8060S (`gfx1151`)** 的可恢复 ROCm 容器开发平台。它提供 Ubuntu 宿主机准备、公开且内容寻址的 ROCm/PyTorch 镜像、独立项目容器、受保护的 `pip` 工作流，以及可审计的 GPU 验证和精确修复。
 
-> - 当前公开候选版本：`v0.2.0-rc1`
+> - 当前工具包版本：`v0.2.1`
 > - 正式软件基线：ROCm 7.2.1、Python 3.12、PyTorch 2.9.1
 > - 正式宿主适配器：Ubuntu 24.04.x AMD64
+> - Stable 镜像 release ID：`0.2.0`（`v0.2.1` 不重建镜像）
 
 ## 目录
 
@@ -106,7 +107,7 @@ sudo apt install -y git python3.12
 在任何写入前先执行只读检查：
 
 ```bash
-git clone --branch v0.2.0-rc1 --depth 1 \
+git clone --branch v0.2.1 --depth 1 \
   https://github.com/hellcatjack/strix-halo-rocm-toolkit.git
 cd strix-halo-rocm-toolkit
 mkdir -p reports
@@ -126,7 +127,7 @@ mkdir -p reports
 ### 1. 获取固定版本
 
 ```bash
-git clone --branch v0.2.0-rc1 --depth 1 \
+git clone --branch v0.2.1 --depth 1 \
   https://github.com/hellcatjack/strix-halo-rocm-toolkit.git
 cd strix-halo-rocm-toolkit
 git rev-parse --verify HEAD
@@ -205,6 +206,12 @@ sudo reboot
 ```
 
 重启后进入同一个 checkout，再次执行原命令。安装器核对 boot ID 后从 host verify 阶段继续，不会重复已经完成的写入。
+
+若新启动的 OEM patch kernel 高于最低版本，且 TTM、设备权限和内核日志检查通过，但内核尚未进入静态已测清单，`v0.2.1` 会显示 `WARN HOST_VERIFY unverified` 并继续部署。状态文件记录 `host_verification_status`、`host_kernel` 和诊断码；真正的 `change-required` 或 `blocked` 仍会停止。
+
+后续 `IMAGE_VERIFY` 仍必须通过 exact stable 镜像的 `gfx1151` Torch runtime 探针。警告同时打印一条可选的完整硬件资格命令；将该内核用于新的正式 release 前，仍必须完成包含 300 秒压力测试和内核日志差分的全部门禁。
+
+特权 helper 只用于读取内核日志等受限事实，并必须携带安装状态中的 `target_user`；设备组按目标用户解析，不会再把 root 的组误判为项目用户权限。
 
 ### 仅容器平台模式
 
@@ -609,6 +616,16 @@ git switch --detach <新发布标签>
 
 安装器为每个版本创建独立运行时，再原子切换 `current`。不要从含有未提交修改的 checkout 执行正式本地构建。
 
+从 `v0.2.0-rc1` 停在 `HOST_VERIFY` 的安装可直接升级：
+
+```bash
+git fetch origin --tags
+git switch --detach v0.2.1
+./install.sh
+```
+
+再次选择相同模式和项目目录。`v0.2.1` 会验证旧 `BOOTSTRAP` 输入摘要、迁移 schema 1 状态并从 `HOST_VERIFY` 续跑；它不会重新执行 `HOST_APPLY`。只有同一 `0.2.x` 系列、宿主写入已经完成且其他引导输入完全一致时才允许该迁移。
+
 ### 查看共享层占用
 
 ```bash
@@ -663,7 +680,7 @@ rm -rf "$HOME/.local/state/strix-halo-rocm-toolkit"
 | Docker permission denied | 重新登录以刷新组成员关系，或运行 `sudo -v` 后让工具使用 `sudo docker` |
 | 找不到 `/dev/kfd` | 直接在宿主运行 `host-preflight`；不要用未映射设备的普通容器报告判断宿主 |
 | `HOST.UNSUPPORTED_OS` | 该发行版只支持只读采集，不能强制套用 Ubuntu 写入适配器 |
-| `HOST.UPSTREAM_UNVERIFIED` | 内核满足最低要求但尚未进入已测清单；保持 unverified，完成硬件门禁后再发布 |
+| `HOST.UPSTREAM_UNVERIFIED` | 新 OEM patch 尚未进入已测清单；`v0.2.1` 记录警告并继续，后续 GPU runtime 探针仍为强制项，正式发布前还需完整硬件门禁 |
 | `GPU.RUNTIME_FAILED` | 运行 `host-verify`、检查设备 GID 和 `sudo dmesg`；CPU fallback 不算通过 |
 | `IMAGE.DIGEST_DRIFT` | 运行项目级 `doctor`，确认计划后执行 `repair` |
 | `TORCH.SHADOWED` | overlay 中出现受保护包或身份变化；执行 `doctor`/`repair`，不要 force-reinstall |

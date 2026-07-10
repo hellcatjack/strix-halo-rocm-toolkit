@@ -23,7 +23,7 @@ from amd_ai.installer.state import (
 
 def install_state(tmp_path: Path, **changes: object) -> InstallState:
     values: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "installer_version": "0.2.0",
         "mode": InstallMode.CONTAINER,
         "target_user": "developer",
@@ -83,6 +83,27 @@ def test_state_round_trip_uses_atomic_replace(
     assert load_state(path) == expected
     assert calls[-1][1] == path
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_schema_one_state_migrates_with_empty_host_verification_fields(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "install-state.json"
+    save_state(path, install_state(tmp_path))
+    payload = json.loads(path.read_text(encoding="ascii"))
+    payload["schema_version"] = 1
+    payload.pop("host_verification_status", None)
+    payload.pop("host_kernel", None)
+    payload.pop("host_verification_findings", None)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = load_state(path)
+
+    assert migrated is not None
+    assert migrated.schema_version == 2
+    assert migrated.host_verification_status is None
+    assert migrated.host_kernel is None
+    assert migrated.host_verification_findings == ()
 
 
 def test_corrupt_state_is_preserved_before_replanning(tmp_path: Path) -> None:
