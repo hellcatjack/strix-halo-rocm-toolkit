@@ -42,6 +42,8 @@ STATE_KEYS = frozenset(
         "installer_source_revision",
         "source_root",
         "host_plan_digest",
+        "host_adapter_id",
+        "docker_group_accepted",
         "last_report_paths",
     }
 )
@@ -257,6 +259,8 @@ def _state_payload(state: InstallState) -> dict[str, object]:
         "installer_source_revision": state.installer_source_revision,
         "source_root": state.source_root,
         "host_plan_digest": state.host_plan_digest,
+        "host_adapter_id": state.host_adapter_id,
+        "docker_group_accepted": state.docker_group_accepted,
         "last_report_paths": list(state.last_report_paths),
     }
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
+from amd_ai.host.models import HostSnapshot, PlannedAction, PreparePlan
+from amd_ai.installer.actions import HostPlanResult, prepare_plan_payload
 from amd_ai.installer.models import (
     DiskSpaceEstimate,
     InstallOptions,
@@ -12,6 +14,8 @@ from amd_ai.installer.models import (
     StableRelease,
 )
 from amd_ai.installer.release import load_stable_release
+from amd_ai.installer.state import stage_input_digest
+from tests.unit.host.fakes import healthy_snapshot
 
 
 class FakeReleaseDocker:
@@ -100,6 +104,9 @@ class FakeInstallerActions:
             payload_bytes=1024**3,
             available_bytes=100 * 1024**3,
         )
+        self.snapshot = healthy_snapshot()
+        self.host_apply_include_docker_group: bool | None = None
+        self.host_plan_result = self._make_host_plan(reboot_required=True)
 
     @classmethod
     def healthy(cls) -> FakeInstallerActions:
@@ -110,6 +117,10 @@ class FakeInstallerActions:
         fake = cls.healthy()
         fake.stop_stage = stage
         return fake
+
+    @classmethod
+    def host_change_requires_reboot(cls) -> FakeInstallerActions:
+        return cls.healthy()
 
     def stage_inputs(
         self,
@@ -128,6 +139,30 @@ class FakeInstallerActions:
         return self._record(
             InstallStage.CONTAINER_HOST_CHECK, "container_host_check"
         )
+
+    def host_preflight(self, **kwargs: object) -> StageResult:
+        del kwargs
+        return self._record(InstallStage.HOST_PREFLIGHT, "host_preflight")
+
+    def host_plan(self, **kwargs: object) -> HostPlanResult:
+        del kwargs
+        self._raise_if_needed(InstallStage.HOST_PLAN)
+        self.calls.append("host_plan")
+        return self.host_plan_result
+
+    def host_apply(
+        self,
+        host_plan: HostPlanResult,
+        *,
+        include_docker_group: bool,
+    ) -> StageResult:
+        assert host_plan.plan_digest == self.host_plan_result.plan_digest
+        self.host_apply_include_docker_group = include_docker_group
+        return self._record(InstallStage.HOST_APPLY, "host_apply")
+
+    def host_verify(self, **kwargs: object) -> StageResult:
+        del kwargs
+        return self._record(InstallStage.HOST_VERIFY, "host_verify")
 
     def resolve_release(self, manifest_path: Path) -> StableRelease:
         del manifest_path
@@ -186,3 +221,53 @@ class FakeInstallerActions:
         error = self.failures.get(stage)
         if error is not None:
             raise error
+
+    def _make_host_plan(self, *, reboot_required: bool) -> HostPlanResult:
+        plan = PreparePlan(
+            supported=True,
+            target_user="developer",
+            actions=(
+                PlannedAction(
+                    code="HOST.CHANGE",
+                    summary="Apply reviewed host change",
+                    argv=("true",),
+                    privileged=True,
+                ),
+            ),
+            reboot_required=reboot_required,
+        )
+        return HostPlanResult(
+            snapshot=self.snapshot,
+            plan=plan,
+            plan_digest=stage_input_digest(prepare_plan_payload(plan)),
+            adapter_id="ubuntu-24.04",
+        )
+
+
+class FakePrompts:
+    def __init__(
+        self,
+        *,
+        exact: Mapping[str, bool] | None = None,
+        yes_no: Mapping[str, bool] | None = None,
+        image_fallback: str | None = None,
+    ) -> None:
+        self.exact = dict(exact or {})
+        self.yes_no = dict(yes_no or {})
+        self.image_fallback = image_fallback
+        self.statuses: list[tuple[str, str]] = []
+
+    def confirm_exact(self, word: str) -> bool:
+        return self.exact.get(word, False)
+
+    def confirm_yes_no(self, question: str) -> bool:
+        return self.yes_no.get(question, False)
+
+    def choose_image_fallback(self) -> str | None:
+        return self.image_fallback
+
+    def ask_project_dir(self) -> Path:
+        raise AssertionError("project directory should be explicit in tests")
+
+    def status(self, prefix: str, message: str) -> None:
+        self.statuses.append((prefix, message))

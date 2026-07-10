@@ -7,9 +7,12 @@ import re
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
-from amd_ai.installer.actions import LocalBuildResult
+from amd_ai.installer.actions import (
+    HostPlanResult,
+    LocalBuildResult,
+)
 from amd_ai.installer.models import (
     CONTAINER_STAGE_ORDER,
     FULL_STAGE_ORDER,
@@ -38,7 +41,10 @@ from amd_ai.installer.state import (
     save_state,
     stage_input_digest,
     validate_completed_stage,
+    boot_id_changed,
+    read_boot_id,
 )
+from amd_ai.report import Report, Status
 
 
 GIB = 1024**3
@@ -60,6 +66,13 @@ class WorkflowResult:
     message: str = ""
 
 
+@dataclass(frozen=True)
+class HostConfirmation:
+    accepted: bool
+    docker_group_accepted: bool
+    message: str = ""
+
+
 class InstallerWorkflow:
     def __init__(
         self,
@@ -69,6 +82,7 @@ class InstallerWorkflow:
         installer_version: str,
         installer_source_revision: str,
         prompts: object | None = None,
+        boot_id_reader: Callable[[], str] = read_boot_id,
     ) -> None:
         self.options = options
         self.actions = actions
@@ -80,6 +94,8 @@ class InstallerWorkflow:
             else TerminalPrompts()
         )
         self._release: StableRelease | None = None
+        self._host_plan: HostPlanResult | None = None
+        self._boot_id_reader = boot_id_reader
 
     def run(self) -> WorkflowResult:
         state: InstallState | None = None
@@ -150,6 +166,8 @@ class InstallerWorkflow:
             installer_source_revision=self.installer_source_revision,
             source_root=str(self.options.source_root),
             host_plan_digest=None,
+            host_adapter_id=None,
+            docker_group_accepted=False,
             last_report_paths=(),
         )
 
@@ -184,6 +202,17 @@ class InstallerWorkflow:
                     2,
                     state,
                     outcome.message or f"{stage.value} is blocked",
+                )
+            if (
+                stage is InstallStage.REBOOT_PENDING
+                and outcome.action_required
+            ):
+                state = self._record_reports(state, outcome)
+                save_state(self.options.state_path, state)
+                return WorkflowResult(
+                    1,
+                    state,
+                    outcome.message or "manual reboot is required",
                 )
             state = self._apply_output(state, stage, output, outcome)
             state = self._checkpoint(
@@ -225,6 +254,38 @@ class InstallerWorkflow:
             )
         if stage is InstallStage.CONTAINER_HOST_CHECK:
             return self.actions.container_host_check()
+        if stage is InstallStage.HOST_PREFLIGHT:
+            return self.actions.host_preflight(target_user=state.target_user)
+        if stage is InstallStage.HOST_PLAN:
+            if state.target_user is None:
+                raise WorkflowError("host target user is unavailable")
+            self._host_plan = self.actions.host_plan(
+                target_user=state.target_user
+            )
+            return self._host_plan
+        if stage is InstallStage.HOST_CONFIRM:
+            return self._confirm_host_plan(state)
+        if stage is InstallStage.HOST_APPLY:
+            return self.actions.host_apply(
+                self._resolved_host_plan(state),
+                include_docker_group=state.docker_group_accepted,
+            )
+        if stage is InstallStage.REBOOT_PENDING:
+            if state.reboot_boot_id is None:
+                return StageResult()
+            current = self._boot_id_reader()
+            if not boot_id_changed(
+                state.reboot_boot_id, current_boot_id=current
+            ):
+                return StageResult(
+                    action_required=True,
+                    message=(
+                        "manual reboot is required; rerun the installer after reboot"
+                    ),
+                )
+            return StageResult()
+        if stage is InstallStage.HOST_VERIFY:
+            return self.actions.host_verify()
         if stage is InstallStage.RELEASE_RESOLVE:
             self._release = self.actions.resolve_release(
                 self.options.manifest_path
@@ -283,16 +344,47 @@ class InstallerWorkflow:
         elif stage in {
             InstallStage.HOST_PREFLIGHT,
             InstallStage.HOST_PLAN,
-            InstallStage.HOST_CONFIRM,
-            InstallStage.HOST_APPLY,
-            InstallStage.REBOOT_PENDING,
-            InstallStage.HOST_VERIFY,
             InstallStage.CONTAINER_HOST_CHECK,
         }:
             values.update(
                 {
                     "target_user": state.target_user,
+                }
+            )
+        elif stage is InstallStage.HOST_CONFIRM:
+            values.update(
+                {
                     "host_plan_digest": state.host_plan_digest,
+                    "non_interactive": self.options.non_interactive,
+                    "accepted_host_plan_digest": (
+                        self.options.accepted_host_plan_digest
+                        if self.options.non_interactive
+                        else None
+                    ),
+                    "accept_docker_group": (
+                        self.options.accept_docker_group
+                        if self.options.non_interactive
+                        else None
+                    ),
+                }
+            )
+        elif stage is InstallStage.HOST_APPLY:
+            values.update(
+                {
+                    "host_plan_digest": state.host_plan_digest,
+                    "host_adapter_id": state.host_adapter_id,
+                    "docker_group_accepted": state.docker_group_accepted,
+                }
+            )
+        elif stage in {
+            InstallStage.REBOOT_PENDING,
+            InstallStage.HOST_VERIFY,
+        }:
+            values.update(
+                {
+                    "host_plan_digest": state.host_plan_digest,
+                    "host_adapter_id": state.host_adapter_id,
+                    "reboot_boot_id": state.reboot_boot_id,
                 }
             )
         elif stage is InstallStage.RELEASE_RESOLVE:
@@ -353,6 +445,27 @@ class InstallerWorkflow:
     ) -> StageResult:
         if isinstance(output, StageResult):
             return output
+        if isinstance(output, HostConfirmation):
+            return StageResult(
+                blocked=not output.accepted,
+                message=output.message,
+            )
+        if isinstance(output, Report):
+            if stage is InstallStage.HOST_PREFLIGHT:
+                blocked = output.status is Status.BLOCKED
+            elif stage is InstallStage.HOST_VERIFY:
+                blocked = output.status is not Status.PASS
+            else:
+                blocked = False
+            return StageResult(
+                facts={"report": output.to_dict()},
+                blocked=blocked,
+                message=(
+                    f"{output.command} returned {output.status.value}"
+                    if blocked
+                    else ""
+                ),
+            )
         hook = getattr(self.actions, "stage_result", None)
         if hook is None:
             return StageResult()
@@ -369,9 +482,37 @@ class InstallerWorkflow:
         outcome: StageResult,
     ) -> InstallState:
         changes: dict[str, object] = {}
-        if stage is InstallStage.RELEASE_RESOLVE:
+        if stage is InstallStage.HOST_PLAN:
+            if not isinstance(output, HostPlanResult):
+                raise WorkflowError("host plan action returned an invalid value")
+            changes.update(
+                {
+                    "host_plan_digest": output.plan_digest,
+                    "host_adapter_id": output.adapter_id,
+                }
+            )
+        elif stage is InstallStage.HOST_CONFIRM:
+            if not isinstance(output, HostConfirmation):
+                raise WorkflowError("host confirmation returned an invalid value")
+            changes["docker_group_accepted"] = (
+                output.docker_group_accepted
+            )
+        elif stage is InstallStage.HOST_APPLY:
+            plan = self._resolved_host_plan(state).plan
+            changes["reboot_boot_id"] = (
+                self._boot_id_reader() if plan.reboot_required else None
+            )
+        elif stage is InstallStage.RELEASE_RESOLVE:
             if not isinstance(output, StableRelease):
                 raise WorkflowError("release action returned an invalid value")
+            if (
+                self.options.mode is InstallMode.FULL
+                and state.host_adapter_id
+                not in output.supported_host_adapter_ids
+            ):
+                raise WorkflowError(
+                    "stable release does not support the applied host adapter"
+                )
             changes.update(
                 {
                     "release_id": output.release_id,
@@ -495,6 +636,51 @@ class InstallerWorkflow:
         ):
             raise WorkflowError("persisted release identity does not match manifest")
         return self._release
+
+    def _resolved_host_plan(self, state: InstallState) -> HostPlanResult:
+        if state.target_user is None or state.host_plan_digest is None:
+            raise WorkflowError("persisted host plan identity is unavailable")
+        if self._host_plan is None:
+            self._host_plan = self.actions.host_plan(
+                target_user=state.target_user
+            )
+        if (
+            self._host_plan.plan_digest != state.host_plan_digest
+            or self._host_plan.adapter_id != state.host_adapter_id
+        ):
+            raise WorkflowError(
+                "host plan digest changed after authorization; replan is required"
+            )
+        return self._host_plan
+
+    def _confirm_host_plan(self, state: InstallState) -> HostConfirmation:
+        host_plan = self._resolved_host_plan(state)
+        for action in host_plan.plan.actions:
+            self._status("ACTION", f"{action.code}: {action.summary}")
+        if self.options.non_interactive:
+            if (
+                self.options.accepted_host_plan_digest
+                != host_plan.plan_digest
+            ):
+                return HostConfirmation(
+                    False,
+                    False,
+                    "accepted host plan digest does not match the current plan",
+                )
+            return HostConfirmation(
+                True,
+                self.options.accept_docker_group,
+            )
+        if not self.prompts.confirm_exact("APPLY"):
+            return HostConfirmation(
+                False,
+                False,
+                "host plan confirmation refused; exact APPLY is required",
+            )
+        docker_group = False
+        if host_plan.plan.target_user != "root":
+            docker_group = self.prompts.confirm_yes_no("docker-group")
+        return HostConfirmation(True, docker_group)
 
     def _stage_order(self) -> tuple[InstallStage, ...]:
         if self.options.mode is InstallMode.FULL:

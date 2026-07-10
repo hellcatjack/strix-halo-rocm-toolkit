@@ -190,6 +190,8 @@ class InstallState:
     installer_source_revision: str
     source_root: str
     host_plan_digest: str | None = None
+    host_adapter_id: str | None = None
+    docker_group_accepted: bool = False
     last_report_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -222,6 +224,16 @@ class InstallState:
             "torch_manifest_digest", self.torch_manifest_digest, prefixed=True
         )
         _require_optional_sha256("host_plan_digest", self.host_plan_digest)
+        if self.host_adapter_id is not None and (
+            not isinstance(self.host_adapter_id, str)
+            or not self.host_adapter_id
+            or "\0" in self.host_adapter_id
+        ):
+            raise InstallerModelError("install state host adapter ID is invalid")
+        if type(self.docker_group_accepted) is not bool:
+            raise InstallerModelError(
+                "install state Docker group acceptance is invalid"
+            )
 
         source_root = _absolute_path(Path(self.source_root))
         if str(source_root) != self.source_root:
