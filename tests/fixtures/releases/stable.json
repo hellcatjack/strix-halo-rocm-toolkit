@@ -1,0 +1,38 @@
+{
+  "base": {
+    "artifact_digests": {
+      "rocm_keyring": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "rocm_packages_lock": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "config_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "image": "ghcr.io/hellcatjack/strix-halo-rocm-python",
+    "manifest_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "gpu_arch": "gfx1151",
+  "published_at": "2026-07-10T12:00:00Z",
+  "python_version": "3.12",
+  "qualification_profile_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "qualification_report_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "release_id": "0.2.0",
+  "rocm_version": "7.2.1",
+  "sbom_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "schema_version": 1,
+  "source_repository": "https://github.com/hellcatjack/strix-halo-rocm-toolkit",
+  "source_revision": "2222222222222222222222222222222222222222",
+  "supported_host_adapter_ids": [
+    "ubuntu-24.04"
+  ],
+  "torch": {
+    "artifact_digests": {
+      "profile": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "requirements_lock": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "torch_manifest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    "config_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+    "image": "ghcr.io/hellcatjack/strix-halo-rocm-pytorch",
+    "manifest_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+  },
+  "torch_profile_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  "torch_profile_id": "rocm-7.2.1-py3.12-torch-2.9.1",
+  "torch_version": "2.9.1"
+}
