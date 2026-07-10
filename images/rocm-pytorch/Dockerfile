@@ -11,8 +11,6 @@ ARG TORCH_VERSION
 ARG TORCHVISION_VERSION
 ARG TORCHAUDIO_VERSION
 ARG TRITON_VERSION
-ARG VCS_REVISION=unknown
-ARG IMAGE_SOURCE=unknown
 
 COPY --from=profile-context /profile.env /opt/amd-ai/profile.env
 COPY --from=profile-context /requirements.lock /opt/amd-ai/profile.requirements.lock
@@ -36,6 +34,9 @@ RUN --mount=from=wheels,target=/wheels,ro \
       /opt/amd-ai/torch-manifest.json; \
     /usr/local/bin/container-check --mode torch --metadata-only --json -; \
     find /opt/venv -xdev -type d -exec chmod go-w '{}' +
+
+ARG VCS_REVISION=unknown
+ARG IMAGE_SOURCE=unknown
 
 LABEL org.amd-ai.profile.id="${PROFILE_ID}" \
       org.amd-ai.profile.status="${PROFILE_STATUS}" \

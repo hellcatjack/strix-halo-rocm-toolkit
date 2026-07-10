@@ -7,6 +7,7 @@ def test_rocm_python_is_clean_development_image():
 
     assert text.startswith("# syntax=docker/dockerfile:1.7")
     assert "ARG UBUNTU_BASE" in text
+    assert "ARG IMAGE_SOURCE=unknown" in text
     assert "FROM ${UBUNTU_BASE}" in text
     assert "rocm-hip-sdk" in text
     assert "rocm-ml-sdk" in text
@@ -18,6 +19,13 @@ def test_rocm_python_is_clean_development_image():
     assert "--mount=type=cache,target=/var/lib/apt/lists,sharing=locked" in text
     assert "FROM rocm/pytorch" not in text
     assert "torch" not in lowered
+    assert 'org.opencontainers.image.source="${IMAGE_SOURCE}"' in text
+    assert text.index("ARG VCS_REVISION=unknown") > text.index(
+        "python3 -m venv /opt/venv"
+    )
+    assert text.index("ARG IMAGE_SOURCE=unknown") > text.index(
+        "python3 -m venv /opt/venv"
+    )
 
 
 def test_rocm_python_has_one_venv_non_root_user_and_no_forced_caches():

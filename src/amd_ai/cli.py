@@ -16,6 +16,13 @@ from amd_ai.host.policy import evaluate_preflight
 from amd_ai.host.prepare import UnsupportedHostError, create_prepare_plan
 from amd_ai.host.probe import FixtureRunner, HostProbe, load_fixture_device_gids
 from amd_ai.host.verify import verify_host
+from amd_ai.image.build import (
+    BuildError,
+    build_rocm_python,
+    build_rocm_pytorch,
+    prune_images,
+    run_image_check,
+)
 from amd_ai.report import Report, Status
 from amd_ai.runner import Runner, SubprocessRunner
 
@@ -61,6 +68,31 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=argparse.SUPPRESS,
     )
+    image_build = subparsers.add_parser("image-build")
+    image_modes = image_build.add_subparsers(dest="image_mode", required=True)
+    image_modes.add_parser("rocm-python")
+    pytorch = image_modes.add_parser("rocm-pytorch")
+    pytorch.add_argument(
+        "--profile",
+        type=Path,
+        default=Path("profiles/torch/stable.env"),
+    )
+    pytorch.add_argument("--allow-experimental", action="store_true")
+    prune = image_modes.add_parser("prune")
+    prune.add_argument("--apply", action="store_true")
+    prune.add_argument("--older-than-hours", type=_positive_int, default=168)
+    prune.add_argument("--project-root", type=Path, action="append")
+
+    container_check = subparsers.add_parser("container-check")
+    container_check.add_argument(
+        "--image",
+        default="rocm-pytorch:7.2.1-py3.12-torch2.9.1",
+    )
+    container_check.add_argument("--mode", choices=("rocm", "torch"), default="torch")
+    check_kind = container_check.add_mutually_exclusive_group()
+    check_kind.add_argument("--metadata-only", action="store_true")
+    check_kind.add_argument("--runtime", action="store_true")
+    container_check.add_argument("--json", dest="json_path")
     return parser
 
 
@@ -72,7 +104,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _host_prepare(args)
     if args.command == "host-verify":
         return _host_verify(args.fixture_root, args.probe_image, args.json_path)
+    if args.command == "image-build":
+        try:
+            return _image_build(args)
+        except BuildError as error:
+            print(f"image-build: {error}", file=sys.stderr)
+            return 2
+    if args.command == "container-check":
+        try:
+            return run_image_check(
+                image=args.image,
+                mode=args.mode,
+                metadata_only=args.metadata_only,
+                runtime=args.runtime,
+                json_path=args.json_path,
+            )
+        except BuildError as error:
+            print(f"container-check: {error}", file=sys.stderr)
+            return 2
     raise AssertionError(f"unhandled command: {args.command}")
+
+
+def _image_build(args: argparse.Namespace) -> int:
+    if args.image_mode == "rocm-python":
+        tag, image_id = build_rocm_python()
+        print(f"built {tag} {image_id}")
+        return 0
+    if args.image_mode == "rocm-pytorch":
+        tag, image_id = build_rocm_pytorch(
+            profile_path=args.profile,
+            allow_experimental=args.allow_experimental,
+        )
+        print(f"built {tag} {image_id}")
+        return 0
+    if args.image_mode == "prune":
+        prune_images(
+            apply=args.apply,
+            older_than_hours=args.older_than_hours,
+            project_roots=args.project_root,
+        )
+        return 0
+    raise AssertionError(f"unhandled image mode: {args.image_mode}")
 
 
 def _host_preflight(fixture_root: Path | None, json_path: Path | None) -> int:

@@ -5,9 +5,6 @@ ARG UV_IMAGE
 FROM ${UV_IMAGE} AS uv
 FROM ${UBUNTU_BASE}
 
-ARG ROCM_VERSION=7.2.1
-ARG VCS_REVISION=unknown
-
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 COPY --from=uv /uv /uvx /usr/local/bin/
@@ -74,9 +71,14 @@ ENV PATH="/opt/venv/bin:/opt/rocm/bin:${PATH}" \
     PYTHONUNBUFFERED="1" \
     PYTHONDONTWRITEBYTECODE="1"
 
+ARG ROCM_VERSION=7.2.1
+ARG VCS_REVISION=unknown
+ARG IMAGE_SOURCE=unknown
+
 LABEL org.amd-ai.rocm.version="${ROCM_VERSION}" \
       org.amd-ai.python.version="3.12" \
-      org.opencontainers.image.revision="${VCS_REVISION}"
+      org.opencontainers.image.revision="${VCS_REVISION}" \
+      org.opencontainers.image.source="${IMAGE_SOURCE}"
 
 USER developer
 WORKDIR /workspace

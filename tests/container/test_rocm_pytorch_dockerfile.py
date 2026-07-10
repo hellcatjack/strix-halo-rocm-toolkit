@@ -25,3 +25,5 @@ def test_torch_image_labels_are_profile_driven_and_no_wheel_is_copied():
         line for line in text.splitlines() if ".whl" in line
     )
     assert "TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL" not in text
+    assert text.index("ARG VCS_REVISION=unknown") > text.index("uv pip install")
+    assert text.index("ARG IMAGE_SOURCE=unknown") > text.index("uv pip install")
