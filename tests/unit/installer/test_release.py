@@ -8,6 +8,7 @@ import pytest
 from amd_ai.installer.release import (
     ReleaseError,
     load_stable_release,
+    pull_and_verify_release,
     verify_release_image,
 )
 from tests.unit.installer.fakes import FakeReleaseDocker
@@ -159,3 +160,24 @@ def test_verify_release_image_rejects_identity_damage(
         verify_release_image(
             release, release.torch, kind=kind, docker=docker
         )
+
+
+def test_pull_release_uses_only_manifest_digest_references(release) -> None:
+    docker = FakeReleaseDocker.for_release(release)
+
+    result = pull_and_verify_release(release, docker=docker)
+
+    assert docker.pull_calls == [release.base.reference, release.torch.reference]
+    assert result.base.config_digest == release.base.config_digest
+    assert result.torch.config_digest == release.torch.config_digest
+
+
+def test_pull_failure_does_not_fall_back_to_mutable_tag(release) -> None:
+    docker = FakeReleaseDocker.for_release(release)
+    docker.pull_error = ReleaseError("network stopped")
+
+    with pytest.raises(ReleaseError, match="network stopped"):
+        pull_and_verify_release(release, docker=docker)
+
+    assert all("@sha256:" in value for value in docker.pull_calls)
+    assert docker.inspect_calls == []

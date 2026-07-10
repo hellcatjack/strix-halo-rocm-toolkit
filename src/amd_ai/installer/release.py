@@ -102,6 +102,12 @@ class VerifiedImageIdentity:
         )
 
 
+@dataclass(frozen=True)
+class VerifiedReleaseImages:
+    base: VerifiedImageIdentity
+    torch: VerifiedImageIdentity
+
+
 def load_stable_release(path: Path) -> StableRelease:
     try:
         text = path.read_text(encoding="utf-8")
@@ -212,6 +218,8 @@ def verify_release_image(
     kind: Literal["base", "torch"],
     docker: ReleaseDocker,
 ) -> VerifiedImageIdentity:
+    if kind not in {"base", "torch"}:
+        raise ReleaseError(f"unsupported release image kind: {kind}")
     expected_image = release.base if kind == "base" else release.torch
     if image != expected_image:
         raise ReleaseError(
@@ -292,6 +300,30 @@ def verify_release_image(
         repo_digests=tuple(raw_repo_digests),
         labels=labels,
     )
+
+
+def pull_and_verify_release(
+    release: StableRelease, *, docker: ReleaseDocker
+) -> VerifiedReleaseImages:
+    identities: list[VerifiedImageIdentity] = []
+    for kind, image in (("base", release.base), ("torch", release.torch)):
+        try:
+            docker.pull(image.reference)
+        except ReleaseError:
+            raise
+        except Exception as error:
+            raise ReleaseError(
+                f"cannot pull exact {kind} release image {image.reference}: {error}"
+            ) from error
+        identities.append(
+            verify_release_image(
+                release,
+                image,
+                kind=kind,
+                docker=docker,
+            )
+        )
+    return VerifiedReleaseImages(base=identities[0], torch=identities[1])
 
 
 def _parse_image(
