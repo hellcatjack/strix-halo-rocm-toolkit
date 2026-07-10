@@ -56,6 +56,32 @@ class OverlayProject:
         assert result.returncode == 0, result.stderr or result.stdout
         return result.stdout.strip()
 
+    def repair_overlay(self, reason_code: str) -> subprocess.CompletedProcess[str]:
+        argv = list(
+            self._docker_argv(
+                (
+                    "/opt/venv/bin/python",
+                    "-m",
+                    "amd_ai.overlay.repair_command",
+                    reason_code,
+                )
+            )
+        )
+        image_index = argv.index(self.config.image)
+        argv[image_index:image_index] = [
+            "--network",
+            "none",
+            "--env",
+            "PYTHONPATH=/opt/amd-ai/src",
+        ]
+        return subprocess.run(
+            argv,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
     def current_target(self) -> str:
         return os.readlink(self.path / ".amd-ai/current")
 
@@ -68,6 +94,9 @@ class OverlayProject:
             *self.docker_prefix,
             "run",
             "--rm",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,size=1g,mode=1777",
             "--user",
             f"{os.getuid()}:{os.getgid()}",
             "--workdir",
