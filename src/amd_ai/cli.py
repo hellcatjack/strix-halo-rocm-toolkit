@@ -17,6 +17,13 @@ from pathlib import Path
 from amd_ai import __version__
 from amd_ai.doctor.checks import run_doctor
 from amd_ai.doctor.models import DiagnosticDisposition, DoctorModelError
+from amd_ai.doctor.repair import (
+    RepairExecutionError,
+    RepairPlanningError,
+    SystemRepairExecutor,
+    execute_repair,
+    plan_repair,
+)
 from amd_ai.host.apply import ApplyError, ApplyRefused, execute_plan
 from amd_ai.host.models import HostSnapshot, PlannedAction, PreparePlan
 from amd_ai.host.policy import evaluate_preflight
@@ -227,6 +234,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("profiles/releases/stable.json"),
     )
     doctor.add_argument("--json", dest="json_path", type=Path)
+
+    repair = subparsers.add_parser("repair")
+    repair.add_argument("project", type=Path)
+    repair.add_argument(
+        "--manifest",
+        type=Path,
+        default=Path("profiles/releases/stable.json"),
+    )
+    repair.add_argument("--yes", action="store_true")
+    repair.add_argument("--json", dest="json_path", type=Path)
     return parser
 
 
@@ -316,6 +333,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         if report.status in {"pass", "warning"}:
             return 0
         return 1 if report.status == "repairable" else 2
+    if args.command == "repair":
+        try:
+            return _repair_command(args)
+        except (
+            BuildError,
+            ConfigError,
+            DoctorModelError,
+            OSError,
+            PublishError,
+            ReleaseError,
+            RepairExecutionError,
+            RepairPlanningError,
+            RuntimePolicyError,
+            TransactionError,
+        ) as error:
+            print(f"repair: {error}", file=sys.stderr)
+            return 2
     if args.command == "release":
         try:
             if args.release_mode == "verify":
@@ -338,6 +372,58 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 2
     raise AssertionError(f"unhandled command: {args.command}")
+
+
+def _repair_command(args: argparse.Namespace) -> int:
+    report = run_doctor(args.project, args.manifest)
+    if args.json_path is not None:
+        pre_path, _ = _repair_report_paths(args.json_path)
+        _write_doctor_json(pre_path, report.to_dict())
+    plan = plan_repair(report)
+    for action in plan.actions:
+        print(
+            f"{action.kind}: {action.exact_target} "
+            f"[{action.reason_code}]"
+        )
+    if plan.blocked or not plan.actions:
+        reasons = ", ".join(plan.blocked_reasons) or "no repairable actions"
+        print(f"repair blocked: {reasons}", file=sys.stderr)
+        return 2
+    if not args.yes:
+        try:
+            confirmation = input("Type REPAIR to execute these exact actions: ")
+        except EOFError:
+            confirmation = ""
+        if confirmation != "REPAIR":
+            print("repair cancelled", file=sys.stderr)
+            return 2
+    executor = SystemRepairExecutor(manifest_path=args.manifest)
+    post_report = execute_repair(plan, executor=executor)
+    if args.json_path is not None:
+        _, post_path = _repair_report_paths(args.json_path)
+        _write_doctor_json(post_path, post_report.to_dict())
+    return 0
+
+
+def _repair_report_paths(path: Path) -> tuple[Path, Path]:
+    suffix = path.suffix or ".json"
+    stem = path.name[: -len(path.suffix)] if path.suffix else path.name
+    return (
+        path.with_name(f"{stem}.pre{suffix}"),
+        path.with_name(f"{stem}.post{suffix}"),
+    )
+
+
+def _write_doctor_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        raise RepairExecutionError(
+            f"repair report path already exists: {path}"
+        )
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _image_build(args: argparse.Namespace) -> int:
