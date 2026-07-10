@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import pwd
 import re
+import shutil
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -25,6 +27,7 @@ from amd_ai.image.build import (
 )
 from amd_ai.image.publish import DockerPublishRegistry
 from amd_ai.installer.models import StageResult, StableRelease
+from amd_ai.installer.models import DiskSpaceEstimate
 from amd_ai.installer.release import (
     ReleaseDocker,
     VerifiedReleaseImages,
@@ -40,6 +43,9 @@ from amd_ai.runner import Runner, SubprocessRunner
 
 
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
+DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+ARTIFACT_NAME_PATTERN = re.compile(r"[0-9a-f]{64}")
+LOCAL_BUILD_ESTIMATE_BYTES = 32 * 1024**3
 REQUIRED_LOCAL_BUILD_PATHS = (
     "images/common/container-check",
     "images/common/torch-manifest.py",
@@ -274,6 +280,53 @@ class ProductionInstallerActions:
             ),
         )
 
+    def image_disk_estimate(
+        self, *, release: StableRelease, image_source: str
+    ) -> DiskSpaceEstimate:
+        location, available = _docker_root_and_available(
+            self.runner, self.docker_prefix
+        )
+        if image_source == "pull":
+            payload = _missing_release_layer_bytes(
+                release, self.runner, self.docker_prefix
+            )
+        elif image_source == "build":
+            payload = LOCAL_BUILD_ESTIMATE_BYTES
+        else:
+            raise ActionError("image source must be pull or build")
+        return DiskSpaceEstimate(
+            location=location,
+            payload_bytes=payload,
+            available_bytes=available,
+        )
+
+    def project_disk_estimate(
+        self, *, project_dir: Path
+    ) -> DiskSpaceEstimate:
+        project = Path(project_dir).expanduser().resolve(strict=False)
+        artifacts = project / ".amd-ai/artifacts/sha256"
+        payload = 0
+        if artifacts.is_dir() and not artifacts.is_symlink():
+            for artifact in artifacts.iterdir():
+                if (
+                    ARTIFACT_NAME_PATTERN.fullmatch(artifact.name) is not None
+                    and artifact.is_file()
+                    and not artifact.is_symlink()
+                ):
+                    payload += artifact.stat().st_size
+        probe = _nearest_existing_path(project)
+        try:
+            available = shutil.disk_usage(probe).free
+        except OSError as error:
+            raise ActionError(
+                f"cannot inspect project filesystem space at {probe}: {error}"
+            ) from error
+        return DiskSpaceEstimate(
+            location=project,
+            payload_bytes=payload,
+            available_bytes=available,
+        )
+
     def initialize_project(
         self,
         *,
@@ -425,3 +478,123 @@ def _target_user_group_ids(target_user: str) -> tuple[int, ...]:
         raise ActionError(
             f"cannot resolve groups for target user {target_user!r}"
         ) from error
+
+
+def _docker_root_and_available(
+    runner: Runner, docker_prefix: Sequence[str]
+) -> tuple[Path, int]:
+    try:
+        result = runner.run(
+            [
+                *docker_prefix,
+                "info",
+                "--format",
+                "{{.DockerRootDir}}",
+            ],
+            check=False,
+        )
+    except OSError as error:
+        raise ActionError(f"cannot inspect Docker data root: {error}") from error
+    raw = result.stdout.strip()
+    if (
+        result.returncode != 0
+        or not raw
+        or "\0" in raw
+        or not Path(raw).is_absolute()
+    ):
+        evidence = result.stderr.strip() or raw or "no output"
+        raise ActionError(f"cannot inspect Docker data root: {evidence}")
+    root = Path(raw).resolve(strict=False)
+    probe = _nearest_existing_path(root)
+    try:
+        available = shutil.disk_usage(probe).free
+    except OSError as error:
+        raise ActionError(
+            f"cannot inspect Docker filesystem space at {probe}: {error}"
+        ) from error
+    return root, available
+
+
+def _missing_release_layer_bytes(
+    release: StableRelease,
+    runner: Runner,
+    docker_prefix: Sequence[str],
+) -> int:
+    layers: dict[str, int] = {}
+    for image in (release.base, release.torch):
+        local = runner.run(
+            [
+                *docker_prefix,
+                "image",
+                "inspect",
+                "--format",
+                "{{.Id}}",
+                image.reference,
+            ],
+            check=False,
+        )
+        if local.returncode == 0 and local.stdout.strip() == image.config_digest:
+            continue
+        manifest = runner.run(
+            [*docker_prefix, "manifest", "inspect", "--verbose", image.reference],
+            check=False,
+        )
+        if manifest.returncode != 0:
+            evidence = (
+                manifest.stderr.strip()
+                or manifest.stdout.strip()
+                or "no output"
+            )
+            raise ActionError(
+                f"cannot estimate remote image layers for {image.reference}: {evidence}"
+            )
+        try:
+            payload = json.loads(manifest.stdout)
+        except json.JSONDecodeError as error:
+            raise ActionError(
+                f"cannot parse remote image layers for {image.reference}"
+            ) from error
+        for digest, size in _manifest_layers(payload):
+            previous = layers.get(digest)
+            if previous is not None and previous != size:
+                raise ActionError(
+                    f"remote layer size is ambiguous for {digest}"
+                )
+            layers[digest] = size
+    return sum(layers.values())
+
+
+def _manifest_layers(payload: object) -> tuple[tuple[str, int], ...]:
+    if not isinstance(payload, dict):
+        raise ActionError("remote image manifest is not an object")
+    manifest = payload.get("SchemaV2Manifest", payload)
+    if not isinstance(manifest, dict):
+        raise ActionError("remote image manifest body is invalid")
+    raw_layers = manifest.get("layers")
+    if not isinstance(raw_layers, list):
+        raise ActionError("remote image manifest has no layer list")
+    layers: list[tuple[str, int]] = []
+    for raw_layer in raw_layers:
+        if not isinstance(raw_layer, dict):
+            raise ActionError("remote image layer record is invalid")
+        digest = raw_layer.get("digest")
+        size = raw_layer.get("size")
+        if (
+            not isinstance(digest, str)
+            or DIGEST_PATTERN.fullmatch(digest) is None
+            or isinstance(size, bool)
+            or not isinstance(size, int)
+            or size < 0
+        ):
+            raise ActionError("remote image layer identity is invalid")
+        layers.append((digest, size))
+    return tuple(layers)
+
+
+def _nearest_existing_path(path: Path) -> Path:
+    probe = path
+    while not probe.exists():
+        if probe.parent == probe:
+            raise ActionError(f"no existing filesystem ancestor for {path}")
+        probe = probe.parent
+    return probe

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections import namedtuple
 from pathlib import Path
 
 import pytest
@@ -145,3 +146,51 @@ def test_local_build_source_requires_exact_clean_checkout(
         validate_local_build_source(
             source, expected_revision=expected, run=dirty_run
         )
+
+
+def test_image_disk_estimate_uses_missing_remote_layer_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = load_stable_release(RELEASE_FIXTURE)
+    monkeypatch.setattr(
+        actions,
+        "_docker_root_and_available",
+        lambda runner, prefix: (Path("/var/lib/docker"), 100 * 1024**3),
+    )
+    monkeypatch.setattr(
+        actions,
+        "_missing_release_layer_bytes",
+        lambda release, runner, prefix: 12 * 1024**3,
+    )
+
+    estimate = ProductionInstallerActions().image_disk_estimate(
+        release=release, image_source="pull"
+    )
+
+    assert estimate.location == Path("/var/lib/docker")
+    assert estimate.payload_bytes == 12 * 1024**3
+    assert estimate.available_bytes == 100 * 1024**3
+
+
+def test_project_disk_estimate_counts_resolved_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    artifacts = project / ".amd-ai/artifacts/sha256"
+    artifacts.mkdir(parents=True)
+    (artifacts / ("a" * 64)).write_bytes(b"a" * 11)
+    (artifacts / ("b" * 64)).write_bytes(b"b" * 13)
+    Usage = namedtuple("Usage", "total used free")
+    monkeypatch.setattr(
+        actions.shutil,
+        "disk_usage",
+        lambda path: Usage(1000, 100, 900),
+    )
+
+    estimate = ProductionInstallerActions().project_disk_estimate(
+        project_dir=project
+    )
+
+    assert estimate.location == project.resolve()
+    assert estimate.payload_bytes == 24
+    assert estimate.available_bytes == 900

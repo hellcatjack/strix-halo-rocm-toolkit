@@ -285,6 +285,22 @@ class StageResult:
         object.__setattr__(self, "report_paths", tuple(self.report_paths))
 
 
+@dataclass(frozen=True)
+class DiskSpaceEstimate:
+    location: Path
+    payload_bytes: int
+    available_bytes: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "location", _absolute_path(self.location))
+        for name in ("payload_bytes", "available_bytes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise InstallerModelError(
+                    f"disk estimate {name} must be a nonnegative integer"
+                )
+
+
 def _absolute_path(path: Path) -> Path:
     try:
         return path.expanduser().resolve(strict=False)
