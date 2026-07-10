@@ -104,17 +104,24 @@ def test_project_lock_updates_only_the_selected_project(tmp_path, monkeypatch):
     config = project_config(tmp_path / "demo")
     captured = {}
     monkeypatch.setattr(cli, "load_project_config", lambda path: config)
+    monkeypatch.setattr(cli.Docker, "detect", classmethod(lambda cls: FakeDocker()))
+    runner = FakeRunner()
+    monkeypatch.setattr(cli, "SubprocessRunner", lambda: runner)
+    monkeypatch.setattr(cli, "_runtime_identity", lambda: (1000, 1000))
 
-    def fake_lock(project_dir):
-        captured["project_dir"] = project_dir
-        return project_dir / "requirements.lock"
+    def fake_lock(**kwargs):
+        captured.update(kwargs)
+        return kwargs["project_dir"] / "requirements.lock"
 
-    monkeypatch.setattr(cli, "lock_project_dependencies", fake_lock)
+    monkeypatch.setattr(cli, "lock_project_dependencies_in_container", fake_lock)
 
     code = cli.main(["project-lock", str(config.path.parent)])
 
     assert code == 0
     assert captured["project_dir"] == config.path.parent
+    assert captured["base_image"] == config.base_image
+    assert captured["docker_prefix"] == ("docker",)
+    assert captured["runner"] is runner
 
 
 def test_project_run_returns_live_container_exit_code(tmp_path, monkeypatch):

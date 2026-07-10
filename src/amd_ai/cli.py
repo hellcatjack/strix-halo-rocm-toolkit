@@ -28,7 +28,10 @@ from amd_ai.image.build import (
 )
 from amd_ai.project.build import ProjectBuildError, build_or_reuse_project
 from amd_ai.project.config import ConfigError, load_project_config
-from amd_ai.project.dependencies import DependencyError, lock_project_dependencies
+from amd_ai.project.dependencies import (
+    DependencyError,
+    lock_project_dependencies_in_container,
+)
 from amd_ai.project.init import ProjectInitError, initialize_project
 from amd_ai.project.run import (
     ProjectRunError,
@@ -219,7 +222,16 @@ def _project_init(args: argparse.Namespace) -> int:
 
 def _project_lock(args: argparse.Namespace) -> int:
     config = load_project_config(_project_config_path(args.project))
-    lock_path = lock_project_dependencies(config.path.parent)
+    docker = Docker.detect()
+    uid, gid = _runtime_identity()
+    lock_path = lock_project_dependencies_in_container(
+        project_dir=config.path.parent,
+        base_image=config.base_image,
+        uid=uid,
+        gid=gid,
+        runner=SubprocessRunner(),
+        docker_prefix=docker.prefix,
+    )
     print(f"locked {lock_path}")
     return 0
 

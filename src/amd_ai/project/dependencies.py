@@ -3,9 +3,12 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 from amd_ai.image.profile import TorchProfile
+from amd_ai.project.config import IMAGE_ID_PATTERN
+from amd_ai.runner import Runner
 
 
 TORCH_COMPONENTS = ("torch", "torchvision", "torchaudio", "triton")
@@ -88,6 +91,111 @@ def lock_project_dependencies(project_dir: Path) -> Path:
         lock_text = temporary.read_text(encoding="utf-8")
         validate_project_lock(lock_text, constraints)
         os.replace(temporary, output)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return output
+
+
+def project_lock_argv(
+    *,
+    project_dir: Path,
+    base_image: str,
+    uid: int,
+    gid: int,
+    docker_prefix: Sequence[str] = ("docker",),
+) -> tuple[str, ...]:
+    project_dir = project_dir.resolve()
+    if IMAGE_ID_PATTERN.fullmatch(base_image) is None:
+        raise DependencyError("project lock base image must be an immutable image ID")
+    if (
+        isinstance(uid, bool)
+        or not isinstance(uid, int)
+        or uid < 0
+        or isinstance(gid, bool)
+        or not isinstance(gid, int)
+        or gid < 0
+    ):
+        raise DependencyError("project lock UID and GID must be nonnegative integers")
+    if any(character in str(project_dir) for character in (",", "\n", "\r", "\0")):
+        raise DependencyError("project path cannot be represented as a Docker mount")
+    return (
+        *docker_prefix,
+        "run",
+        "--rm",
+        "--user",
+        f"{uid}:{gid}",
+        "--env",
+        "HOME=/tmp",
+        "--env",
+        "UV_CACHE_DIR=/tmp/uv-cache",
+        "--workdir",
+        "/workspace",
+        "--mount",
+        f"type=bind,src={project_dir},dst=/workspace",
+        "--entrypoint",
+        "/usr/local/bin/uv",
+        base_image,
+        "pip",
+        "compile",
+        "--python-version",
+        "3.12",
+        "--constraint",
+        "torch-constraints.txt",
+        "--generate-hashes",
+        "--output-file",
+        ".requirements.lock.tmp",
+        "requirements.in",
+    )
+
+
+def lock_project_dependencies_in_container(
+    *,
+    project_dir: Path,
+    base_image: str,
+    uid: int,
+    gid: int,
+    runner: Runner,
+    docker_prefix: Sequence[str] = ("docker",),
+) -> Path:
+    project_dir = project_dir.resolve()
+    requirements_input = project_dir / "requirements.in"
+    constraints_path = project_dir / "torch-constraints.txt"
+    output = project_dir / "requirements.lock"
+    try:
+        input_text = requirements_input.read_text(encoding="utf-8")
+        constraints = constraints_path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise DependencyError(f"cannot read project dependency input: {error}") from error
+    _constraint_versions(constraints)
+    if not any(
+        line.strip() and not line.lstrip().startswith("#")
+        for line in input_text.splitlines()
+    ):
+        _write_text(output, "")
+        return output
+
+    temporary = project_dir / ".requirements.lock.tmp"
+    temporary.unlink(missing_ok=True)
+    argv = project_lock_argv(
+        project_dir=project_dir,
+        base_image=base_image,
+        uid=uid,
+        gid=gid,
+        docker_prefix=docker_prefix,
+    )
+    result = runner.run(list(argv), check=False)
+    if result.returncode != 0:
+        temporary.unlink(missing_ok=True)
+        evidence = result.stderr.strip() or result.stdout.strip()
+        raise DependencyError(
+            f"container dependency lock failed ({result.returncode}): {evidence}"
+        )
+    try:
+        lock_text = temporary.read_text(encoding="utf-8")
+        validate_project_lock(lock_text, constraints)
+        os.replace(temporary, output)
+    except OSError as error:
+        raise DependencyError(f"cannot finalize project dependency lock: {error}") from error
     finally:
         temporary.unlink(missing_ok=True)
     return output
