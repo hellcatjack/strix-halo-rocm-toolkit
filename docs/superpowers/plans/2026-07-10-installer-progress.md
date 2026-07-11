@@ -40,7 +40,7 @@
 - Modify: `tests/unit/installer/test_state.py`
 - Modify: `tests/unit/test_runner.py`
 
-- [ ] **Step 1: Write failing project-key, redaction, and private-log tests**
+- [x] **Step 1: Write failing project-key, redaction, and private-log tests**
 
 Add these tests with the exact public names and assertions:
 
@@ -131,7 +131,7 @@ def test_command_result_truncation_defaults_are_backward_compatible() -> None:
     assert result.stderr_truncated is False
 ```
 
-- [ ] **Step 2: Run the new tests and verify RED**
+- [x] **Step 2: Run the new tests and verify RED**
 
 Run:
 
@@ -145,7 +145,7 @@ PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
 Expected: collection fails because `progress.py`, `project_identity_key`, and
 the `CommandResult` truncation fields do not exist.
 
-- [ ] **Step 3: Extract the reusable project identity key**
+- [x] **Step 3: Extract the reusable project identity key**
 
 In `src/amd_ai/installer/state.py`, add and reuse this function without changing
 the generated state filename:
@@ -164,7 +164,7 @@ def project_state_path(project_dir: Path, legacy_path: Path) -> Path:
     return legacy.parent / "projects" / f"{project_identity_key(project_dir)}.json"
 ```
 
-- [ ] **Step 4: Add command output types without changing `Runner.run`**
+- [x] **Step 4: Add command output types without changing `Runner.run`**
 
 In `src/amd_ai/runner.py`, keep the `Runner.run(args, *, check=True,
 input_text=None)` protocol unchanged. Extend the result and declare the observer
@@ -203,7 +203,7 @@ class CommandObserver(Protocol):
 The observer returns sanitized text from `command_output`; the runner must use
 that returned value for its bounded in-memory tail.
 
-- [ ] **Step 5: Implement sanitization and atomic private logs**
+- [x] **Step 5: Implement sanitization and atomic private logs**
 
 Create `src/amd_ai/installer/progress.py` with `ProgressError`,
 `ProgressMode(DEFAULT, VERBOSE, QUIET)`, `sanitize_output`, and `SessionLog`.
@@ -246,12 +246,12 @@ symlink that must be rejected.
 line per logical line, and never retain raw text. `close` flushes, `fsync`s, and
 closes exactly once.
 
-- [ ] **Step 6: Run focused tests and verify GREEN**
+- [x] **Step 6: Run focused tests and verify GREEN**
 
 Run the command from Step 2. Expected: all selected tests pass and the existing
 state filenames are byte-for-byte compatible with their previous algorithm.
 
-- [ ] **Step 7: Commit secure output primitives**
+- [x] **Step 7: Commit secure output primitives**
 
 ```bash
 git add src/amd_ai/installer/progress.py src/amd_ai/installer/state.py \

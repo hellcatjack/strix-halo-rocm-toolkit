@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from amd_ai.installer.state import (
     installer_coordination_lock,
     install_lock,
     load_state,
+    project_identity_key,
     project_state_path,
     read_boot_id,
     save_state,
@@ -111,6 +113,18 @@ def test_project_state_path_is_stable_and_separates_equal_basenames(
     assert first.name.startswith("video-lab-")
     assert first.suffix == ".json"
     assert first != second
+
+
+def test_project_identity_key_is_shared_by_state_and_log_names(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "unsafe name" / "video lab"
+    key = project_identity_key(project)
+
+    assert re.fullmatch(r"[A-Za-z0-9._-]+-[0-9a-f]{12}", key)
+    assert project_state_path(
+        project, tmp_path / "install-state.json"
+    ).stem == key
 
 
 def test_project_state_path_sanitizes_unsafe_readable_name(tmp_path: Path) -> None:

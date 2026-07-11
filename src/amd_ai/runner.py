@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
+
+
+class CommandStream(StrEnum):
+    STDOUT = "stdout"
+    STDERR = "stderr"
 
 
 @dataclass(frozen=True)
@@ -11,6 +18,24 @@ class CommandResult:
     returncode: int
     stdout: str
     stderr: str
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+
+
+class CommandObserver(Protocol):
+    def command_started(
+        self,
+        args: tuple[str, ...],
+        *,
+        live: bool,
+        environment: Mapping[str, str] | None = None,
+    ) -> None: ...
+
+    def command_output(self, stream: CommandStream, text: str) -> str: ...
+
+    def command_finished(
+        self, result: CommandResult, *, live: bool
+    ) -> None: ...
 
 
 class CommandError(RuntimeError):

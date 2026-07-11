@@ -166,12 +166,20 @@ def load_state(path: Path) -> InstallState | None:
 
 
 def project_state_path(project_dir: Path, legacy_path: Path) -> Path:
-    project = Path(project_dir).resolve(strict=False)
     legacy = Path(legacy_path).resolve(strict=False)
+    return (
+        legacy.parent
+        / "projects"
+        / f"{project_identity_key(project_dir)}.json"
+    )
+
+
+def project_identity_key(project_dir: Path) -> str:
+    project = Path(project_dir).resolve(strict=False)
     readable = re.sub(r"[^A-Za-z0-9._-]+", "-", project.name)
     readable = readable.strip(".-_")[:48] or "project"
     identity = hashlib.sha256(str(project).encode("utf-8")).hexdigest()[:12]
-    return legacy.parent / "projects" / f"{readable}-{identity}.json"
+    return f"{readable}-{identity}"
 
 
 def select_install_state_path(
