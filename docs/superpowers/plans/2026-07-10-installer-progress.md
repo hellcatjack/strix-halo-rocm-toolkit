@@ -725,7 +725,7 @@ git commit -m "feat: report installer stages and heartbeats"
 - Modify: `tests/unit/test_runner.py`
 - Modify: `tests/unit/installer/test_progress.py`
 
-- [ ] **Step 1: Write failing classification and incremental-output tests**
+- [x] **Step 1: Write failing classification and incremental-output tests**
 
 Add exact classifier expectations:
 
@@ -821,7 +821,7 @@ child writes 1 MiB to both streams. Assert the runner drains and exits without
 deadlock, then raises `CommandObservationError` chained from `OSError`; no raw
 post-failure output is retained.
 
-- [ ] **Step 2: Run runner tests and verify RED**
+- [x] **Step 2: Run runner tests and verify RED**
 
 ```bash
 PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
@@ -832,7 +832,7 @@ PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
 Expected: failures report missing `is_live_command`, observed execution, and
 bounded-tail behavior.
 
-- [ ] **Step 3: Implement explicit long-command classification**
+- [x] **Step 3: Implement explicit long-command classification**
 
 Add `is_live_command(args: Sequence[str]) -> bool`. Strip only audited wrappers
 (`sudo` options, `--`, and `env` assignments), identify Docker global options
@@ -841,7 +841,7 @@ approved design. For `docker run`, treat an exact uv/pip entrypoint or an exact
 post-image `uv`, `pip`, `pip3`, or `python -m pip` command as live. Do not use
 substring matching on arbitrary paths or arguments.
 
-- [ ] **Step 4: Implement concurrent observed execution**
+- [x] **Step 4: Implement concurrent observed execution**
 
 Add `CommandObservationError(RuntimeError)` and this reusable entry point while
 leaving `Runner.run` unchanged:
@@ -906,7 +906,7 @@ process/readers, then raise `CommandObservationError` from that exception.
 On `KeyboardInterrupt`, terminate the child, drain and join readers, then
 re-raise. On `check=True` and nonzero status, raise `CommandError(result)`.
 
-- [ ] **Step 5: Route classified `SubprocessRunner` commands through the tee**
+- [x] **Step 5: Route classified `SubprocessRunner` commands through the tee**
 
 Give `SubprocessRunner` this constructor only; do not alter its `run` signature:
 
@@ -929,12 +929,12 @@ environment=os.environ)` and
 return code and byte-count diagnostics; it does not mirror parseable
 stdout/stderr. A runner without an observer keeps all current capture behavior.
 
-- [ ] **Step 6: Run runner tests and verify GREEN**
+- [x] **Step 6: Run runner tests and verify GREEN**
 
 Run the command from Step 2. Expected: all tests pass, output arrives before
 process completion, and no protocol command is streamed.
 
-- [ ] **Step 7: Commit the observed runner**
+- [x] **Step 7: Commit the observed runner**
 
 ```bash
 git add src/amd_ai/runner.py tests/unit/test_runner.py \
