@@ -19,7 +19,7 @@
 - Modify: `tests/container/test_image_contract.py`
 - Test: `tests/container/test_image_contract.py`
 
-- [ ] **Step 1: Add the failing quick-start contract test**
+- [x] **Step 1: Add the failing quick-start contract test**
 
 Add this test below `test_operator_documentation_contains_required_contract_anchors`:
 
@@ -45,6 +45,7 @@ def test_readme_quick_start_is_ordered_complete_and_safe() -> None:
         '--project-dir "$PROJECT"',
         "sudo reboot",
         'strix-halo-rocm project run "$PROJECT"',
+        "assert torch.version.hip",
         "torch.cuda.is_available()",
         'torch.device("cuda:0")',
         "torch.cuda.synchronize()",
@@ -62,7 +63,7 @@ def test_readme_quick_start_is_ordered_complete_and_safe() -> None:
     ) is None
 ```
 
-- [ ] **Step 2: Run the new test and verify the current README fails the contract**
+- [x] **Step 2: Run the new test and verify the current README fails the contract**
 
 Run:
 
@@ -81,7 +82,7 @@ Expected: `FAIL` with `README.md is missing '## 快速开始'`.
 - Modify: `README.md`
 - Test: `tests/container/test_image_contract.py`
 
-- [ ] **Step 1: Move the table of contents below the new quick start**
+- [x] **Step 1: Move the table of contents below the new quick start**
 
 Keep the title, product description, and four-line release baseline at the top. Remove the current `## 目录` block from that position and reinsert it after the complete quick-start section. Update its installation entries to:
 
@@ -96,7 +97,7 @@ Keep the title, product description, and four-line release baseline at the top. 
 
 Keep the remaining existing entries in their current order.
 
-- [ ] **Step 2: Insert the exact quick-start workflow before the table of contents**
+- [x] **Step 2: Insert the exact quick-start workflow before the table of contents**
 
 Add a `## 快速开始` section containing these seven focused subsections and commands.
 
@@ -224,6 +225,7 @@ import torch
 
 print(f"torch={torch.__version__}")
 print(f"hip={torch.version.hip}")
+assert torch.version.hip, "PyTorch is not a ROCm build"
 assert torch.cuda.is_available(), "ROCm GPU is not available to PyTorch"
 
 device = torch.device("cuda:0")
@@ -272,7 +274,7 @@ strix-halo-rocm project run "$PROJECT" --build
 至此已经具备可运行的 ROCm 7.2.1 / PyTorch 2.9.1 GPU 容器、独立项目目录、受保护的 Torch 基线和可继续扩展的 Python 环境。依赖试装、卸载和固化的完整规则见[Python 依赖与受保护 pip](#python-依赖与受保护-pip)。
 ````
 
-- [ ] **Step 3: Replace the old partial quick-install section with supplemental reference**
+- [x] **Step 3: Replace the old partial quick-install section with supplemental reference**
 
 Rename `## 快速安装` to `## 交互安装与 launcher`. Remove its duplicate fixed-version clone subsection. Keep the existing interactive menu behavior, stable image identity explanation, runtime installation paths, PATH export, non-root launcher warning, and installed-runtime `cd` fallback under these two headings:
 
@@ -284,7 +286,7 @@ Rename `## 快速安装` to `## 交互安装与 launcher`. Remove its duplicate 
 
 The canonical full-install command must remain only in the top quick start and `## 安装模式与自动化`; this supplemental section must not introduce a second abbreviated installation path.
 
-- [ ] **Step 4: Run the contract test and Markdown lint**
+- [x] **Step 4: Run the contract test and Markdown lint**
 
 Run:
 
@@ -298,7 +300,7 @@ npx --yes markdownlint-cli@0.45.0 README.md --disable MD013
 
 Expected: `2 passed`; markdownlint exits `0` with no output.
 
-- [ ] **Step 5: Commit the README workflow and contract**
+- [x] **Step 5: Commit the README workflow and contract**
 
 ```bash
 git add README.md tests/container/test_image_contract.py
@@ -309,13 +311,14 @@ git commit -m "docs: add end-to-end GPU quick start"
 
 **Files:**
 
-- Verify: `README.md`
+- Modify: `README.md`
+- Modify: `tests/container/test_image_contract.py`
 - Verify: `install.sh`
 - Verify: `src/amd_ai/cli.py`
 - Verify: `templates/project/project-entrypoint`
 - Verify: `docs/superpowers/specs/2026-07-10-readme-quickstart-design.md`
 
-- [ ] **Step 1: Verify local README links resolve to repository files**
+- [x] **Step 1: Verify local README links resolve to repository files**
 
 Run:
 
@@ -339,7 +342,7 @@ PY
 
 Expected: `README_LINKS_OK` and no assertion failure.
 
-- [ ] **Step 2: Verify documented parser commands and documentation contracts**
+- [x] **Step 2: Verify documented parser commands and documentation contracts**
 
 Run:
 
@@ -351,12 +354,13 @@ PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
   tests/test_version.py \
   tests/container/test_image_contract.py::test_operator_documentation_contains_required_contract_anchors \
   tests/container/test_image_contract.py::test_readme_quick_start_is_ordered_complete_and_safe \
+  tests/container/test_image_contract.py::test_readme_bash_examples_are_valid_shell \
   -q
 ```
 
-Expected: both help commands exit `0`; pytest reports `14 passed`.
+Expected: both help commands exit `0`; pytest reports `15 passed`.
 
-- [ ] **Step 3: Run final formatting and whitespace checks**
+- [x] **Step 3: Run final formatting and whitespace checks**
 
 Run:
 
@@ -372,13 +376,37 @@ git status --short
 
 Expected: markdownlint and `git diff --check` exit `0`; status contains no unexpected files.
 
-- [ ] **Step 4: Review the final diff against the approved design**
+- [x] **Step 4: Persist the README Bash syntax audit**
+
+Add a contract test that extracts every `bash` fence and passes it to `bash -n` without executing it:
+
+```python
+def test_readme_bash_examples_are_valid_shell() -> None:
+    text = Path("README.md").read_text(encoding="utf-8")
+    blocks = re.findall(r"```bash\n(.*?)\n```", text, flags=re.DOTALL)
+    assert blocks, "README.md has no Bash examples"
+
+    for index, block in enumerate(blocks, start=1):
+        result = subprocess.run(
+            ("bash", "-n"),
+            input=block,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        assert result.returncode == 0, f"Bash block {index}: {result.stderr}"
+```
+
+The RED run must identify the invalid `<自定义PROFILE_ID>` and `<新发布标签>` shell redirections. Replace them with quoted `CUSTOM_PROFILE_ID` and `RELEASE_TAG` variables, then rerun the test and expect `1 passed`.
+
+- [x] **Step 5: Review the final diff against the approved design**
 
 Run:
 
 ```bash
 git diff --stat main...HEAD
-git diff -- README.md tests/container/test_image_contract.py
+git diff main...HEAD -- README.md tests/container/test_image_contract.py
 ```
 
 Confirm all of the following before completion:
