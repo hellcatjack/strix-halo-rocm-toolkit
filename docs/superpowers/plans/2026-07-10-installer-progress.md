@@ -269,7 +269,7 @@ git commit -m "feat: add secure installer progress logs"
 - Modify: `tests/unit/installer/test_progress.py`
 - Modify: `tests/unit/installer/test_prompts.py`
 
-- [ ] **Step 1: Write failing event-mode and heartbeat tests**
+- [x] **Step 1: Write failing event-mode and heartbeat tests**
 
 Add `StagePosition`/`SessionPlan` imports and these complete test helpers before
 the event tests:
@@ -530,7 +530,7 @@ def test_heartbeat_worker_stops_before_pass(tmp_path: Path) -> None:
     assert stdout.getvalue() == after_pass
 ```
 
-- [ ] **Step 2: Run progress and prompt tests and verify RED**
+- [x] **Step 2: Run progress and prompt tests and verify RED**
 
 ```bash
 PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
@@ -541,7 +541,7 @@ PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
 Expected: failures report missing reporter, plan, heartbeat, and event-prefix
 APIs.
 
-- [ ] **Step 3: Implement the reporter contract and stable labels**
+- [x] **Step 3: Implement the reporter contract and stable labels**
 
 Add these immutable inputs and protocol to `progress.py`:
 
@@ -646,7 +646,7 @@ When rendering the plan, map internal state source `project` to user-facing
 `per-project`; retain `legacy` and `explicit` unchanged. Do not change the
 persisted selection source or state path algorithm.
 
-- [ ] **Step 4: Implement heartbeat lifecycle and output filtering**
+- [x] **Step 4: Implement heartbeat lifecycle and output filtering**
 
 Add `HeartbeatSchedule` and a daemon worker owned by `InstallerProgress`.
 `stage_started` starts one worker; every structured or child line calls
@@ -684,7 +684,7 @@ updates, secret-set access, and heartbeat activity across both reader threads
 and the heartbeat worker. Do not hold that lock while joining the worker or
 child reader threads.
 
-- [ ] **Step 5: Add the prompt compatibility adapter and prefixes**
+- [x] **Step 5: Add the prompt compatibility adapter and prefixes**
 
 Implement `PromptProgressAdapter(status_fn)` with the same workflow-facing
 methods, no log, no worker, and no command output. It formats stage events and
@@ -704,12 +704,12 @@ STATUS_PREFIXES = frozenset({
 Update `test_status_renderer_accepts_only_approved_prefixes` to accept `START`,
 `WAIT`, `FAIL`, and `SUMMARY`, while still rejecting `UNKNOWN`.
 
-- [ ] **Step 6: Run focused tests and verify GREEN**
+- [x] **Step 6: Run focused tests and verify GREEN**
 
 Run the command from Step 2. Expected: all progress and prompt tests pass,
 including no late heartbeat and complete quiet-mode logs.
 
-- [ ] **Step 7: Commit structured progress reporting**
+- [x] **Step 7: Commit structured progress reporting**
 
 ```bash
 git add src/amd_ai/installer/progress.py src/amd_ai/installer/prompts.py \

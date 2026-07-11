@@ -80,8 +80,12 @@ def test_status_renderer_accepts_only_approved_prefixes() -> None:
     assert render_status("WARN", "需要注意") == "WARN     需要注意"
     assert render_status("ACTION", "将执行修改") == "ACTION   将执行修改"
     assert render_status("BLOCKED", "不允许继续") == "BLOCKED  不允许继续"
+    assert render_status("START", "开始") == "START    开始"
+    assert render_status("WAIT", "等待") == "WAIT     等待"
+    assert render_status("FAIL", "失败") == "FAIL     失败"
+    assert render_status("SUMMARY", "完成") == "SUMMARY  完成"
     with pytest.raises(ValueError):
-        render_status("DEBUG", "not approved")
+        render_status("UNKNOWN", "not approved")
 
 
 def test_noninteractive_prompts_render_status_without_answering(
