@@ -556,10 +556,15 @@ class InstallerProgress:
         active = position or self._current_position
         if outcome is ProgressOutcome.SUCCESS:
             project = str(project_dir) if project_dir is not None else "未知"
+            result_detail = (
+                f"，结果={message}"
+                if message and message != "installation complete"
+                else ""
+            )
             self._emit(
                 "SUMMARY",
                 f"安装完成，用时 {self._session_duration()}，"
-                f"项目={project}，状态={state_path}",
+                f"项目={project}，状态={state_path}{result_detail}",
                 force_terminal=True,
             )
             self._emit_final_log()

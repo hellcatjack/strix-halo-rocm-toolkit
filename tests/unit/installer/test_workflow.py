@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import shutil
 from dataclasses import replace
@@ -7,7 +8,13 @@ from pathlib import Path
 
 from amd_ai.host.models import PlannedAction
 from amd_ai.installer.actions import prepare_plan_payload
-from amd_ai.installer.models import InstallMode, InstallOptions, InstallStage
+from amd_ai.installer.models import (
+    CONTAINER_STAGE_ORDER,
+    InstallMode,
+    InstallOptions,
+    InstallStage,
+)
+from amd_ai.installer.progress import InstallerProgress, ProgressMode
 from amd_ai.installer.release import (
     ReleaseAcquisitionError,
     ReleaseIdentityError,
@@ -15,6 +22,7 @@ from amd_ai.installer.release import (
 from amd_ai.installer.state import (
     installer_coordination_lock,
     install_lock,
+    load_state,
     project_state_path,
     save_state,
     stage_input_digest,
@@ -55,6 +63,7 @@ def installer_workflow(
     boot_id_reader=None,
     installer_version: str = "0.2.0",
     installer_source_revision: str = "d" * 40,
+    progress: InstallerProgress | None = None,
 ) -> InstallerWorkflow:
     kwargs = {}
     if boot_id_reader is not None:
@@ -65,8 +74,27 @@ def installer_workflow(
         installer_version=installer_version,
         installer_source_revision=installer_source_revision,
         prompts=prompts,
+        progress=progress,
         **kwargs,
     )
+
+
+def workflow_progress(
+    tmp_path: Path,
+    *,
+    mode: ProgressMode = ProgressMode.DEFAULT,
+    process_id: int = 23,
+) -> tuple[InstallerProgress, io.StringIO, io.StringIO]:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    progress = InstallerProgress(
+        mode=mode,
+        stdout=stdout,
+        stderr=stderr,
+        log_root=tmp_path / "logs",
+        process_id=process_id,
+    )
+    return progress, stdout, stderr
 
 
 def host_verify_report(status: Status) -> Report:
@@ -177,6 +205,274 @@ def test_container_workflow_runs_each_stage_once_and_completes(
     ]
     assert result.state is not None
     assert result.state.current_stage == InstallStage.COMPLETE
+
+
+def test_resume_reports_plan_skips_start_disk_detail_and_checkpointed_pass(
+    tmp_path: Path,
+) -> None:
+    first_actions = FakeInstallerActions.stop_after(
+        InstallStage.RELEASE_RESOLVE
+    )
+    assert installer_workflow(
+        tmp_path, actions=first_actions
+    ).run().exit_code == 1
+    progress, stdout, _ = workflow_progress(tmp_path)
+
+    result = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.healthy(),
+        progress=progress,
+    ).run()
+
+    assert result.exit_code == 0
+    output = stdout.getvalue()
+    assert "PLAN     共 8 个阶段，从 IMAGE_PULL_OR_BUILD 继续" in output
+    assert "SKIP     [1/8] 安装用户运行时：已有可信检查点" in output
+    assert output.index("START    [4/8]") < output.index(
+        "DETAIL   缺失层=10.0 GiB"
+    )
+    assert output.index("DETAIL   缺失层=10.0 GiB") < output.index(
+        "PASS     [4/8]"
+    )
+    persisted = load_state(tmp_path / "install-state.json")
+    assert persisted is not None
+    assert (
+        InstallStage.IMAGE_PULL_OR_BUILD.value
+        in persisted.completed_stage_input_digests
+    )
+
+
+def test_new_session_reports_pending_then_resolved_release_identity(
+    tmp_path: Path,
+) -> None:
+    progress, stdout, _ = workflow_progress(
+        tmp_path, mode=ProgressMode.VERBOSE
+    )
+
+    result = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.healthy(),
+        progress=progress,
+    ).run()
+
+    assert result.exit_code == 0
+    output = stdout.getvalue()
+    pending = output.index("stable release=待解析")
+    resolved = output.index("DETAIL   stable release=0.2.0")
+    checkpointed = output.index("PASS     [3/8]")
+    assert pending < resolved < checkpointed
+    assert "ghcr.io/hellcatjack/strix-halo-rocm-python@sha256:" in output
+    assert "sha256:" + "d" * 64 in output
+    assert "ghcr.io/hellcatjack/strix-halo-rocm-pytorch@sha256:" in output
+    assert "sha256:" + "7" * 64 in output
+
+
+def test_disk_shortage_reports_start_detail_then_failure(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+    actions.image_estimate = replace(
+        actions.image_estimate,
+        payload_bytes=20 * 1024**3,
+        available_bytes=24 * 1024**3,
+    )
+    terminal = io.StringIO()
+    progress = InstallerProgress(
+        mode=ProgressMode.DEFAULT,
+        stdout=terminal,
+        stderr=terminal,
+        log_root=tmp_path / "logs",
+        process_id=23,
+    )
+
+    result = installer_workflow(
+        tmp_path, actions=actions, progress=progress
+    ).run()
+
+    assert result.exit_code == 2
+    output = terminal.getvalue()
+    start = output.index("START    [4/8]")
+    detail = output.index("DETAIL   缺失层=20.0 GiB")
+    failure = output.index("FAIL     [4/8]")
+    assert start < detail < failure
+    assert "pull_release" not in actions.calls
+
+
+def test_checkpointed_action_reports_pass_before_resume_instructions(
+    tmp_path: Path,
+) -> None:
+    terminal = io.StringIO()
+    progress = InstallerProgress(
+        mode=ProgressMode.DEFAULT,
+        stdout=terminal,
+        stderr=terminal,
+        log_root=tmp_path / "logs",
+        process_id=23,
+    )
+
+    result = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.stop_after(
+            InstallStage.RELEASE_RESOLVE
+        ),
+        progress=progress,
+    ).run()
+
+    assert result.exit_code == 1
+    output = terminal.getvalue()
+    assert output.index("PASS     [3/8]") < output.index("ACTION   [3/8]")
+    assert all(token in output for token in ("STATE", "RESUME", "LOG"))
+    state = load_state(tmp_path / "install-state.json")
+    assert state is not None
+    assert (
+        InstallStage.RELEASE_RESOLVE.value
+        in state.completed_stage_input_digests
+    )
+
+
+def test_failed_stage_reports_state_resume_and_log_without_checkpoint(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+    actions.failures[InstallStage.PROJECT_INIT] = RuntimeError(
+        "uv download failed"
+    )
+    progress, _, stderr = workflow_progress(tmp_path)
+
+    result = installer_workflow(
+        tmp_path, actions=actions, progress=progress
+    ).run()
+
+    assert result.exit_code == 2
+    assert "FAIL     [6/8]" in stderr.getvalue()
+    assert "CAUSE    PROJECT_INIT failed: uv download failed" in stderr.getvalue()
+    assert "STATE" in stderr.getvalue()
+    assert "RESUME" in stderr.getvalue()
+    state = load_state(tmp_path / "install-state.json")
+    assert state is not None
+    assert (
+        InstallStage.PROJECT_INIT.value
+        not in state.completed_stage_input_digests
+    )
+
+
+def test_complete_rerun_reports_all_skips_and_summary(
+    tmp_path: Path,
+) -> None:
+    assert installer_workflow(
+        tmp_path, actions=FakeInstallerActions.healthy()
+    ).run().exit_code == 0
+    progress, stdout, _ = workflow_progress(tmp_path)
+    actions = FakeInstallerActions.healthy()
+
+    result = installer_workflow(
+        tmp_path, actions=actions, progress=progress
+    ).run()
+
+    assert result.exit_code == 0
+    assert stdout.getvalue().count("SKIP") == len(CONTAINER_STAGE_ORDER)
+    assert "SUMMARY" in stdout.getvalue()
+    assert actions.calls == []
+
+
+def test_log_creation_failure_runs_no_stage(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    log_root = tmp_path / "unsafe-logs"
+    log_root.symlink_to(target, target_is_directory=True)
+    progress = InstallerProgress(
+        mode=ProgressMode.DEFAULT,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        log_root=log_root,
+    )
+    actions = FakeInstallerActions.healthy()
+
+    result = installer_workflow(
+        tmp_path, actions=actions, progress=progress
+    ).run()
+
+    assert result.exit_code == 2
+    assert "log" in result.message.lower()
+    assert actions.calls == []
+
+
+def test_progress_mode_does_not_change_checkpoint_digests(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    base = workflow_options(tmp_path, project_dir=project)
+    default_progress, _, _ = workflow_progress(tmp_path / "default")
+    quiet_progress, _, _ = workflow_progress(
+        tmp_path / "quiet", mode=ProgressMode.QUIET
+    )
+    default_result = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.healthy(),
+        options=replace(
+            base, state_path=tmp_path / "default-state.json"
+        ),
+        progress=default_progress,
+    ).run()
+    quiet_result = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.healthy(),
+        options=replace(base, state_path=tmp_path / "quiet-state.json"),
+        progress=quiet_progress,
+    ).run()
+
+    assert default_result.state is not None
+    assert quiet_result.state is not None
+    assert (
+        default_result.state.completed_stage_input_digests
+        == quiet_result.state.completed_stage_input_digests
+    )
+
+
+def test_full_progress_uses_selected_workflow_positions(
+    tmp_path: Path,
+) -> None:
+    progress, stdout, _ = workflow_progress(tmp_path)
+    prompts = FakePrompts(
+        exact={"APPLY": True}, yes_no={"docker-group": False}
+    )
+
+    result = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.full_no_reboot(),
+        options=full_options(tmp_path),
+        prompts=prompts,
+        progress=progress,
+    ).run()
+
+    assert result.exit_code == 0
+    output = stdout.getvalue()
+    assert "共 13 个阶段" in output
+    assert "[2/13] 检查宿主" in output
+    assert "[7/13] 验证重启后的宿主" in output
+    assert "[13/13] 完成安装" in output
+
+
+def test_dry_run_progress_is_positioned_without_persisting_state(
+    tmp_path: Path,
+) -> None:
+    progress, stdout, _ = workflow_progress(tmp_path)
+    options = replace(workflow_options(tmp_path), dry_run=True)
+
+    result = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.healthy(),
+        options=options,
+        progress=progress,
+    ).run()
+
+    assert result.exit_code == 0
+    assert "[1/8]" in stdout.getvalue()
+    assert "[8/8]" in stdout.getvalue()
+    assert "START" not in stdout.getvalue()
+    assert "SUMMARY" in stdout.getvalue()
+    assert "no stages persisted" in stdout.getvalue()
+    assert not options.state_path.exists()
 
 
 def test_resume_skips_only_stages_with_matching_input_digest(
@@ -624,6 +920,38 @@ def test_same_boot_remains_pending_without_reapplying_host(
     assert "host_verify" not in resumed_actions.calls
 
 
+def test_same_boot_progress_names_exact_manual_reboot_resume(
+    tmp_path: Path,
+) -> None:
+    boot_id = "12345678-1234-4abc-8def-1234567890ab"
+    first = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.host_change_requires_reboot(),
+        options=full_options(tmp_path),
+        prompts=FakePrompts(exact={"APPLY": True}),
+        boot_id_reader=lambda: boot_id,
+    ).run()
+    assert first.exit_code == 1
+    progress, _, stderr = workflow_progress(tmp_path)
+    actions = FakeInstallerActions.host_change_requires_reboot()
+
+    resumed = installer_workflow(
+        tmp_path,
+        actions=actions,
+        options=full_options(tmp_path),
+        prompts=FakePrompts(),
+        boot_id_reader=lambda: boot_id,
+        progress=progress,
+    ).run()
+
+    assert resumed.exit_code == 1
+    assert (
+        "RESUME   sudo reboot；重启后重新执行同一条 install 命令"
+        in stderr.getvalue()
+    )
+    assert "host_apply" not in actions.calls
+
+
 def test_changed_boot_resumes_at_host_verify_and_completes(
     tmp_path: Path,
 ) -> None:
@@ -792,6 +1120,71 @@ def test_compatible_patch_installer_resumes_old_host_verify_state(
         prefix == "WARN" and "compatible installer update" in message
         for prefix, message in prompts.statuses
     )
+
+
+def test_compatible_patch_installer_adopts_container_state(
+    tmp_path: Path,
+) -> None:
+    first = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.healthy(),
+        installer_version="0.2.2",
+        installer_source_revision="d" * 40,
+    ).run()
+    assert first.state is not None
+    old_digests = dict(first.state.completed_stage_input_digests)
+    resumed_actions = FakeInstallerActions.healthy()
+
+    resumed = installer_workflow(
+        tmp_path,
+        actions=resumed_actions,
+        installer_version="0.2.3",
+        installer_source_revision="e" * 40,
+    ).run()
+
+    assert resumed.exit_code == 0
+    assert resumed_actions.calls == []
+    assert resumed.state is not None and resumed.state.schema_version == 2
+    persisted = load_state(tmp_path / "install-state.json")
+    assert persisted is not None
+    assert persisted.installer_version == "0.2.3"
+    assert persisted.installer_source_revision == "e" * 40
+    changed = {
+        name
+        for name, digest in resumed.state.completed_stage_input_digests.items()
+        if old_digests[name] != digest
+    }
+    assert changed == {InstallStage.BOOTSTRAP.value}
+
+
+def test_incompatible_container_bootstrap_digest_is_rejected(
+    tmp_path: Path,
+) -> None:
+    first = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.healthy(),
+        installer_version="0.2.2",
+        installer_source_revision="d" * 40,
+    ).run()
+    assert first.state is not None
+    completed = dict(first.state.completed_stage_input_digests)
+    completed[InstallStage.BOOTSTRAP.value] = "0" * 64
+    save_state(
+        tmp_path / "install-state.json",
+        replace(first.state, completed_stage_input_digests=completed),
+    )
+    actions = FakeInstallerActions.healthy()
+
+    rejected = installer_workflow(
+        tmp_path,
+        actions=actions,
+        installer_version="0.2.3",
+        installer_source_revision="e" * 40,
+    ).run()
+
+    assert rejected.exit_code == 2
+    assert "inputs changed" in rejected.message
+    assert actions.calls == []
 
 
 def test_release_must_support_applied_host_adapter(tmp_path: Path) -> None:

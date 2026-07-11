@@ -32,6 +32,14 @@ from amd_ai.installer.prompts import (
     PromptError,
     TerminalPrompts,
 )
+from amd_ai.installer.progress import (
+    ProgressError,
+    ProgressOutcome,
+    ProgressReporter,
+    PromptProgressAdapter,
+    SessionPlan,
+    StagePosition,
+)
 from amd_ai.installer.release import (
     ReleaseAcquisitionError,
     ReleaseIdentityError,
@@ -72,6 +80,7 @@ class WorkflowResult:
     exit_code: int
     state: InstallState | None
     message: str = ""
+    progress_outcome: ProgressOutcome = ProgressOutcome.FAILURE
 
 
 @dataclass(frozen=True)
@@ -79,6 +88,15 @@ class HostConfirmation:
     accepted: bool
     docker_group_accepted: bool
     message: str = ""
+
+
+@dataclass(frozen=True)
+class DiskRequirement:
+    operation: str
+    source: str
+    payload_label: str
+    estimate: DiskSpaceEstimate
+    required_bytes: int
 
 
 class InstallerWorkflow:
@@ -90,6 +108,7 @@ class InstallerWorkflow:
         installer_version: str,
         installer_source_revision: str,
         prompts: object | None = None,
+        progress: ProgressReporter | None = None,
         boot_id_reader: Callable[[], str] = read_boot_id,
     ) -> None:
         self.options = options
@@ -101,14 +120,26 @@ class InstallerWorkflow:
             if options.non_interactive
             else TerminalPrompts()
         )
+        status = getattr(self.prompts, "status", None)
+        self.progress = (
+            progress
+            if progress is not None
+            else PromptProgressAdapter(
+                status if status is not None else lambda _prefix, _message: None
+            )
+        )
         self._release: StableRelease | None = None
         self._host_plan: HostPlanResult | None = None
         self._boot_id_reader = boot_id_reader
+        self._state_source = "explicit"
+        self._current_position: StagePosition | None = None
 
     def run(self) -> WorkflowResult:
         state: InstallState | None = None
         try:
             self._prepare_options()
+            assert self.options.project_dir is not None
+            self.progress.open_session(self.options.project_dir)
             self.options.validate()
             if REVISION_PATTERN.fullmatch(
                 self.installer_source_revision
@@ -119,36 +150,88 @@ class InstallerWorkflow:
             ):
                 self._select_state_path()
                 with install_lock(self.options.state_path):
+                    installer_update_adopted = False
                     state = load_state(self.options.state_path)
                     if state is None:
                         state = self._new_state()
                         if not self.options.dry_run:
                             save_state(self.options.state_path, state)
                     elif not self.options.dry_run:
+                        previous_state = state
                         state = self._adopt_compatible_installer_update(state)
+                        installer_update_adopted = state is not previous_state
                     self._validate_transition(state)
+                    if installer_update_adopted:
+                        save_state(self.options.state_path, state)
+                    self._report_session_plan(state)
                     if self.options.dry_run:
-                        return self._run_dry(state)
-                    return self._run_stages(state)
+                        result = self._run_dry(state)
+                    else:
+                        result = self._run_stages(state)
         except KeyboardInterrupt:
-            return WorkflowResult(1, state, "installation interrupted")
+            result = WorkflowResult(
+                1,
+                state,
+                "installation interrupted",
+                ProgressOutcome.ACTION,
+            )
         except ResumeInputChanged as error:
-            return WorkflowResult(
+            result = WorkflowResult(
                 2,
                 state,
                 f"{error}; state: {self.options.state_path}",
+                ProgressOutcome.FAILURE,
             )
         except (
             CorruptInstallState,
             InstallAlreadyRunning,
             InstallerModelError,
             InstallerStateError,
+            ProgressError,
             PromptError,
             WorkflowError,
         ) as error:
-            return WorkflowResult(2, state, str(error))
+            result = WorkflowResult(
+                2, state, str(error), ProgressOutcome.FAILURE
+            )
         except Exception as error:
-            return WorkflowResult(2, state, f"installer failed: {error}")
+            result = WorkflowResult(
+                2,
+                state,
+                f"installer failed: {error}",
+                ProgressOutcome.FAILURE,
+            )
+        return self._finish_progress(result)
+
+    def _finish_progress(self, result: WorkflowResult) -> WorkflowResult:
+        progress_error: Exception | None = None
+        try:
+            self.progress.installation_finished(
+                outcome=result.progress_outcome,
+                exit_code=result.exit_code,
+                message=result.message,
+                state_path=self.options.state_path,
+                project_dir=self.options.project_dir,
+                position=self._current_position,
+            )
+        except Exception as error:
+            progress_error = error
+        try:
+            self.progress.close()
+        except Exception as error:
+            if progress_error is None:
+                progress_error = error
+        if progress_error is None:
+            return result
+        message = f"progress reporting failed: {progress_error}"
+        if result.message:
+            message = f"{result.message}; {message}"
+        return WorkflowResult(
+            2,
+            result.state,
+            message,
+            ProgressOutcome.FAILURE,
+        )
 
     def _prepare_options(self) -> None:
         if self.options.mode is InstallMode.DOCTOR:
@@ -165,9 +248,35 @@ class InstallerWorkflow:
             explicit=self.options.state_path_explicit,
         )
         self.options = replace(self.options, state_path=selection.path)
+        self._state_source = selection.source
         self._status(
             "INFO",
             f"installer state ({selection.source}): {selection.path}",
+        )
+
+    def _report_session_plan(self, state: InstallState) -> None:
+        assert self.options.project_dir is not None
+        order = self._stage_order()
+        first_incomplete = next(
+            (
+                stage
+                for stage in order
+                if stage.value not in state.completed_stage_input_digests
+            ),
+            None,
+        )
+        self.progress.session_plan(
+            SessionPlan(
+                mode=self.options.mode,
+                project_dir=self.options.project_dir,
+                project_name=self.options.project_name,
+                state_path=self.options.state_path,
+                state_source=self._state_source,
+                image_source=self.options.image_source or "pull",
+                release_id=state.release_id,
+                stages=order,
+                first_incomplete=first_incomplete,
+            )
         )
 
     def _new_state(self) -> InstallState:
@@ -212,24 +321,45 @@ class InstallerWorkflow:
     def _run_stages(self, state: InstallState) -> WorkflowResult:
         order = self._stage_order()
         for index, stage in enumerate(order):
+            position = StagePosition(stage, index + 1, len(order))
+            self._current_position = position
+            self.progress.stage_candidate(position)
             inputs = self._stage_inputs(stage, state)
             if validate_completed_stage(state, stage, inputs):
+                self.progress.stage_skipped(position)
                 continue
             if state.current_stage is not stage:
                 raise WorkflowError(
                     f"illegal installer transition: state={state.current_stage.value}, "
                     f"next={stage.value}"
                 )
-            shortage = self._disk_shortage(stage, state)
-            if shortage is not None:
-                return WorkflowResult(2, state, shortage)
+            self.progress.stage_started(position)
+            requirement = self._disk_requirement(stage, state)
+            if requirement is not None:
+                self._report_disk_requirement(requirement)
+                shortage = _require_disk_space(requirement)
+                if shortage is not None:
+                    return WorkflowResult(
+                        2,
+                        state,
+                        shortage,
+                        ProgressOutcome.FAILURE,
+                    )
             try:
                 output = self._dispatch(stage, state)
             except KeyboardInterrupt:
-                return WorkflowResult(1, state, f"{stage.value} interrupted")
+                return WorkflowResult(
+                    1,
+                    state,
+                    f"{stage.value} interrupted",
+                    ProgressOutcome.ACTION,
+                )
             except Exception as error:
                 return WorkflowResult(
-                    2, state, f"{stage.value} failed: {error}"
+                    2,
+                    state,
+                    f"{stage.value} failed: {error}",
+                    ProgressOutcome.FAILURE,
                 )
 
             outcome = self._stage_result(stage, output)
@@ -240,6 +370,7 @@ class InstallerWorkflow:
                     2,
                     state,
                     outcome.message or f"{stage.value} is blocked",
+                    ProgressOutcome.BLOCKED,
                 )
             if (
                 stage is InstallStage.REBOOT_PENDING
@@ -251,8 +382,11 @@ class InstallerWorkflow:
                     1,
                     state,
                     outcome.message or "manual reboot is required",
+                    ProgressOutcome.ACTION,
                 )
             state = self._apply_output(state, stage, output, outcome)
+            if stage is InstallStage.RELEASE_RESOLVE:
+                self._report_release_identity(output)
             state = self._checkpoint(
                 state,
                 stage=stage,
@@ -260,19 +394,19 @@ class InstallerWorkflow:
                 next_stage=(order[index + 1] if index + 1 < len(order) else stage),
             )
             save_state(self.options.state_path, state)
+            self.progress.stage_passed(position)
             if (
                 stage is InstallStage.HOST_VERIFY
                 and isinstance(output, Report)
                 and output.status is Status.UNVERIFIED
             ):
                 self._status("WARN", outcome.message)
-            else:
-                self._status("PASS", stage.value)
             if outcome.action_required:
                 return WorkflowResult(
                     1,
                     state,
                     outcome.message or f"{stage.value} requires operator action",
+                    ProgressOutcome.ACTION,
                 )
         message = "installation complete"
         if state.host_verification_status == Status.UNVERIFIED.value:
@@ -280,7 +414,9 @@ class InstallerWorkflow:
                 f"; host remains unverified on {state.host_kernel}; "
                 "run the displayed full qualification before release promotion"
             )
-        return WorkflowResult(0, state, message)
+        return WorkflowResult(
+            0, state, message, ProgressOutcome.SUCCESS
+        )
 
     def _run_dry(self, state: InstallState) -> WorkflowResult:
         mutating = {
@@ -290,10 +426,22 @@ class InstallerWorkflow:
             InstallStage.PROJECT_INIT,
             InstallStage.PROJECT_VERIFY,
         }
-        for stage in self._stage_order():
+        order = self._stage_order()
+        for index, stage in enumerate(order):
+            position = StagePosition(stage, index + 1, len(order))
+            self._current_position = position
+            self.progress.stage_candidate(position)
             prefix = "ACTION" if stage in mutating else "PASS"
-            self._status(prefix, f"dry-run {stage.value}")
-        return WorkflowResult(0, state, "dry-run complete; no stages persisted")
+            self._status(
+                prefix,
+                f"[{position.index}/{position.total}] dry-run {stage.value}",
+            )
+        return WorkflowResult(
+            0,
+            state,
+            "dry-run complete; no stages persisted",
+            ProgressOutcome.SUCCESS,
+        )
 
     def _dispatch(self, stage: InstallStage, state: InstallState) -> object:
         assert self.options.source_root is not None
@@ -330,9 +478,7 @@ class InstallerWorkflow:
             ):
                 return StageResult(
                     action_required=True,
-                    message=(
-                        "manual reboot is required; rerun the installer after reboot"
-                    ),
+                    message="manual reboot is required",
                 )
             return StageResult()
         if stage is InstallStage.HOST_VERIFY:
@@ -360,7 +506,11 @@ class InstallerWorkflow:
                         raise WorkflowError(
                             f"exact release pull failed: {error}"
                         ) from error
-                    fallback = self.prompts.choose_image_fallback()
+                    self.progress.pause_heartbeat()
+                    try:
+                        fallback = self.prompts.choose_image_fallback()
+                    finally:
+                        self.progress.resume_heartbeat()
                     if fallback != "build":
                         raise WorkflowError(
                             f"exact release pull failed and local build was refused: {error}"
@@ -369,14 +519,12 @@ class InstallerWorkflow:
                         "WARN",
                         "exact release pull failed; using explicit local build",
                     )
-                    estimate = self.actions.image_disk_estimate(
-                        release=release, image_source="build"
+                    requirement = self._image_disk_requirement(
+                        release,
+                        image_source="build",
                     )
-                    shortage = _require_disk_space(
-                        estimate,
-                        required_bytes=estimate.payload_bytes + 5 * GIB,
-                        operation="image build",
-                    )
+                    self._report_disk_requirement(requirement)
+                    shortage = _require_disk_space(requirement)
                     if shortage is not None:
                         raise WorkflowError(shortage)
                     return self.actions.build_local_images(
@@ -703,10 +851,18 @@ class InstallerWorkflow:
         return updated
 
     def _can_adopt_installer_update(self, state: InstallState) -> bool:
-        if state.mode is not InstallMode.FULL:
+        if state.mode is InstallMode.FULL:
+            start = FULL_STAGE_ORDER.index(InstallStage.HOST_VERIFY)
+            compatible_stage = state.current_stage in FULL_STAGE_ORDER[start:]
+        elif state.mode is InstallMode.CONTAINER:
+            compatible_stage = (
+                InstallStage.BOOTSTRAP.value
+                in state.completed_stage_input_digests
+                and state.current_stage in CONTAINER_STAGE_ORDER[1:]
+            )
+        else:
             return False
-        start = FULL_STAGE_ORDER.index(InstallStage.HOST_VERIFY)
-        if state.current_stage not in FULL_STAGE_ORDER[start:]:
+        if not compatible_stage:
             return False
         previous_series = _installer_series(state.installer_version)
         return previous_series is not None and previous_series == _installer_series(
@@ -808,33 +964,86 @@ class InstallerWorkflow:
                 "illegal installer transition: current stage does not match checkpoint"
             )
 
-    def _disk_shortage(
+    def _disk_requirement(
         self, stage: InstallStage, state: InstallState
-    ) -> str | None:
+    ) -> DiskRequirement | None:
         if stage is InstallStage.IMAGE_PULL_OR_BUILD:
-            hook = getattr(self.actions, "image_disk_estimate", None)
-            if hook is None:
-                raise WorkflowError("image disk estimate is unavailable")
-            estimate = hook(
-                release=self._resolved_release(state),
+            return self._image_disk_requirement(
+                self._resolved_release(state),
                 image_source=self.options.image_source or "pull",
-            )
-            return _require_disk_space(
-                estimate,
-                required_bytes=estimate.payload_bytes + 5 * GIB,
-                operation="image acquisition",
             )
         if stage is InstallStage.PROJECT_INIT:
             hook = getattr(self.actions, "project_disk_estimate", None)
             if hook is None:
                 raise WorkflowError("project disk estimate is unavailable")
             estimate = hook(project_dir=self.options.project_dir)
-            return _require_disk_space(
-                estimate,
-                required_bytes=estimate.payload_bytes * 2 + GIB,
+            _validate_disk_estimate(estimate, "project generation")
+            return DiskRequirement(
                 operation="project generation",
+                source="项目文件系统",
+                payload_label="项目数据",
+                estimate=estimate,
+                required_bytes=estimate.payload_bytes * 2 + GIB,
             )
         return None
+
+    def _image_disk_requirement(
+        self,
+        release: StableRelease,
+        *,
+        image_source: str,
+    ) -> DiskRequirement:
+        hook = getattr(self.actions, "image_disk_estimate", None)
+        if hook is None:
+            raise WorkflowError("image disk estimate is unavailable")
+        estimate = hook(release=release, image_source=image_source)
+        operation = (
+            "image build" if image_source == "build" else "image acquisition"
+        )
+        _validate_disk_estimate(estimate, operation)
+        return DiskRequirement(
+            operation=operation,
+            source=(
+                "本地源码构建" if image_source == "build" else "公开 GHCR"
+            ),
+            payload_label=("构建估算" if image_source == "build" else "缺失层"),
+            estimate=estimate,
+            required_bytes=estimate.payload_bytes + 5 * GIB,
+        )
+
+    def _report_disk_requirement(
+        self, requirement: DiskRequirement
+    ) -> None:
+        estimate = requirement.estimate
+        self.progress.detail(
+            f"{requirement.payload_label}="
+            f"{_format_gib(estimate.payload_bytes)} GiB，"
+            f"需要={_format_gib(requirement.required_bytes)} GiB，"
+            f"可用={_format_gib(estimate.available_bytes)} GiB，"
+            f"位置={estimate.location}，来源={requirement.source}"
+        )
+        self.progress.debug(
+            f"disk operation={requirement.operation} "
+            f"payload_bytes={estimate.payload_bytes} "
+            f"required_bytes={requirement.required_bytes} "
+            f"available_bytes={estimate.available_bytes} "
+            f"location={estimate.location} source={requirement.source}"
+        )
+
+    def _report_release_identity(self, output: object) -> None:
+        if not isinstance(output, StableRelease):
+            raise WorkflowError("release action returned an invalid value")
+        self.progress.detail(f"stable release={output.release_id}")
+        self.progress.debug(
+            f"base reference={output.base.reference} "
+            f"manifest_digest={output.base.manifest_digest} "
+            f"config_digest={output.base.config_digest}"
+        )
+        self.progress.debug(
+            f"torch reference={output.torch.reference} "
+            f"manifest_digest={output.torch.manifest_digest} "
+            f"config_digest={output.torch.config_digest}"
+        )
 
     def _resolved_release(self, state: InstallState) -> StableRelease:
         if self._release is None:
@@ -880,7 +1089,12 @@ class InstallerWorkflow:
                 True,
                 self.options.accept_docker_group,
             )
-        if not self.prompts.confirm_exact("APPLY"):
+        self.progress.pause_heartbeat()
+        try:
+            accepted = self.prompts.confirm_exact("APPLY")
+        finally:
+            self.progress.resume_heartbeat()
+        if not accepted:
             return HostConfirmation(
                 False,
                 False,
@@ -888,7 +1102,11 @@ class InstallerWorkflow:
             )
         docker_group = False
         if host_plan.plan.target_user != "root":
-            docker_group = self.prompts.confirm_yes_no("docker-group")
+            self.progress.pause_heartbeat()
+            try:
+                docker_group = self.prompts.confirm_yes_no("docker-group")
+            finally:
+                self.progress.resume_heartbeat()
         return HostConfirmation(True, docker_group)
 
     def _stage_order(self) -> tuple[InstallStage, ...]:
@@ -899,25 +1117,29 @@ class InstallerWorkflow:
         raise WorkflowError("doctor mode has no install stage order")
 
     def _status(self, prefix: str, message: str) -> None:
-        status = getattr(self.prompts, "status", None)
-        if status is not None:
-            status(prefix, message)
+        self.progress.status(prefix, message)
 
 
-def _require_disk_space(
-    estimate: DiskSpaceEstimate,
-    *,
-    required_bytes: int,
-    operation: str,
-) -> str | None:
+def _validate_disk_estimate(
+    estimate: object, operation: str
+) -> None:
     if not isinstance(estimate, DiskSpaceEstimate):
         raise WorkflowError(f"{operation} returned an invalid disk estimate")
-    if estimate.available_bytes > required_bytes:
+
+
+def _require_disk_space(requirement: DiskRequirement) -> str | None:
+    estimate = requirement.estimate
+    if estimate.available_bytes > requirement.required_bytes:
         return None
     return (
-        f"{operation} disk space is insufficient at {estimate.location}: "
-        f"required_bytes={required_bytes}, available_bytes={estimate.available_bytes}"
+        f"{requirement.operation} disk space is insufficient at "
+        f"{estimate.location}: required_bytes={requirement.required_bytes}, "
+        f"available_bytes={estimate.available_bytes}"
     )
+
+
+def _format_gib(byte_count: int) -> str:
+    return f"{byte_count / GIB:.1f}"
 
 
 def _file_digest(path: Path) -> str | None:

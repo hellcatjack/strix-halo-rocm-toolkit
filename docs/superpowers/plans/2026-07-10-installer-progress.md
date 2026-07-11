@@ -950,7 +950,7 @@ git commit -m "feat: stream long installer commands"
 - Modify: `tests/unit/installer/fakes.py`
 - Modify: `tests/unit/installer/test_workflow.py`
 
-- [ ] **Step 1: Write failing workflow event-order tests**
+- [x] **Step 1: Write failing workflow event-order tests**
 
 Extend `installer_workflow` with an optional `progress` argument. Add a helper
 that creates `InstallerProgress` with `tmp_path / "logs"` and `StringIO` sinks;
@@ -1131,7 +1131,7 @@ def test_progress_mode_does_not_change_checkpoint_digests(tmp_path: Path) -> Non
     )
 ```
 
-- [ ] **Step 2: Write the failing `v0.2.2` container adoption test**
+- [x] **Step 2: Write the failing `v0.2.2` container adoption test**
 
 Complete a container workflow with installer version `0.2.2` and revision
 `d * 40`, then rerun the same state as version `0.2.3` and revision `e * 40`.
@@ -1190,7 +1190,7 @@ assert "inputs changed" in rejected.message
 assert actions.calls == []
 ```
 
-- [ ] **Step 3: Run workflow tests and verify RED**
+- [x] **Step 3: Run workflow tests and verify RED**
 
 ```bash
 PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
@@ -1200,7 +1200,7 @@ PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
 Expected: failures show no injected progress contract, no structured stage
 events, and no compatible container adoption.
 
-- [ ] **Step 4: Open the session and emit the plan before stage execution**
+- [x] **Step 4: Open the session and emit the plan before stage execution**
 
 Add `progress: ProgressReporter | None = None` to `InstallerWorkflow.__init__`.
 Default to `PromptProgressAdapter(prompts.status)` for direct callers. After
@@ -1239,7 +1239,7 @@ to `SUCCESS` for exit 0, `ACTION` for interruption/reboot/operator action,
 state, transition errors, and disk shortage. The default keeps existing test
 and external construction source-compatible.
 
-- [ ] **Step 5: Bracket stages without changing checkpoint authority**
+- [x] **Step 5: Bracket stages without changing checkpoint authority**
 
 In `_run_stages`, construct `StagePosition(stage, index + 1, len(order))` and
 call `stage_candidate` before input validation. On a trusted checkpoint call
@@ -1268,7 +1268,7 @@ and project initialization as `项目文件系统`. For pulls label payload
 `缺失层`; for local image builds label it `构建估算`; for project initialization
 label it `项目数据`.
 
-- [ ] **Step 6: Extend only compatible container installer adoption**
+- [x] **Step 6: Extend only compatible container installer adoption**
 
 Keep the existing full-mode boundary. Change `_can_adopt_installer_update` to:
 
@@ -1287,12 +1287,12 @@ return False
 Retain same-series validation, old-input reconstruction, and exact old digest
 verification. Rewrite only installer metadata and the `BOOTSTRAP` digest.
 
-- [ ] **Step 7: Run workflow tests and verify GREEN**
+- [x] **Step 7: Run workflow tests and verify GREEN**
 
 Run the command from Step 3. Expected: all old and new workflow tests pass;
 failure/action output is emitted once and trusted checkpoints remain strict.
 
-- [ ] **Step 8: Commit workflow progress semantics**
+- [x] **Step 8: Commit workflow progress semantics**
 
 ```bash
 git add src/amd_ai/installer/workflow.py tests/unit/installer/fakes.py \

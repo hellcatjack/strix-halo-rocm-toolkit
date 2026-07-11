@@ -129,6 +129,12 @@ class FakeInstallerActions:
     def host_change_requires_reboot(cls) -> FakeInstallerActions:
         return cls.healthy()
 
+    @classmethod
+    def full_no_reboot(cls) -> FakeInstallerActions:
+        fake = cls.healthy()
+        fake.host_plan_result = fake._make_host_plan(reboot_required=False)
+        return fake
+
     def stage_inputs(
         self,
         stage: InstallStage,
