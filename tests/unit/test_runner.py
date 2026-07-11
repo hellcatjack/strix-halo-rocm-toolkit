@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Mapping
 
@@ -14,6 +15,7 @@ from amd_ai.runner import (
     SubprocessRunner,
     is_live_command,
     run_observed_command,
+    run_protocol_command,
 )
 
 
@@ -44,6 +46,14 @@ class RecordingObserver:
         self, result: CommandResult, *, live: bool
     ) -> None:
         self.finished.append((result, live))
+
+    @property
+    def stderr_lines(self) -> list[str]:
+        return [
+            text
+            for stream, text in self.lines
+            if stream is CommandStream.STDERR
+        ]
 
 
 @pytest.mark.parametrize(
@@ -227,3 +237,38 @@ def test_observer_failure_drains_child_without_retaining_raw_output() -> None:
 
     assert isinstance(error.value.__cause__, OSError)
     assert observer.lines == []
+
+
+def test_protocol_runner_preserves_stdout_json_and_streams_only_stderr() -> None:
+    observer = RecordingObserver()
+
+    result = run_protocol_command(
+        [
+            "python3.12",
+            "-c",
+            "import json,sys; "
+            "print('progress-one', file=sys.stderr, flush=True); "
+            "print(json.dumps({'schema_version': 1}), flush=True); "
+            "print('progress-two', file=sys.stderr, flush=True)",
+        ],
+        observer=observer,
+    )
+
+    assert json.loads(result.stdout) == {"schema_version": 1}
+    assert "progress-one" not in result.stdout
+    assert observer.stderr_lines == ["progress-one\n", "progress-two\n"]
+    assert result.stdout_truncated is False
+
+
+def test_protocol_runner_marks_oversized_stdout_as_truncated() -> None:
+    result = run_protocol_command(
+        [
+            "python3.12",
+            "-c",
+            "import os; os.write(1, b'x' * (1024 * 1024 + 1))",
+        ],
+        observer=RecordingObserver(),
+    )
+
+    assert result.stdout_truncated is True
+    assert len(result.stdout.encode("utf-8")) <= 1024 * 1024

@@ -12,7 +12,13 @@ from amd_ai.installer.actions import (
     ProductionInstallerActions,
     prepare_plan_payload,
 )
+from amd_ai.installer.progress import (
+    ProgressMode,
+    StderrCommandObserver,
+    sanitize_output,
+)
 from amd_ai.installer.state import stage_input_digest
+from amd_ai.runner import SubprocessRunner
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,6 +27,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--memory-gib", type=_positive_int)
     parser.add_argument("--expected-plan-digest")
     parser.add_argument("--include-docker-group", action="store_true")
+    parser.add_argument(
+        "--progress-mode",
+        choices=tuple(mode.value for mode in ProgressMode),
+        default=ProgressMode.QUIET.value,
+    )
     parser.add_argument("operation", choices=("plan", "apply", "verify"))
     return parser
 
@@ -31,7 +42,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("privileged-host: root is required", file=sys.stderr)
         return 2
     try:
-        actions = ProductionInstallerActions(effective_uid=0)
+        progress_mode = ProgressMode(args.progress_mode)
+        observer = StderrCommandObserver(
+            mode=progress_mode,
+            stderr=sys.stderr,
+        )
+        actions = ProductionInstallerActions(
+            effective_uid=0,
+            runner=SubprocessRunner(observer=observer),
+            command_observer=observer,
+            progress_mode=progress_mode,
+        )
         if args.operation == "verify":
             if not args.target_user:
                 raise ActionError("verify mode requires --target-user")
@@ -94,7 +115,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     except Exception as error:
-        print(f"privileged-host: {error}", file=sys.stderr)
+        print(
+            "privileged-host: " + sanitize_output(str(error)),
+            file=sys.stderr,
+        )
         return 2
 
 

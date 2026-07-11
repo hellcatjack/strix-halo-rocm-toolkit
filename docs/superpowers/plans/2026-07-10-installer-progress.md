@@ -1444,7 +1444,7 @@ git commit -m "feat: stream Docker and package progress"
 - Modify: `tests/unit/installer/test_actions.py`
 - Modify: `tests/unit/installer/test_privileged.py`
 
-- [ ] **Step 1: Write failing protocol-channel tests**
+- [x] **Step 1: Write failing protocol-channel tests**
 
 Add a runner test that invokes Python writing `progress-one` and
 `progress-two` to stderr around one JSON object on stdout. Call
@@ -1471,7 +1471,7 @@ In helper tests, monkeypatch root actions so apply emits simulated command
 output. Assert helper stdout is exactly one parseable JSON line and all progress
 is on stderr. Assert direct invocation without `--progress-mode` is quiet.
 
-- [ ] **Step 2: Run protocol tests and verify RED**
+- [x] **Step 2: Run protocol tests and verify RED**
 
 ```bash
 PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
@@ -1484,7 +1484,7 @@ PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
 Expected: failures show the privileged helper still captures both streams with
 `subprocess.run` and has no progress-mode channel contract.
 
-- [ ] **Step 3: Add stderr-only protocol command execution**
+- [x] **Step 3: Add stderr-only protocol command execution**
 
 Implement this wrapper in `runner.py` by reusing the concurrent pipe engine:
 
@@ -1509,7 +1509,7 @@ Unobserved stdout must be captured exactly for JSON parsing. Observed stderr is
 sanitized before terminal/log/tail storage. Set the truncation flag instead of
 silently accepting oversized protocol output.
 
-- [ ] **Step 4: Add a helper stderr command observer**
+- [x] **Step 4: Add a helper stderr command observer**
 
 Implement `StderrCommandObserver(mode, stderr)` in `progress.py`. It applies the
 same sanitizer and secret tracking as `InstallerProgress`, maps both child
@@ -1517,7 +1517,7 @@ streams to helper stderr, suppresses live lines in quiet mode, and emits
 redacted `COMMAND` lines only in verbose mode. It never opens a log; the parent
 reporter logs the helper's stderr.
 
-- [ ] **Step 5: Replace privileged `subprocess.run` with the protocol runner**
+- [x] **Step 5: Replace privileged `subprocess.run` with the protocol runner**
 
 Replace the `sudo_run` constructor argument with:
 
@@ -1535,7 +1535,7 @@ direct action callers while remaining terminal-silent. Reject nonzero status,
 truncated stdout, and any `json.loads` failure. `json.loads` remains
 intentionally strict about extra non-whitespace before or after the object.
 
-- [ ] **Step 6: Configure root helper commands to stderr only**
+- [x] **Step 6: Configure root helper commands to stderr only**
 
 Add `--progress-mode` choices to the helper parser with default `quiet`. Create
 `StderrCommandObserver`, then construct:
@@ -1556,12 +1556,12 @@ actions = ProductionInstallerActions(
 Keep the final `json.dumps(...)` as the only stdout write. Errors remain one
 sanitized stderr line and exit code 2.
 
-- [ ] **Step 7: Run protocol tests and verify GREEN**
+- [x] **Step 7: Run protocol tests and verify GREEN**
 
 Run the command from Step 2. Expected: all tests pass; helper stdout is strict
 JSON and long root command output reaches only the parent's stderr observer.
 
-- [ ] **Step 8: Commit privileged channel separation**
+- [x] **Step 8: Commit privileged channel separation**
 
 ```bash
 git add src/amd_ai/runner.py src/amd_ai/installer/progress.py \

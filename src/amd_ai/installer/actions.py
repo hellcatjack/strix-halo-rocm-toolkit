@@ -6,6 +6,7 @@ import pwd
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -35,6 +36,11 @@ from amd_ai.installer.models import (
     StageResult,
     StableRelease,
 )
+from amd_ai.installer.progress import (
+    ProgressMode,
+    StderrCommandObserver,
+    sanitize_output,
+)
 from amd_ai.installer.release import (
     ReleaseDocker,
     VerifiedReleaseImages,
@@ -59,7 +65,14 @@ from amd_ai.project.runtime import (
     read_mem_total_kib,
 )
 from amd_ai.report import Finding, Report, Severity, Status
-from amd_ai.runner import CommandObserver, Runner, SubprocessRunner
+from amd_ai.runner import (
+    CommandObservationError,
+    CommandObserver,
+    CommandResult,
+    Runner,
+    SubprocessRunner,
+    run_protocol_command,
+)
 
 
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
@@ -125,7 +138,8 @@ class ProductionInstallerActions:
         release_docker: ReleaseDocker | None = None,
         effective_uid: int | None = None,
         non_interactive: bool = False,
-        sudo_run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        privileged_run: Callable[..., CommandResult] = run_protocol_command,
+        progress_mode: ProgressMode = ProgressMode.DEFAULT,
         toolkit_root: Path | None = None,
     ) -> None:
         if not docker_prefix or any(
@@ -145,7 +159,8 @@ class ProductionInstallerActions:
             os.geteuid() if effective_uid is None else effective_uid
         )
         self.non_interactive = non_interactive
-        self.sudo_run = sudo_run
+        self.privileged_run = privileged_run
+        self.progress_mode = ProgressMode(progress_mode)
         self.toolkit_root = (
             Path(__file__).resolve().parents[3]
             if toolkit_root is None
@@ -356,6 +371,8 @@ class ProductionInstallerActions:
                 "python3.12",
                 "-m",
                 "amd_ai.installer.privileged",
+                "--progress-mode",
+                self.progress_mode.value,
             )
         )
         return command
@@ -363,27 +380,38 @@ class ProductionInstallerActions:
     def _run_sudo_helper(
         self, command: list[str], *, operation: str
     ) -> dict[str, object]:
+        observer = self.command_observer or StderrCommandObserver(
+            mode=ProgressMode.QUIET,
+            stderr=sys.stderr,
+        )
         try:
-            result = self.sudo_run(
-                command,
-                check=False,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except (OSError, subprocess.SubprocessError) as error:
+            result = self.privileged_run(command, observer=observer)
+        except (
+            OSError,
+            subprocess.SubprocessError,
+            CommandObservationError,
+        ) as error:
             raise ActionError(f"cannot run privileged {operation}: {error}") from error
+        evidence = sanitize_output(result.stderr).strip() or "no stderr output"
         if result.returncode != 0:
-            evidence = result.stderr.strip() or result.stdout.strip() or "no output"
             raise ActionError(f"privileged {operation} failed: {evidence}")
+        if result.stdout_truncated:
+            raise ActionError(
+                f"privileged {operation} returned truncated JSON; "
+                f"stderr: {evidence}"
+            )
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError as error:
             raise ActionError(
-                f"privileged {operation} returned invalid JSON"
+                f"privileged {operation} returned invalid JSON; "
+                f"stderr: {evidence}"
             ) from error
         if not isinstance(payload, dict):
-            raise ActionError(f"privileged {operation} result is not an object")
+            raise ActionError(
+                f"privileged {operation} result is not an object; "
+                f"stderr: {evidence}"
+            )
         return payload
 
     def host_verify(

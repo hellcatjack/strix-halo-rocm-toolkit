@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 from collections import namedtuple
@@ -19,12 +20,37 @@ from amd_ai.installer.actions import (
 )
 from amd_ai.installer.release import load_stable_release
 from amd_ai.installer.state import stage_input_digest
-from amd_ai.runner import CommandResult
+from amd_ai.runner import CommandResult, CommandStream
 from tests.unit.host.fakes import healthy_snapshot
 from tests.unit.installer.fakes import FakeReleaseDocker
 
 
 RELEASE_FIXTURE = Path("tests/fixtures/releases/stable.json")
+
+
+class RecordingCommandObserver:
+    def __init__(self, terminal: io.StringIO | None = None) -> None:
+        self.terminal = terminal
+        self.stderr_lines: list[str] = []
+
+    def command_started(
+        self, args, *, live, environment=None
+    ) -> None:
+        del args, live, environment
+
+    def command_output(
+        self, stream: CommandStream, text: str
+    ) -> str:
+        if stream is CommandStream.STDERR:
+            self.stderr_lines.append(text)
+        if self.terminal is not None:
+            self.terminal.write(text)
+        return text
+
+    def command_finished(
+        self, result: CommandResult, *, live: bool
+    ) -> None:
+        del result, live
 
 
 def test_host_plan_uses_existing_probe_and_prepare_policy(
@@ -337,15 +363,20 @@ def test_nonroot_host_plan_is_recreated_by_audited_sudo_helper() -> None:
     )
     captured: list[tuple[str, ...]] = []
 
-    def sudo_run(argv, **kwargs):
-        del kwargs
+    observer = RecordingCommandObserver()
+
+    def privileged_run(argv, *, observer):
         captured.append(tuple(argv))
-        return subprocess.CompletedProcess(argv, 0, response, "")
+        stderr = observer.command_output(
+            CommandStream.STDERR, "helper-progress\n"
+        )
+        return CommandResult(tuple(argv), 0, response, stderr)
 
     result = ProductionInstallerActions(
         effective_uid=1000,
         non_interactive=True,
-        sudo_run=sudo_run,
+        privileged_run=privileged_run,
+        command_observer=observer,
     ).host_plan(target_user="developer")
 
     assert result.snapshot is None
@@ -353,7 +384,10 @@ def test_nonroot_host_plan_is_recreated_by_audited_sudo_helper() -> None:
     assert result.plan_digest == digest
     assert captured[0][:3] == ("sudo", "-n", "--")
     assert "amd_ai.installer.privileged" in captured[0]
+    progress_index = captured[0].index("--progress-mode")
+    assert captured[0][progress_index + 1] == "default"
     assert captured[0][-3:] == ("--target-user", "developer", "plan")
+    assert observer.stderr_lines == ["helper-progress\n"]
 
 
 def test_nonroot_host_apply_passes_only_digest_and_never_reboot() -> None:
@@ -372,8 +406,8 @@ def test_nonroot_host_apply_passes_only_digest_and_never_reboot() -> None:
     )
     captured: list[tuple[str, ...]] = []
 
-    def sudo_run(argv, **kwargs):
-        del kwargs
+    def privileged_run(argv, *, observer):
+        del observer
         captured.append(tuple(argv))
         payload = {
             "facts": {
@@ -385,12 +419,12 @@ def test_nonroot_host_apply_passes_only_digest_and_never_reboot() -> None:
             },
             "schema_version": 1,
         }
-        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+        return CommandResult(tuple(argv), 0, json.dumps(payload), "")
 
     result = ProductionInstallerActions(
         effective_uid=1000,
         non_interactive=True,
-        sudo_run=sudo_run,
+        privileged_run=privileged_run,
     ).host_apply(host_plan, include_docker_group=False)
 
     assert result.facts["reboot_required"] is True
@@ -411,11 +445,11 @@ def test_nonroot_host_verify_uses_privileged_read_only_helper() -> None:
     }
     captured: list[tuple[str, ...]] = []
 
-    def sudo_run(argv, **kwargs):
-        del kwargs
+    def privileged_run(argv, *, observer):
+        del observer
         captured.append(tuple(argv))
-        return subprocess.CompletedProcess(
-            argv,
+        return CommandResult(
+            tuple(argv),
             0,
             json.dumps({"report": report, "schema_version": 1}),
             "",
@@ -423,10 +457,50 @@ def test_nonroot_host_verify_uses_privileged_read_only_helper() -> None:
 
     result = ProductionInstallerActions(
         effective_uid=1000,
-        sudo_run=sudo_run,
+        privileged_run=privileged_run,
     ).host_verify(target_user="developer")
 
     assert result.status.value == "pass"
     assert captured[0][-1] == "verify"
     assert captured[0][captured[0].index("--target-user") + 1] == "developer"
     assert "apply" not in captured[0]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stdout_truncated"),
+    [
+        ("not-json secret-protocol-data", False),
+        ('{"schema_version":1}\nextra secret-protocol-data', False),
+        ('{"schema_version":1}', True),
+    ],
+)
+def test_privileged_protocol_rejects_polluted_or_truncated_stdout(
+    stdout: str,
+    stdout_truncated: bool,
+) -> None:
+    terminal = io.StringIO()
+    observer = RecordingCommandObserver(terminal)
+
+    def privileged_run(argv, *, observer):
+        stderr = observer.command_output(
+            CommandStream.STDERR, "bounded helper evidence\n"
+        )
+        return CommandResult(
+            tuple(argv),
+            0,
+            stdout,
+            stderr,
+            stdout_truncated=stdout_truncated,
+        )
+
+    production = ProductionInstallerActions(
+        effective_uid=1000,
+        privileged_run=privileged_run,
+        command_observer=observer,
+    )
+
+    with pytest.raises(ActionError) as error:
+        production.host_plan(target_user="developer")
+
+    assert "bounded helper evidence" in str(error.value)
+    assert "secret-protocol-data" not in terminal.getvalue()

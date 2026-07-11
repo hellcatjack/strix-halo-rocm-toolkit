@@ -205,6 +205,22 @@ def run_observed_command(
     )
 
 
+def run_protocol_command(
+    args: Sequence[str],
+    *,
+    observer: CommandObserver | None,
+) -> CommandResult:
+    return run_observed_command(
+        args,
+        observer=observer,
+        check=False,
+        observe_stdout=False,
+        observe_stderr=True,
+        stdout_limit=1024 * 1024,
+        stderr_limit=DEFAULT_STREAM_LIMIT,
+    )
+
+
 class _BoundedTextBuffer:
     def __init__(self, limit: int) -> None:
         if limit <= 0:

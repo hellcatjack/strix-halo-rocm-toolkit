@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from amd_ai.installer import progress as progress_module
 from amd_ai.installer.progress import (
     HeartbeatSchedule,
     InstallerProgress,
@@ -25,7 +26,7 @@ from amd_ai.installer.models import (
     InstallMode,
     InstallStage,
 )
-from amd_ai.runner import CommandStream
+from amd_ai.runner import CommandResult, CommandStream
 
 
 @dataclass
@@ -102,9 +103,10 @@ def test_session_log_is_private_and_rejects_collisions(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "video-lab"
-    wall_clock = lambda: datetime(
-        2026, 7, 10, 14, 25, 33, tzinfo=UTC
-    )
+
+    def wall_clock() -> datetime:
+        return datetime(2026, 7, 10, 14, 25, 33, tzinfo=UTC)
+
     log = SessionLog.open(
         project_dir=project,
         log_root=tmp_path / "state" / "logs",
@@ -376,6 +378,52 @@ def test_reporter_redacts_environment_and_url_secrets_from_every_sink(
     assert "<redacted>" in rendered
     assert "hf_private_value" not in rendered
     assert "ghp_private" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("mode", "command_visible", "output_visible"),
+    [
+        (ProgressMode.DEFAULT, False, True),
+        (ProgressMode.VERBOSE, True, True),
+        (ProgressMode.QUIET, False, False),
+    ],
+)
+def test_stderr_command_observer_preserves_protocol_channel_and_modes(
+    mode: ProgressMode,
+    command_visible: bool,
+    output_visible: bool,
+) -> None:
+    stderr = io.StringIO()
+    observer = progress_module.StderrCommandObserver(
+        mode=mode, stderr=stderr
+    )
+    command = (
+        "apt-get",
+        "install",
+        "HF_TOKEN=hf_private",
+    )
+    observer.command_started(
+        command,
+        live=True,
+        environment={"HF_TOKEN": "hf_private"},
+    )
+    first = observer.command_output(
+        CommandStream.STDOUT, "installing hf_private\n"
+    )
+    second = observer.command_output(
+        CommandStream.STDERR, "warning hf_private\n"
+    )
+    observer.command_finished(
+        CommandResult(command, 0, first, second), live=True
+    )
+
+    rendered = stderr.getvalue()
+    assert ("COMMAND" in rendered) is command_visible
+    assert ("installing" in rendered) is output_visible
+    assert ("warning" in rendered) is output_visible
+    assert "hf_private" not in rendered
+    assert "hf_private" not in first
+    assert "hf_private" not in second
 
 
 def test_heartbeat_worker_stops_before_pass(tmp_path: Path) -> None:

@@ -888,6 +888,65 @@ class PromptProgressAdapter:
         pass
 
 
+class StderrCommandObserver:
+    def __init__(
+        self,
+        *,
+        mode: ProgressMode,
+        stderr: TextIO,
+    ) -> None:
+        self.mode = ProgressMode(mode)
+        self._stderr = stderr
+        self._lock = threading.Lock()
+        self._command_secrets: set[str] = set()
+
+    def command_started(
+        self,
+        args: tuple[str, ...],
+        *,
+        live: bool,
+        environment: Mapping[str, str] | None = None,
+    ) -> None:
+        secrets = _command_secret_values(args, environment)
+        with self._lock:
+            self._command_secrets = secrets
+            if self.mode is not ProgressMode.VERBOSE:
+                return
+            command = sanitize_output(
+                shlex.join(args), secret_values=secrets
+            )
+            disposition = "live" if live else "captured"
+            self._write_locked(f"COMMAND  [{disposition}] {command}\n")
+
+    def command_output(self, stream: CommandStream, text: str) -> str:
+        del stream
+        with self._lock:
+            rendered = sanitize_output(
+                text, secret_values=self._command_secrets
+            )
+            if self.mode is not ProgressMode.QUIET and rendered:
+                self._write_locked(rendered)
+                if not rendered.endswith("\n"):
+                    self._write_locked("\n")
+            return rendered
+
+    def command_finished(
+        self, result: CommandResult, *, live: bool
+    ) -> None:
+        del result, live
+        with self._lock:
+            self._command_secrets.clear()
+
+    def _write_locked(self, value: str) -> None:
+        try:
+            self._stderr.write(value)
+            self._stderr.flush()
+        except OSError as error:
+            raise ProgressError(
+                f"cannot write privileged progress: {error}"
+            ) from error
+
+
 def _command_secret_values(
     args: Sequence[str], environment: Mapping[str, str] | None
 ) -> set[str]:
