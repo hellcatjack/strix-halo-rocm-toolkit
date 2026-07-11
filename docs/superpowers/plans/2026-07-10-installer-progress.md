@@ -1579,7 +1579,7 @@ git commit -m "feat: stream privileged progress safely"
 - Modify: `tests/cli/test_installer_commands.py`
 - Modify: `tests/cli/test_installer_resume.py`
 
-- [ ] **Step 1: Write failing CLI flag and wiring tests**
+- [x] **Step 1: Write failing CLI flag and wiring tests**
 
 Add parser tests:
 
@@ -1598,7 +1598,7 @@ is passed to `InstallerWorkflow`, `SubprocessRunner(observer=...)`, and
 `ProductionInstallerActions(command_observer=...)`, and that quiet/verbose map
 to the exact `ProgressMode` enum.
 
-- [ ] **Step 2: Add fixture CLI progress and private-log regressions**
+- [x] **Step 2: Add fixture CLI progress and private-log regressions**
 
 Extend `run_install` with progress flags. For a healthy container fixture,
 assert default stdout contains `PLAN`, `[1/8]`, `START`, `PASS`, `SUMMARY`, and
@@ -1618,7 +1618,7 @@ Update the implicit-state assertion from the old informational line to:
 assert f"状态={selected}（per-project）" in second.stdout
 ```
 
-- [ ] **Step 3: Run CLI tests and verify RED**
+- [x] **Step 3: Run CLI tests and verify RED**
 
 ```bash
 PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
@@ -1629,7 +1629,7 @@ PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
 Expected: parser and integration tests fail because CLI reporter construction
 and output flags are not wired.
 
-- [ ] **Step 4: Add CLI flags and construct one dependency graph**
+- [x] **Step 4: Add CLI flags and construct one dependency graph**
 
 Create a mutually exclusive argument group on the `install` parser. In
 `_install_command`, map flags to `ProgressMode`, then construct dependencies in
@@ -1663,12 +1663,12 @@ rendering. Preserve `WorkflowResult.message` and exit codes for Python callers.
 `install.sh` already forwards unknown arguments unchanged; keep and test that
 behavior rather than adding shell parsing.
 
-- [ ] **Step 5: Run CLI tests and verify GREEN**
+- [x] **Step 5: Run CLI tests and verify GREEN**
 
 Run the command from Step 3. Expected: all CLI tests pass with deterministic
 line-oriented events and private logs under the fixture HOME.
 
-- [ ] **Step 6: Commit CLI progress integration**
+- [x] **Step 6: Commit CLI progress integration**
 
 ```bash
 git add src/amd_ai/cli.py tests/cli/test_installer_commands.py \

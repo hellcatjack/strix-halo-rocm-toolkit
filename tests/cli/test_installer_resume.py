@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -52,6 +53,7 @@ def run_install(
     state: Path | None,
     project: Path,
     mode: str,
+    progress: tuple[str, ...] = (),
     extra: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     arguments = [
@@ -72,6 +74,7 @@ def run_install(
     ]
     if state is not None:
         arguments.extend(("--state-path", str(state)))
+    arguments.extend(progress)
     arguments.extend(extra)
     return subprocess.run(
         arguments,
@@ -101,6 +104,19 @@ def test_real_install_script_completes_fixture_container_mode(
     )
 
     assert result.returncode == 0, result.stderr
+    assert all(
+        token in result.stdout
+        for token in ("PLAN", "[1/8]", "START", "PASS", "SUMMARY")
+    )
+    log_paths = _terminal_log_paths(result.stdout)
+    assert len(log_paths) == 2
+    assert log_paths[0] == log_paths[1]
+    log_path = log_paths[0]
+    assert log_path.is_relative_to(home.resolve())
+    assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+    log = log_path.read_text(encoding="utf-8")
+    assert log.count(" stdout START ") == 8
+    assert log.count(" stdout PASS ") == 8
     payload = json.loads(state.read_text(encoding="utf-8"))
     assert payload["current_stage"] == "COMPLETE"
     assert (project / "amd-ai-project.toml").is_file()
@@ -115,6 +131,57 @@ def test_real_install_script_completes_fixture_container_mode(
         "initialize_project",
         "verify_project",
     ]
+    calls_before = (fixture / "calls.log").read_text(encoding="utf-8")
+
+    completed = run_install(
+        home=home,
+        fixture=fixture,
+        state=state,
+        project=project,
+        mode="container",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.count("SKIP") == 8
+    assert (fixture / "calls.log").read_text(encoding="utf-8") == calls_before
+
+    quiet = run_install(
+        home=home,
+        fixture=fixture,
+        state=state,
+        project=project,
+        mode="container",
+        progress=("--quiet",),
+    )
+
+    assert quiet.returncode == 0, quiet.stderr
+    assert "SUMMARY" in quiet.stdout and "LOG" in quiet.stdout
+    assert all(
+        token not in quiet.stdout
+        for token in ("PLAN", "START", "WAIT", "PASS")
+    )
+    assert (fixture / "calls.log").read_text(encoding="utf-8") == calls_before
+
+
+def test_real_install_verbose_reports_stage_identity_and_debug(
+    tmp_path: Path,
+) -> None:
+    fixture = make_fixture(tmp_path, "container-healthy.json")
+    home = tmp_path / "home"
+
+    result = run_install(
+        home=home,
+        fixture=fixture,
+        state=tmp_path / "verbose-state.json",
+        project=tmp_path / "verbose-project",
+        mode="container",
+        progress=("--verbose",),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "（BOOTSTRAP）" in result.stdout
+    assert "DEBUG" in result.stdout
+    assert "manifest_digest=sha256:" in result.stdout
 
 
 def test_full_fixture_resumes_only_after_boot_id_changes(
@@ -271,7 +338,7 @@ def test_real_install_implicitly_isolates_second_project_from_legacy_state(
 
     selected = project_state_path(second_project, legacy)
     assert second.returncode == 0, second.stderr
-    assert f"installer state (project): {selected}" in second.stdout
+    assert f"状态={selected}（per-project）" in second.stdout
     assert legacy.read_bytes() == legacy_before
     assert selected.is_file()
     assert (second_project / "amd-ai-project.toml").is_file()
@@ -284,4 +351,12 @@ def test_real_install_implicitly_isolates_second_project_from_legacy_state(
         "verify_torch_image",
         "initialize_project",
         "verify_project",
+    ]
+
+
+def _terminal_log_paths(output: str) -> list[Path]:
+    return [
+        Path(line.split(maxsplit=1)[1]).resolve()
+        for line in output.splitlines()
+        if line.startswith("LOG")
     ]

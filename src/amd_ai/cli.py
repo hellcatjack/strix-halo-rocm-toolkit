@@ -25,7 +25,7 @@ from amd_ai.doctor.repair import (
     plan_repair,
 )
 from amd_ai.host.apply import ApplyError, ApplyRefused, execute_plan
-from amd_ai.host.models import HostSnapshot, PlannedAction, PreparePlan
+from amd_ai.host.models import HostSnapshot, PreparePlan
 from amd_ai.host.policy import evaluate_preflight
 from amd_ai.host.prepare import (
     HostPlanningError,
@@ -67,6 +67,10 @@ from amd_ai.installer.prompts import (
     PromptError,
     TerminalPrompts,
 )
+from amd_ai.installer.progress import (
+    InstallerProgress,
+    ProgressMode,
+)
 from amd_ai.installer.release import (
     ReleaseError,
     load_stable_release,
@@ -74,10 +78,8 @@ from amd_ai.installer.release import (
 )
 from amd_ai.installer.workflow import InstallerWorkflow
 from amd_ai.overlay.models import (
-    PROTECTED_DISTRIBUTIONS,
     OverlayError,
     OverlayPaths,
-    ProtectedComponent,
     ProtectedProfile,
 )
 from amd_ai.overlay.transaction import TransactionError, initialize_overlay
@@ -123,6 +125,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     install = subparsers.add_parser("install")
     install.add_argument("--mode", choices=("full", "container"))
+    progress = install.add_mutually_exclusive_group()
+    progress.add_argument("--verbose", action="store_true")
+    progress.add_argument("--quiet", action="store_true")
     install.add_argument("--non-interactive", action="store_true")
     install.add_argument("--dry-run", action="store_true")
     install.add_argument("--project-dir", type=Path)
@@ -481,6 +486,14 @@ def _install_command(args: argparse.Namespace) -> int:
         state_path=state_path,
         state_path_explicit=args.state_path is not None,
     )
+    progress_mode = (
+        ProgressMode.VERBOSE
+        if args.verbose
+        else ProgressMode.QUIET
+        if args.quiet
+        else ProgressMode.DEFAULT
+    )
+    progress = InstallerProgress(mode=progress_mode)
     revision = _installer_source_revision(source_root)
     fixture_root = os.environ.get("AMD_AI_INSTALLER_FIXTURE_ROOT")
     workflow_arguments: dict[str, object] = {}
@@ -498,7 +511,11 @@ def _install_command(args: argparse.Namespace) -> int:
             docker_prefix = Docker.detect().prefix
         except BuildError:
             docker_prefix = ("docker",)
+        runner = SubprocessRunner(observer=progress)
         actions = ProductionInstallerActions(
+            runner=runner,
+            command_observer=progress,
+            progress_mode=progress_mode,
             non_interactive=args.non_interactive,
             docker_prefix=docker_prefix,
         )
@@ -508,12 +525,10 @@ def _install_command(args: argparse.Namespace) -> int:
         installer_version=__version__,
         installer_source_revision=revision,
         prompts=prompts,
+        progress=progress,
         **workflow_arguments,
     )
     result = workflow.run()
-    if result.message:
-        stream = sys.stderr if result.exit_code == 2 else sys.stdout
-        print(result.message, file=stream)
     return result.exit_code
 
 
