@@ -165,6 +165,27 @@ def test_local_image_builds_receive_command_observer(
     assert captured == [("base", observer), ("torch", observer)]
 
 
+def test_runtime_image_check_receives_command_observer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observer = object()
+    captured: dict[str, object] = {}
+
+    def image_check(*, observer, **kwargs):
+        captured.update(observer=observer, **kwargs)
+        return 0
+
+    monkeypatch.setattr(actions, "run_image_check", image_check)
+
+    result = ProductionInstallerActions(
+        command_observer=observer
+    ).verify_torch_image("torch:stable")
+
+    assert result.blocked is False
+    assert captured["observer"] is observer
+    assert captured["image"] == "torch:stable"
+
+
 def test_container_host_check_blocks_missing_docker_and_gpu_permissions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

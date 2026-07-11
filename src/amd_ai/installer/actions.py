@@ -518,6 +518,7 @@ class ProductionInstallerActions:
             metadata_only=False,
             runtime=True,
             json_path="-",
+            observer=self.command_observer,
         )
         return StageResult(
             facts={"image": image, "runtime_returncode": returncode},

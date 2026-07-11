@@ -1,3 +1,4 @@
+import io
 import json
 import sys
 from dataclasses import replace
@@ -20,6 +21,7 @@ from amd_ai.image.build import (
     select_prunable_images,
 )
 from amd_ai.image.profile import load_profile
+from amd_ai.installer.progress import InstallerProgress, ProgressMode
 from amd_ai.runner import CommandResult, CommandStream
 
 
@@ -295,6 +297,76 @@ def test_image_check_rejects_option_like_image_before_docker_detection(monkeypat
             runtime=False,
             json_path=None,
         )
+
+
+@pytest.mark.parametrize(
+    "progress_mode", (ProgressMode.DEFAULT, ProgressMode.QUIET)
+)
+def test_captured_image_check_keeps_json_out_of_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    progress_mode: ProgressMode,
+) -> None:
+    class FakeDocker:
+        prefix = ("docker",)
+
+    class CapturedRunner:
+        def __init__(self, *, observer) -> None:
+            self.observer = observer
+
+        def run(self, args, *, check=True, input_text=None):
+            del check, input_text
+            command = tuple(args)
+            self.observer.command_started(
+                command,
+                live=False,
+                environment={"HF_TOKEN": "private-value"},
+            )
+            result = CommandResult(
+                command,
+                0,
+                '{"status":"pass","HF_TOKEN":"private-value"}\n',
+                "probe warning\n",
+            )
+            self.observer.command_finished(result, live=False)
+            return result
+
+    monkeypatch.setattr(
+        build.Docker, "detect", classmethod(lambda cls: FakeDocker())
+    )
+    monkeypatch.setattr(build, "SubprocessRunner", CapturedRunner)
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    reporter = InstallerProgress(
+        mode=progress_mode,
+        stdout=stdout,
+        stderr=stderr,
+        log_root=tmp_path / "logs",
+        process_id=91,
+    )
+    reporter.open_session(tmp_path / "project")
+
+    returncode = build.run_image_check(
+        image="rocm-pytorch:test",
+        mode="torch",
+        metadata_only=False,
+        runtime=True,
+        json_path="-",
+        observer=reporter,
+    )
+    log_path = reporter.log_path
+    reporter.close()
+
+    assert returncode == 0
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue() == ""
+    assert log_path is not None
+    log = log_path.read_text(encoding="utf-8")
+    assert "[captured]" in log
+    assert "stdout_bytes=" in log
+    assert '"status":"pass"' not in log
+    assert "probe warning" not in log
+    assert "private-value" not in log
 
 
 def test_prune_preview_never_issues_a_mutating_docker_command(tmp_path, monkeypatch):

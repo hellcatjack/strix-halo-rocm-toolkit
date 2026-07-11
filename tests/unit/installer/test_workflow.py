@@ -14,7 +14,11 @@ from amd_ai.installer.models import (
     InstallOptions,
     InstallStage,
 )
-from amd_ai.installer.progress import InstallerProgress, ProgressMode
+from amd_ai.installer.progress import (
+    InstallerProgress,
+    ProgressError,
+    ProgressMode,
+)
 from amd_ai.installer.release import (
     ReleaseAcquisitionError,
     ReleaseIdentityError,
@@ -356,6 +360,40 @@ def test_failed_stage_reports_state_resume_and_log_without_checkpoint(
     )
 
 
+def test_incomplete_stage_starts_before_input_probe_failure(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+
+    def stage_inputs(stage, options, state):
+        del options, state
+        if stage is InstallStage.BOOTSTRAP:
+            raise RuntimeError("input probe failed")
+        return {}
+
+    actions.stage_inputs = stage_inputs  # type: ignore[method-assign]
+    terminal = io.StringIO()
+    progress = InstallerProgress(
+        mode=ProgressMode.DEFAULT,
+        stdout=terminal,
+        stderr=terminal,
+        log_root=tmp_path / "logs",
+        process_id=25,
+    )
+
+    result = installer_workflow(
+        tmp_path,
+        actions=actions,
+        progress=progress,
+    ).run()
+
+    assert result.exit_code == 2
+    output = terminal.getvalue()
+    assert output.index("START    [1/8]") < output.index("FAIL     [1/8]")
+    assert "input probe failed" in output
+    assert actions.calls == []
+
+
 def test_complete_rerun_reports_all_skips_and_summary(
     tmp_path: Path,
 ) -> None:
@@ -395,6 +433,46 @@ def test_log_creation_failure_runs_no_stage(tmp_path: Path) -> None:
     assert result.exit_code == 2
     assert "log" in result.message.lower()
     assert actions.calls == []
+
+
+def test_log_close_failure_has_no_false_success_and_uses_stderr_fallback(
+    tmp_path: Path,
+) -> None:
+    class CloseFailureProgress(InstallerProgress):
+        original_close = None
+
+        def open_session(self, project_dir: Path) -> None:
+            super().open_session(project_dir)
+            assert self._log is not None
+            self.original_close = self._log.close
+
+            def fail_close() -> None:
+                raise ProgressError("simulated log fsync failure")
+
+            self._log.close = fail_close  # type: ignore[method-assign]
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    progress = CloseFailureProgress(
+        mode=ProgressMode.DEFAULT,
+        stdout=stdout,
+        stderr=stderr,
+        log_root=tmp_path / "logs",
+        process_id=24,
+    )
+
+    result = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.healthy(),
+        progress=progress,
+    ).run()
+
+    assert result.exit_code == 2
+    assert "SUMMARY" not in stdout.getvalue()
+    assert "FAIL     installer progress reporting failed" in stderr.getvalue()
+    assert "simulated log fsync failure" in stderr.getvalue()
+    assert progress.original_close is not None
+    progress.original_close()
 
 
 def test_progress_mode_does_not_change_checkpoint_digests(

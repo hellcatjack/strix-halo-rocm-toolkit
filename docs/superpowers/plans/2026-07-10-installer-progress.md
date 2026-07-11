@@ -1772,7 +1772,7 @@ git commit -m "docs: prepare installer progress release"
 
 - Verify only; no planned source edits
 
-- [ ] **Step 1: Run strict checks on every changed Python file**
+- [x] **Step 1: Run strict checks on every changed Python file**
 
 ```bash
 uvx --from ruff==0.12.3 ruff check \
@@ -1796,7 +1796,7 @@ uvx --from ruff==0.12.3 ruff check \
 Expected: zero Ruff findings in changed files. Do not apply repository-wide
 cleanup for pre-existing F401, F541, or F811 findings outside this list.
 
-- [ ] **Step 2: Run the complete non-hardware suite and documentation checks**
+- [x] **Step 2: Run the complete non-hardware suite and documentation checks**
 
 ```bash
 PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest -m 'not hardware' -q
@@ -1813,7 +1813,7 @@ Expected: all non-hardware tests pass, Markdown and whitespace checks exit zero,
 and only intentional implementation-plan progress edits remain, if the plan is
 being checked off during execution.
 
-- [ ] **Step 3: Verify release identity without rebuilding images**
+- [x] **Step 3: Verify release identity without rebuilding images**
 
 ```bash
 PYTHONPATH=src bin/strix-halo-rocm release verify \
@@ -1832,7 +1832,7 @@ The manifest file SHA-256 remains
 `4226d04bf995c9c253c6a978f08bdbb9466ccd47119f967ebd39f0c08b7bfe2d`.
 Do not run image build, push, or release publish commands.
 
-- [ ] **Step 4: Exercise patch adoption and real local Docker safely**
+- [x] **Step 4: Exercise patch adoption and real local Docker safely**
 
 Record SHA-256 for the user's original
 `~/.local/state/strix-halo-rocm-toolkit/projects/video-lab-b9bb64878f63.json`

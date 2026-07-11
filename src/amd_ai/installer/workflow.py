@@ -226,6 +226,12 @@ class InstallerWorkflow:
         message = f"progress reporting failed: {progress_error}"
         if result.message:
             message = f"{result.message}; {message}"
+        fallback = getattr(self.progress, "fallback_failure", None)
+        if fallback is not None:
+            try:
+                fallback(message)
+            except Exception:
+                pass
         return WorkflowResult(
             2,
             result.state,
@@ -324,8 +330,9 @@ class InstallerWorkflow:
             position = StagePosition(stage, index + 1, len(order))
             self._current_position = position
             self.progress.stage_candidate(position)
-            inputs = self._stage_inputs(stage, state)
-            if validate_completed_stage(state, stage, inputs):
+            if stage.value in state.completed_stage_input_digests:
+                inputs = self._stage_inputs(stage, state)
+                validate_completed_stage(state, stage, inputs)
                 self.progress.stage_skipped(position)
                 continue
             if state.current_stage is not stage:
@@ -334,6 +341,7 @@ class InstallerWorkflow:
                     f"next={stage.value}"
                 )
             self.progress.stage_started(position)
+            inputs = self._stage_inputs(stage, state)
             requirement = self._disk_requirement(stage, state)
             if requirement is not None:
                 self._report_disk_requirement(requirement)

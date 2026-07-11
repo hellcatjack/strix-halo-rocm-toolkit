@@ -210,6 +210,8 @@ class ProgressReporter(Protocol):
         position: StagePosition | None,
     ) -> None: ...
 
+    def fallback_failure(self, message: str) -> None: ...
+
     def close(self) -> None: ...
 
 
@@ -424,6 +426,7 @@ class InstallerProgress:
     def stage_candidate(self, position: StagePosition) -> None:
         with self._lock:
             self._current_position = position
+            self._stage_started_at = None
 
     def stage_skipped(self, position: StagePosition) -> None:
         self.stage_candidate(position)
@@ -554,6 +557,7 @@ class InstallerProgress:
         del exit_code
         self._stop_heartbeat()
         active = position or self._current_position
+        events: list[tuple[str, str, bool]] = []
         if outcome is ProgressOutcome.SUCCESS:
             project = str(project_dir) if project_dir is not None else "未知"
             result_detail = (
@@ -561,50 +565,72 @@ class InstallerProgress:
                 if message and message != "installation complete"
                 else ""
             )
-            self._emit(
-                "SUMMARY",
-                f"安装完成，用时 {self._session_duration()}，"
-                f"项目={project}，状态={state_path}{result_detail}",
-                force_terminal=True,
+            events.append(
+                (
+                    "SUMMARY",
+                    f"安装完成，用时 {self._session_duration()}，"
+                    f"项目={project}，状态={state_path}{result_detail}",
+                    False,
+                )
             )
-            self._emit_final_log()
-            return
-
-        if outcome is ProgressOutcome.ACTION:
+        elif outcome is ProgressOutcome.ACTION:
             subject = self._failure_subject(active, include_duration=False)
-            self._emit(
-                "ACTION",
-                f"{subject}：{message or '需要操作员处理'}",
-                force_terminal=True,
+            events.append(
+                (
+                    "ACTION",
+                    f"{subject}：{message or '需要操作员处理'}",
+                    True,
+                )
             )
-            self._emit("STATE", str(state_path), force_terminal=True)
+            events.append(("STATE", str(state_path), True))
             if "manual reboot" in message.casefold():
                 resume = "sudo reboot；重启后重新执行同一条 install 命令"
             else:
                 resume = "完成上述操作后重新执行同一条 install 命令"
-            self._emit("RESUME", resume, force_terminal=True)
-            self._emit_final_log(error_stream=True)
-            return
+            events.append(("RESUME", resume, True))
+        else:
+            prefix = (
+                "BLOCKED"
+                if outcome is ProgressOutcome.BLOCKED
+                else "FAIL"
+            )
+            events.append(
+                (
+                    prefix,
+                    self._failure_subject(active, include_duration=True),
+                    True,
+                )
+            )
+            events.extend(
+                ("CAUSE", line, True)
+                for line in self._failure_lines(message)
+            )
+            events.append(("STATE", str(state_path), True))
+            events.append(
+                (
+                    "RESUME",
+                    "修复问题后重新执行同一条 install 命令；"
+                    "已完成阶段不会重放",
+                    True,
+                )
+            )
+        path = self.log_path
+        if path is not None:
+            events.append(("LOG", str(path), outcome is not ProgressOutcome.SUCCESS))
+        self._emit_final_events(events)
 
-        prefix = (
-            "BLOCKED"
-            if outcome is ProgressOutcome.BLOCKED
-            else "FAIL"
+    def fallback_failure(self, message: str) -> None:
+        self._stop_heartbeat()
+        rendered = _truncate_utf8(
+            sanitize_output(message), FAILURE_CONTENT_BYTES
         )
-        self._emit(
-            prefix,
-            self._failure_subject(active, include_duration=True),
-            force_terminal=True,
-        )
-        for line in self._failure_lines(message):
-            self._emit("CAUSE", line, force_terminal=True)
-        self._emit("STATE", str(state_path), force_terminal=True)
-        self._emit(
-            "RESUME",
-            "修复问题后重新执行同一条 install 命令；已完成阶段不会重放",
-            force_terminal=True,
-        )
-        self._emit_final_log(error_stream=True)
+        with self._lock:
+            self._stderr.write(
+                "FAIL     installer progress reporting failed\n"
+            )
+            for line in rendered.splitlines() or ["unknown progress error"]:
+                self._stderr.write(f"CAUSE    {line}\n")
+            self._stderr.flush()
 
     def close(self) -> None:
         self._stop_heartbeat()
@@ -651,15 +677,39 @@ class InstallerProgress:
         selected.reverse()
         return (first, *selected)
 
-    def _emit_final_log(self, *, error_stream: bool = False) -> None:
-        path = self.log_path
-        if path is not None:
+    def _emit_final_events(
+        self, events: Sequence[tuple[str, str, bool]]
+    ) -> None:
+        for kind, message, is_error in events:
             self._emit(
-                "LOG",
-                str(path),
-                force_terminal=True,
-                error_stream=error_stream,
+                kind,
+                message,
+                terminal_enabled=False,
+                error_stream=is_error,
             )
+        self.close()
+        for kind, message, is_error in events:
+            self._emit_terminal_event(
+                kind,
+                message,
+                error_stream=is_error,
+            )
+
+    def _emit_terminal_event(
+        self,
+        kind: str,
+        message: str,
+        *,
+        error_stream: bool,
+    ) -> None:
+        with self._lock:
+            rendered = sanitize_output(
+                message, secret_values=self._command_secrets
+            )
+            target = self._stderr if error_stream else self._stdout
+            for line in rendered.splitlines() or [""]:
+                target.write(f"{kind:<8} {line}\n")
+            target.flush()
 
     def _emit(
         self,
@@ -669,6 +719,7 @@ class InstallerProgress:
         force_terminal: bool = False,
         quiet_visible: bool | None = None,
         error_stream: bool | None = None,
+        terminal_enabled: bool = True,
     ) -> None:
         if kind not in EVENT_KINDS:
             raise ProgressError(f"unsupported progress event: {kind}")
@@ -684,7 +735,7 @@ class InstallerProgress:
             stream_name = "stderr" if is_error else "stdout"
             if self._log is not None:
                 self._log.write(stream_name, kind, rendered)
-            visible = self._terminal_visible(
+            visible = terminal_enabled and self._terminal_visible(
                 kind,
                 force_terminal=force_terminal,
                 quiet_visible=quiet_visible,
@@ -883,6 +934,10 @@ class PromptProgressAdapter:
         if message:
             self._status_fn("CAUSE", message)
         self._status_fn("STATE", str(state_path))
+
+    def fallback_failure(self, message: str) -> None:
+        self._status_fn("FAIL", "installer progress reporting failed")
+        self._status_fn("CAUSE", message)
 
     def close(self) -> None:
         pass

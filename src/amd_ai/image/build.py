@@ -26,7 +26,9 @@ from amd_ai.image.lock import (
 from amd_ai.image.profile import ProfileError, TorchProfile, load_profile
 from amd_ai.runner import (
     CommandObserver,
+    CommandResult,
     CommandStream,
+    SubprocessRunner,
     run_observed_command,
 )
 
@@ -336,7 +338,8 @@ def build_rocm_python(
     assert image_id is not None
     if metadata_digest != image_id:
         raise BuildError("base image ID does not match its BuildKit metadata")
-    check = docker.capture(
+    check = _run_docker_command(
+        docker,
         (
             "run",
             "--rm",
@@ -347,9 +350,11 @@ def build_rocm_python(
             "--metadata-only",
             "--json",
             "-",
-        )
+        ),
+        observer=observer,
     )
-    print(check.stdout, end="")
+    if observer is None:
+        print(check.stdout, end="")
     return ROCM_PYTHON_TAG, image_id
 
 
@@ -416,7 +421,8 @@ def build_rocm_pytorch(
     if metadata_digest != image_id:
         raise BuildError("Torch image ID does not match its BuildKit metadata")
     _verify_profile_labels(docker, tag, profile)
-    check = docker.capture(
+    check = _run_docker_command(
+        docker,
         (
             "run",
             "--rm",
@@ -427,9 +433,11 @@ def build_rocm_pytorch(
             "--metadata-only",
             "--json",
             "-",
-        )
+        ),
+        observer=observer,
     )
-    print(check.stdout, end="")
+    if observer is None:
+        print(check.stdout, end="")
     return tag, image_id
 
 
@@ -485,6 +493,7 @@ def run_image_check(
     metadata_only: bool,
     runtime: bool,
     json_path: str | None,
+    observer: CommandObserver | None = None,
 ) -> int:
     if (
         not image
@@ -514,12 +523,17 @@ def run_image_check(
     if runtime:
         args.append("--runtime")
     args.extend(("--json", "-"))
-    result = docker.capture(args, check=False)
-    if json_path == "-" or json_path is None:
-        print(result.stdout, end="")
-    else:
+    result = _run_docker_command(
+        docker,
+        args,
+        observer=observer,
+        check=False,
+    )
+    if json_path not in {"-", None}:
         _write_text(Path(json_path), result.stdout)
-    if result.stderr:
+    elif observer is None:
+        print(result.stdout, end="")
+    if observer is None and result.stderr:
         print(result.stderr, file=sys.stderr, end="")
     return result.returncode
 
@@ -910,6 +924,35 @@ def _run_live(
             f"command failed ({result.returncode}): {' '.join(argv)}: "
             f"{evidence}"
         )
+
+
+def _run_docker_command(
+    docker: Docker,
+    args: Sequence[str],
+    *,
+    observer: CommandObserver | None,
+    check: bool = True,
+) -> CommandResult:
+    command = (*docker.prefix, *args)
+    if observer is not None:
+        result = SubprocessRunner(observer=observer).run(
+            list(command), check=False
+        )
+    else:
+        completed = docker.capture(args, check=False)
+        result = CommandResult(
+            command,
+            completed.returncode,
+            completed.stdout,
+            completed.stderr,
+        )
+    if check and result.returncode != 0:
+        evidence = result.stderr.strip() or result.stdout.strip() or "no output"
+        raise BuildError(
+            f"command failed ({result.returncode}): {' '.join(command)}: "
+            f"{evidence}"
+        )
+    return result
 
 
 def _completed(
