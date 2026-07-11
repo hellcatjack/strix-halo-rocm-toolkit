@@ -59,7 +59,7 @@ from amd_ai.project.runtime import (
     read_mem_total_kib,
 )
 from amd_ai.report import Finding, Report, Severity, Status
-from amd_ai.runner import Runner, SubprocessRunner
+from amd_ai.runner import CommandObserver, Runner, SubprocessRunner
 
 
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
@@ -119,6 +119,7 @@ class ProductionInstallerActions:
         self,
         *,
         runner: Runner | None = None,
+        command_observer: CommandObserver | None = None,
         root: Path = Path("/"),
         docker_prefix: Sequence[str] = ("docker",),
         release_docker: ReleaseDocker | None = None,
@@ -132,11 +133,13 @@ class ProductionInstallerActions:
             for value in docker_prefix
         ):
             raise ActionError("Docker command prefix is invalid")
-        self.runner = runner or SubprocessRunner()
+        self.runner = runner if runner is not None else SubprocessRunner()
+        self.command_observer = command_observer
         self.root = Path(root)
         self.docker_prefix = tuple(docker_prefix)
         self.release_docker = release_docker or AnonymousReleaseRegistry(
-            self.docker_prefix
+            self.docker_prefix,
+            runner=self.runner,
         )
         self.effective_uid = (
             os.geteuid() if effective_uid is None else effective_uid
@@ -458,11 +461,15 @@ class ProductionInstallerActions:
             source_root,
             expected_revision=installer_source_revision,
         )
-        base_reference, base_digest = build_rocm_python(repo_root=source)
+        base_reference, base_digest = build_rocm_python(
+            repo_root=source,
+            observer=self.command_observer,
+        )
         torch_reference, torch_digest = build_rocm_pytorch(
             profile_path=source / "profiles/torch/stable.env",
             allow_experimental=False,
             repo_root=source,
+            observer=self.command_observer,
         )
         validate_local_build_source(
             source,

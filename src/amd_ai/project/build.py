@@ -141,6 +141,7 @@ def project_build_argv(
         *docker_prefix,
         "buildx",
         "build",
+        "--progress=plain",
         "--load",
         "--platform",
         "linux/amd64",

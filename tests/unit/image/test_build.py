@@ -1,4 +1,6 @@
 import json
+import sys
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -18,6 +20,7 @@ from amd_ai.image.build import (
     select_prunable_images,
 )
 from amd_ai.image.profile import load_profile
+from amd_ai.runner import CommandResult, CommandStream
 
 
 def test_build_argv_uses_content_addressed_local_parent_and_named_context():
@@ -42,6 +45,7 @@ def test_build_argv_uses_content_addressed_local_parent_and_named_context():
     assert "--provenance=mode=max" in argv
     assert "--sbom=true" in argv
     assert "--load" in argv
+    assert argv.count("--progress=plain") == 1
     assert not any("repo.radeon.com" in argument for argument in argv)
 
 
@@ -77,6 +81,7 @@ def test_base_build_passes_only_pinned_images_and_source_metadata():
     assert "UBUNTU_BASE=ubuntu@sha256:" + "a" * 64 in argv
     assert "UV_IMAGE=ghcr.io/astral-sh/uv@sha256:" + "b" * 64 in argv
     assert "IMAGE_SOURCE=local" in argv
+    assert argv.count("--progress=plain") == 1
 
 
 def test_normal_builds_use_public_source_repository():
@@ -91,6 +96,90 @@ def test_normal_builds_use_public_source_repository():
     )
 
     assert f"IMAGE_SOURCE={IMAGE_SOURCE}" in argv
+
+
+def test_run_live_streams_output_to_command_observer(tmp_path: Path) -> None:
+    class RecordingObserver:
+        def __init__(self) -> None:
+            self.lines: list[tuple[CommandStream, str]] = []
+
+        def command_started(
+            self, args, *, live, environment=None
+        ) -> None:
+            del args, live, environment
+
+        def command_output(
+            self, stream: CommandStream, text: str
+        ) -> str:
+            self.lines.append((stream, text))
+            return text
+
+        def command_finished(
+            self, result: CommandResult, *, live: bool
+        ) -> None:
+            del result, live
+
+    observer = RecordingObserver()
+
+    build._run_live(
+        [sys.executable, "-c", "print('build-visible')"],
+        cwd=tmp_path,
+        observer=observer,
+    )
+
+    assert observer.lines == [
+        (CommandStream.STDOUT, "build-visible\n")
+    ]
+
+
+def test_locked_wheel_progress_exposes_filename_without_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stable = Path("profiles/torch/stable.env").resolve()
+    profile = replace(
+        load_profile(stable, allow_verified=True),
+        profile_id="experimental-progress",
+        status="experimental",
+    )
+
+    class StopDownload(RuntimeError):
+        pass
+
+    class RecordingObserver:
+        def __init__(self) -> None:
+            self.output: list[str] = []
+
+        def command_output(
+            self, stream: CommandStream, text: str
+        ) -> str:
+            assert stream is CommandStream.STDOUT
+            self.output.append(text)
+            return text
+
+    def stop_after_progress(
+        url, destination, expected_sha256, progress=None
+    ):
+        del url, destination, expected_sha256
+        assert progress is not None
+        progress(1024**3, 2 * 1024**3)
+        raise StopDownload
+
+    observer = RecordingObserver()
+    monkeypatch.setattr(build, "download", stop_after_progress)
+
+    with pytest.raises(StopDownload):
+        build._prepare_profile_artifacts(
+            profile=profile,
+            profile_path=stable,
+            repo_root=tmp_path,
+            stable=tmp_path / "not-stable.env",
+            observer=observer,
+        )
+
+    output = "".join(observer.output)
+    assert "下载 torch-2.9.1" in output
+    assert "1.00 GiB/2.00 GiB" in output
+    assert "https://" not in output
 
 
 def test_materialized_context_contains_only_profile_and_matching_lock(tmp_path):

@@ -5,7 +5,6 @@ import json
 import os
 import re
 import secrets
-import subprocess
 import tempfile
 from collections import Counter
 from collections.abc import Mapping
@@ -23,6 +22,7 @@ from amd_ai.installer.release import (
     load_stable_release,
     verify_release_image,
 )
+from amd_ai.runner import CommandResult, Runner, SubprocessRunner
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -179,10 +179,16 @@ class PublishRegistry(Protocol):
 
 
 class DockerPublishRegistry:
-    def __init__(self, docker_prefix: tuple[str, ...] = ("docker",)) -> None:
+    def __init__(
+        self,
+        docker_prefix: tuple[str, ...] = ("docker",),
+        *,
+        runner: Runner | None = None,
+    ) -> None:
         if not docker_prefix or any(not value for value in docker_prefix):
             raise PublishError("Docker command prefix is invalid")
         self.docker_prefix = tuple(docker_prefix)
+        self.runner = runner if runner is not None else SubprocessRunner()
 
     def tag(self, image_id: str, target: str) -> None:
         _require_image_id(image_id, "publication")
@@ -290,16 +296,9 @@ class DockerPublishRegistry:
     def _completed(
         self,
         args: tuple[str, ...],
-        *,
-        environment: Mapping[str, str] | None = None,
-    ) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(
-            (*self.docker_prefix, *args),
-            check=False,
-            env=None if environment is None else dict(environment),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+    ) -> CommandResult:
+        result = self.runner.run(
+            [*self.docker_prefix, *args], check=False
         )
         if result.returncode != 0:
             evidence = result.stderr.strip() or result.stdout.strip() or "no output"

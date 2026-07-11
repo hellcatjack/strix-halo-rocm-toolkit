@@ -62,6 +62,7 @@ def test_build_uses_content_addressed_parent_alias_and_labels():
     assert "org.amd-ai.project.fingerprint=" + "f" * 64 in argv
     assert "org.amd-ai.base.digest=" + parent in argv
     assert "--load" in argv
+    assert argv.count("--progress=plain") == 1
 
 
 def test_dockerignore_must_preserve_mandatory_storage_exclusions(tmp_path):

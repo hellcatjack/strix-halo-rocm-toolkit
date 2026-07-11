@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from amd_ai.image import lock
 from amd_ai.image.lock import (
     DownloadError,
     download,
@@ -13,6 +14,28 @@ from amd_ai.image.lock import (
     validate_wheelhouse_manifest,
     write_wheelhouse_manifest,
 )
+
+
+class ChunkedResponse:
+    def __init__(
+        self, chunks: list[bytes], *, content_length: int | None
+    ) -> None:
+        self._chunks = iter(chunks)
+        self.headers = (
+            {}
+            if content_length is None
+            else {"Content-Length": str(content_length)}
+        )
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        del exc_type, exc_value, traceback
+
+    def read(self, size: int) -> bytes:
+        del size
+        return next(self._chunks, b"")
 
 
 def test_hash_file_streams_and_returns_sha256(tmp_path):
@@ -70,6 +93,57 @@ def test_download_hash_mismatch_keeps_no_partial_or_destination(tmp_path, monkey
 
     assert not destination.exists()
     assert not destination.with_suffix(".part").exists()
+
+
+def test_download_reports_content_length_thresholds_and_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response = ChunkedResponse(
+        [b"abc", b"def", b"ghi", b"j"], content_length=10
+    )
+    monkeypatch.setattr(lock, "PROGRESS_INTERVAL_BYTES", 4, raising=False)
+    monkeypatch.setattr(lock.urllib.request, "urlopen", lambda *args, **kwargs: response)
+    observed: list[tuple[int, int | None]] = []
+
+    download(
+        "https://example.com/torch.whl",
+        tmp_path / "torch.whl",
+        progress=lambda downloaded, total: observed.append(
+            (downloaded, total)
+        ),
+    )
+
+    assert observed == [(0, 10), (6, 10), (9, 10), (10, 10)]
+
+
+def test_download_reports_unknown_total_and_skips_verified_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(lock, "PROGRESS_INTERVAL_BYTES", 4, raising=False)
+    response = ChunkedResponse([b"abcd", b"ef"], content_length=None)
+    monkeypatch.setattr(lock.urllib.request, "urlopen", lambda *args, **kwargs: response)
+    observed: list[tuple[int, int | None]] = []
+    destination = tmp_path / "torch.whl"
+
+    digest = download(
+        "https://example.com/torch.whl",
+        destination,
+        progress=lambda downloaded, total: observed.append(
+            (downloaded, total)
+        ),
+    )
+    assert observed == [(0, None), (4, None), (6, None)]
+
+    cached: list[tuple[int, int | None]] = []
+    download(
+        "https://example.com/torch.whl",
+        destination,
+        digest,
+        progress=lambda downloaded, total: cached.append(
+            (downloaded, total)
+        ),
+    )
+    assert cached == []
 
 
 def test_wheelhouse_manifest_detects_tampering(tmp_path):

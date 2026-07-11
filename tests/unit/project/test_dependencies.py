@@ -9,6 +9,7 @@ from amd_ai.project.dependencies import (
     render_torch_constraints,
     validate_project_lock,
 )
+from amd_ai.runner import is_live_command
 
 
 def test_constraints_pin_complete_verified_stack():
@@ -55,6 +56,7 @@ def test_project_lock_uses_parent_container_without_gpu_or_persistent_cache(tmp_
     assert parent in argv
     assert "/dev/kfd" not in argv and "/dev/dri" not in argv
     assert not any("HF_HOME" in value for value in argv)
+    assert is_live_command(argv) is True
 
 
 @pytest.mark.parametrize(

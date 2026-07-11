@@ -9,7 +9,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -17,6 +17,7 @@ from amd_ai.image.profile import COMPONENTS, ProfileError, load_profile
 
 
 CHUNK_SIZE = 8 * 1024 * 1024
+PROGRESS_INTERVAL_BYTES = 64 * 1024**2
 AMD_WHEEL_INDEX = "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/"
 MANIFEST_NAME = "wheelhouse-manifest.json"
 CHECKSUM_NAME = "wheelhouse.sha256"
@@ -39,6 +40,7 @@ def download(
     url: str,
     destination: Path,
     expected_sha256: str | None = None,
+    progress: Callable[[int, int | None], None] | None = None,
 ) -> str:
     if destination.is_file() and expected_sha256 is not None:
         if hash_file(destination) == expected_sha256:
@@ -53,8 +55,23 @@ def download(
         with urllib.request.urlopen(request, timeout=60) as response, partial.open(
             "wb"
         ) as output:
+            total = _response_content_length(response)
+            downloaded = 0
+            next_progress = PROGRESS_INTERVAL_BYTES
+            last_progress = -1
+            if progress is not None:
+                progress(0, total)
+                last_progress = 0
             while chunk := response.read(CHUNK_SIZE):
                 output.write(chunk)
+                downloaded += len(chunk)
+                if progress is not None and downloaded >= next_progress:
+                    progress(downloaded, total)
+                    last_progress = downloaded
+                    while downloaded >= next_progress:
+                        next_progress += PROGRESS_INTERVAL_BYTES
+            if progress is not None and downloaded != last_progress:
+                progress(downloaded, total)
             output.flush()
             os.fsync(output.fileno())
         digest = hash_file(partial)
@@ -69,6 +86,20 @@ def download(
         raise DownloadError(f"download failed for {url}: {error}") from error
     finally:
         partial.unlink(missing_ok=True)
+
+
+def _response_content_length(response: object) -> int | None:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    raw = headers.get("Content-Length")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
 
 
 def render_verified_profile(source_text: str, digests: Mapping[str, str]) -> str:

@@ -91,6 +91,54 @@ def test_release_pull_calls_exact_release_api(
     assert captured == {"release": release, "registry": docker}
 
 
+def test_default_release_registry_uses_installer_runner() -> None:
+    class Runner:
+        def run(self, args, *, check=True, input_text=None):
+            del check, input_text
+            command = tuple(args)
+            return CommandResult(command, 0, "", "")
+
+    runner = Runner()
+    production = ProductionInstallerActions(runner=runner)
+
+    assert isinstance(production.release_docker, AnonymousReleaseRegistry)
+    assert production.release_docker.runner is runner
+
+
+def test_local_image_builds_receive_command_observer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observer = object()
+    captured: list[tuple[str, object | None]] = []
+    monkeypatch.setattr(
+        actions,
+        "validate_local_build_source",
+        lambda source_root, *, expected_revision: Path(source_root),
+    )
+
+    def build_base(*, repo_root: Path, observer=None):
+        del repo_root
+        captured.append(("base", observer))
+        return "base", "sha256:" + "a" * 64
+
+    def build_torch(*, profile_path, allow_experimental, repo_root, observer=None):
+        del profile_path, allow_experimental, repo_root
+        captured.append(("torch", observer))
+        return "torch", "sha256:" + "b" * 64
+
+    monkeypatch.setattr(actions, "build_rocm_python", build_base)
+    monkeypatch.setattr(actions, "build_rocm_pytorch", build_torch)
+
+    ProductionInstallerActions(
+        command_observer=observer
+    ).build_local_images(
+        source_root=tmp_path,
+        installer_source_revision="d" * 40,
+    )
+
+    assert captured == [("base", observer), ("torch", observer)]
+
+
 def test_container_host_check_blocks_missing_docker_and_gpu_permissions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

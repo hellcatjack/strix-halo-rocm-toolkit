@@ -24,6 +24,11 @@ from amd_ai.image.lock import (
     write_wheelhouse_manifest,
 )
 from amd_ai.image.profile import ProfileError, TorchProfile, load_profile
+from amd_ai.runner import (
+    CommandObserver,
+    CommandStream,
+    run_observed_command,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -151,6 +156,7 @@ def build_torch_argv(
         *docker_prefix,
         "buildx",
         "build",
+        "--progress=plain",
         "--platform",
         "linux/amd64",
         "--provenance=mode=max" if attestations else "--provenance=false",
@@ -191,6 +197,7 @@ def build_rocm_python_argv(
         *docker_prefix,
         "buildx",
         "build",
+        "--progress=plain",
         "--platform",
         "linux/amd64",
         "--provenance=mode=max" if attestations else "--provenance=false",
@@ -303,7 +310,11 @@ def select_prunable_images(
     return tuple(sorted(selected, key=lambda image: image.image_id))
 
 
-def build_rocm_python(*, repo_root: Path = REPOSITORY_ROOT) -> tuple[str, str]:
+def build_rocm_python(
+    *,
+    repo_root: Path = REPOSITORY_ROOT,
+    observer: CommandObserver | None = None,
+) -> tuple[str, str]:
     repo_root = repo_root.resolve()
     locks = _validate_rocm_locks(repo_root)
     docker = Docker.detect()
@@ -319,7 +330,7 @@ def build_rocm_python(*, repo_root: Path = REPOSITORY_ROOT) -> tuple[str, str]:
         attestations=attestations,
         metadata_file=metadata.relative_to(repo_root),
     )
-    _run_live(argv, cwd=repo_root)
+    _run_live(argv, cwd=repo_root, observer=observer)
     metadata_digest = _validate_build_metadata(metadata)
     image_id = docker.image_id(ROCM_PYTHON_TAG)
     assert image_id is not None
@@ -347,6 +358,7 @@ def build_rocm_pytorch(
     profile_path: Path,
     allow_experimental: bool,
     repo_root: Path = REPOSITORY_ROOT,
+    observer: CommandObserver | None = None,
 ) -> tuple[str, str]:
     repo_root = repo_root.resolve()
     profile_path = _resolve_input_path(profile_path, repo_root)
@@ -364,6 +376,7 @@ def build_rocm_pytorch(
         profile_path=profile_path,
         repo_root=repo_root,
         stable=stable,
+        observer=observer,
     )
     _validate_profile_artifacts(profile, wheelhouse, requirements)
     context_key = _profile_cache_key(profile_path, profile)
@@ -394,7 +407,7 @@ def build_rocm_pytorch(
         attestations=attestations,
         metadata_file=metadata.relative_to(repo_root),
     )
-    _run_live(argv, cwd=repo_root)
+    _run_live(argv, cwd=repo_root, observer=observer)
     metadata_digest = _validate_build_metadata(metadata)
     if docker.image_id(alias) != parent:
         raise BuildError("parent alias changed during the image build")
@@ -526,27 +539,61 @@ def _prepare_profile_artifacts(
     profile_path: Path,
     repo_root: Path,
     stable: Path,
+    observer: CommandObserver | None = None,
 ) -> tuple[Path, Path]:
     if profile_path == stable:
         return (
             repo_root / ".cache/wheels" / profile.profile_id,
             repo_root / STABLE_REQUIREMENTS,
         )
-    return _lock_experimental_profile(profile, profile_path, repo_root)
+    return _lock_experimental_profile(
+        profile, profile_path, repo_root, observer=observer
+    )
 
 
 def _lock_experimental_profile(
     profile: TorchProfile,
     profile_path: Path,
     repo_root: Path,
+    *,
+    observer: CommandObserver | None = None,
 ) -> tuple[Path, Path]:
     cache_key = _profile_cache_key(profile_path, profile)
     wheelhouse = repo_root / ".cache/wheels" / cache_key
     requirements = repo_root / ".cache/locks" / f"{cache_key}.requirements.lock"
     for name, wheel in profile.wheels.items():
         destination = wheelhouse / _wheel_filename(wheel.url)
-        print(f"locking experimental {name}: {destination.name}", file=sys.stderr)
-        download(wheel.url, destination, wheel.sha256)
+        if observer is None:
+            print(
+                f"locking experimental {name}: {destination.name}",
+                file=sys.stderr,
+            )
+
+        def report_download(
+            downloaded: int,
+            total: int | None,
+            *,
+            filename: str = destination.name,
+        ) -> None:
+            if observer is None:
+                return
+            total_text = (
+                f"{total / (1024**3):.2f} GiB"
+                if total is not None
+                else "总大小未知"
+            )
+            observer.command_output(
+                CommandStream.STDOUT,
+                f"下载 {filename}: {downloaded / (1024**3):.2f} GiB/"
+                f"{total_text}\n",
+            )
+
+        download(
+            wheel.url,
+            destination,
+            wheel.sha256,
+            progress=report_download if observer is not None else None,
+        )
 
     if requirements.is_file():
         errors = validate_wheelhouse_manifest(wheelhouse)
@@ -585,6 +632,7 @@ def _lock_experimental_profile(
             str(lock_input),
         ),
         cwd=repo_root,
+        observer=observer,
     )
     _run_live(
         (
@@ -601,6 +649,7 @@ def _lock_experimental_profile(
             str(wheelhouse),
         ),
         cwd=repo_root,
+        observer=observer,
     )
     write_wheelhouse_manifest(wheelhouse)
     return wheelhouse, requirements
@@ -840,17 +889,27 @@ def _parse_docker_datetime(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _run_live(argv: Sequence[str], *, cwd: Path) -> None:
+def _run_live(
+    argv: Sequence[str],
+    *,
+    cwd: Path,
+    observer: CommandObserver | None = None,
+) -> None:
     environment = os.environ.copy()
     environment["BUILDX_METADATA_PROVENANCE"] = "max"
-    completed = subprocess.run(
-        tuple(argv),
+    result = run_observed_command(
+        argv,
+        observer=observer,
         check=False,
         cwd=cwd,
-        env=environment,
+        environment=environment,
     )
-    if completed.returncode != 0:
-        raise BuildError(f"command failed ({completed.returncode}): {' '.join(argv)}")
+    if result.returncode != 0:
+        evidence = result.stderr.strip() or result.stdout.strip() or "no output"
+        raise BuildError(
+            f"command failed ({result.returncode}): {' '.join(argv)}: "
+            f"{evidence}"
+        )
 
 
 def _completed(

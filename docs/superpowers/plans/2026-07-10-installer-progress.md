@@ -1316,7 +1316,7 @@ git commit -m "feat: expose resumable installer progress"
 - Modify: `tests/unit/project/test_dependencies.py`
 - Modify: `tests/unit/installer/test_actions.py`
 
-- [ ] **Step 1: Write failing registry and BuildKit progress tests**
+- [x] **Step 1: Write failing registry and BuildKit progress tests**
 
 Replace the authless-pull subprocess monkeypatch with a recording `Runner` and
 assert the exact command still contains the empty temporary Docker config.
@@ -1339,7 +1339,7 @@ In dependency tests, construct the generated Docker uv command and assert
 `is_live_command(argv)` is true; retain the existing temporary lock-file and
 protected-Torch validation assertions.
 
-- [ ] **Step 2: Run focused image/project/action tests and verify RED**
+- [x] **Step 2: Run focused image/project/action tests and verify RED**
 
 ```bash
 PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
@@ -1354,7 +1354,7 @@ PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest \
 Expected: tests fail because registry runner injection, plain BuildKit progress,
 and observed local builds do not exist.
 
-- [ ] **Step 3: Inject the runner into release registry commands**
+- [x] **Step 3: Inject the runner into release registry commands**
 
 Change `DockerPublishRegistry.__init__` to accept `runner: Runner | None = None`
 and default to `SubprocessRunner()` so publication callers preserve captured
@@ -1375,7 +1375,7 @@ self.release_docker = release_docker or AnonymousReleaseRegistry(
 )
 ```
 
-- [ ] **Step 4: Route local and project builds through observed plain output**
+- [x] **Step 4: Route local and project builds through observed plain output**
 
 Add `--progress=plain` to `build_rocm_python_argv`, `build_torch_argv`, and
 `project_build_argv`. Add optional `observer: CommandObserver | None = None` to
@@ -1414,12 +1414,12 @@ pass a closure that renders
 unredacted wheel URL in the line. This direct downloader output follows the same
 quiet/log/redaction behavior and resets the stage heartbeat.
 
-- [ ] **Step 5: Run focused tests and verify GREEN**
+- [x] **Step 5: Run focused tests and verify GREEN**
 
 Run the command from Step 2. Expected: all selected tests pass; pulls and builds
 use the observed path, while inspect/hash/JSON calls remain captured.
 
-- [ ] **Step 6: Commit long Docker and package output integration**
+- [x] **Step 6: Commit long Docker and package output integration**
 
 ```bash
 git add src/amd_ai/image/publish.py src/amd_ai/image/build.py \

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,6 +22,7 @@ from amd_ai.image.publish import (
 )
 from amd_ai.installer.release import load_stable_release
 from amd_ai.qualification.models import REQUIRED_CHECKS
+from amd_ai.runner import CommandResult
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -325,27 +325,64 @@ def test_failed_authless_pull_leaves_existing_manifest_unchanged(
 
 
 def test_authless_pull_passes_empty_config_to_sudo_docker(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[tuple[str, ...], object]] = []
+    class RecordingRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+            self.config_was_empty = False
 
-    def completed(argv, **kwargs):
-        command = tuple(argv)
-        config = Path(command[command.index("--config") + 1])
-        assert config.is_dir()
-        assert tuple(config.iterdir()) == ()
-        calls.append((command, kwargs.get("env")))
-        return subprocess.CompletedProcess(command, 0, "", "")
+        def run(self, args, *, check=True, input_text=None):
+            del check, input_text
+            command = tuple(args)
+            config = Path(command[command.index("--config") + 1])
+            self.config_was_empty = config.is_dir() and not tuple(
+                config.iterdir()
+            )
+            self.calls.append(command)
+            return CommandResult(command, 0, "", "")
 
-    monkeypatch.setattr(subprocess, "run", completed)
+    runner = RecordingRunner()
     reference = "ghcr.io/hellcatjack/example@sha256:" + "a" * 64
 
-    DockerPublishRegistry(("sudo", "-n", "docker")).authless_pull(reference)
+    DockerPublishRegistry(
+        ("sudo", "-n", "docker"), runner=runner
+    ).authless_pull(reference)
 
-    command, environment = calls[0]
+    command = runner.calls[0]
     assert command[:4] == ("sudo", "-n", "docker", "--config")
     assert command[-2:] == ("pull", reference)
-    assert environment is None
+    assert runner.config_was_empty is True
+
+
+def test_registry_pull_and_inspect_use_injected_runner() -> None:
+    record = {
+        "Id": "sha256:" + "b" * 64,
+        "RepoDigests": ["ghcr.io/example/image@sha256:" + "a" * 64],
+    }
+
+    class RecordingRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        def run(self, args, *, check=True, input_text=None):
+            del check, input_text
+            command = tuple(args)
+            self.calls.append(command)
+            stdout = json.dumps([record]) if "inspect" in command else ""
+            return CommandResult(command, 0, stdout, "")
+
+    runner = RecordingRunner()
+    registry = DockerPublishRegistry(runner=runner)
+    reference = "ghcr.io/example/image@sha256:" + "a" * 64
+
+    registry.pull(reference)
+    inspected = registry.inspect(reference)
+
+    assert inspected == record
+    assert runner.calls == [
+        ("docker", "pull", reference),
+        ("docker", "image", "inspect", reference),
+    ]
 
 
 def write_publish_evidence(
