@@ -7,12 +7,167 @@
 > - 正式宿主适配器：Ubuntu 24.04.x AMD64
 > - Stable 镜像 release ID：`0.2.0`（`v0.2.3` 不重建镜像）
 
+## 快速开始
+
+本路径适用于 **Ubuntu 24.04.x AMD64 + AMD Ryzen AI Max+ 395 / Radeon 8060S**。完成后将得到一个已经通过真实 GPU 运算检查的独立项目容器，并可直接安装自己的 Python 依赖。
+
+### 1. 开始前确认
+
+- BIOS/UEFI 的 UMA Frame Buffer 使用主板允许的最小值，建议 512 MiB；
+- 当前用户具有 `sudo` 权限，网络可访问 GitHub 和 GHCR；
+- Docker 数据目录建议至少有 40 GiB 可用空间；
+- 宿主具有 `git` 和 `python3.12`。
+
+缺少基础工具时执行：
+
+**宿主机：**
+
+```bash
+sudo apt update
+sudo apt install -y git python3.12
+```
+
+其他系统要求和旧 ROCm 残留处理见[安装前准备](#安装前准备)。
+
+### 2. 获取固定版本
+
+**宿主机：**
+
+```bash
+TOOLKIT="$HOME/src/strix-halo-rocm-toolkit"
+PROJECT="$HOME/ai-projects/video-lab"
+
+mkdir -p "$(dirname "$TOOLKIT")"
+git clone --branch v0.2.3 --depth 1 \
+  https://github.com/hellcatjack/strix-halo-rocm-toolkit.git \
+  "$TOOLKIT"
+cd "$TOOLKIT"
+```
+
+不要通过 `curl | sudo bash` 执行安装器。固定 Git checkout 让安装来源和恢复状态可以审计。
+
+### 3. 安装平台并创建第一个项目
+
+**宿主机：**
+
+```bash
+./install.sh --mode full \
+  --project-dir "$PROJECT" \
+  --project-name video-lab \
+  --image-source pull
+```
+
+审阅 host plan 后，只有精确输入 `APPLY` 才会修改宿主。Docker 组授权会单独询问。安装器从公开 GHCR 匿名拉取固定 digest，并实时显示阶段、下载进度和私有日志路径。
+
+偏好菜单操作时可改用 `./install.sh`，选择“完整工作站安装”；显式命令更适合重启后原样恢复。
+
+### 4. 按提示重启或恢复
+
+安装器显示 `ACTION` 和 `RESUME` 要求重启时执行：
+
+**宿主机：**
+
+```bash
+sudo reboot
+```
+
+重启后重新打开终端，恢复路径变量并原样重跑安装命令。
+
+**重启后的宿主机：**
+
+```bash
+TOOLKIT="$HOME/src/strix-halo-rocm-toolkit"
+PROJECT="$HOME/ai-projects/video-lab"
+cd "$TOOLKIT"
+
+./install.sh --mode full \
+  --project-dir "$PROJECT" \
+  --project-name video-lab \
+  --image-source pull
+```
+
+不要删除安装状态，也不要切换为 `container` 模式。普通失败先读取 `CAUSE`、`LOG` 和 `RESUME`，修复原因后仍执行同一条命令；可信阶段会显示为 `SKIP`。
+
+### 5. 启动项目 Docker
+
+**宿主机：**
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+strix-halo-rocm --version
+strix-halo-rocm project run "$PROJECT"
+```
+
+如果当前用户不能直接访问 Docker，先运行 `sudo -v` 刷新凭据，再执行同一条 `project run`；不要使用 `sudo strix-halo-rocm`。
+
+`project run` 会按需构建项目镜像并映射 GPU 设备。进入 Bash 前，项目入口会自动校验 Torch manifest、项目 overlay、ROCm GPU 识别和真实 GPU 运算；任何一项失败都不会进入项目 shell。
+
+如果自动检查失败，不要继续安装 Python 依赖。回到宿主机运行 `strix-halo-rocm doctor "$PROJECT"`，按报告修复 GPU、镜像或 overlay 问题后再启动项目。
+
+### 6. 验证 PyTorch GPU
+
+看到项目 Bash 提示符后运行以下探针。ROCm 版 PyTorch 仍使用 `torch.cuda` API；这里的 `cuda:0` 表示 PyTorch 的设备接口，不表示安装了 NVIDIA CUDA。
+
+**项目容器内：**
+
+```bash
+python - <<'PY'
+import torch
+
+print(f"torch={torch.__version__}")
+print(f"hip={torch.version.hip}")
+assert torch.cuda.is_available(), "ROCm GPU is not available to PyTorch"
+
+device = torch.device("cuda:0")
+print(f"gpu={torch.cuda.get_device_name(0)}")
+left = torch.randn((1024, 1024), device=device)
+right = torch.randn((1024, 1024), device=device)
+result = left @ right
+torch.cuda.synchronize()
+print(f"GPU_OK device={result.device} mean={result.mean().item():.6f}")
+PY
+```
+
+必须看到非空 HIP 版本、Radeon GPU 名称和 `GPU_OK device=cuda:0`。仅能 `import torch` 不算 GPU 验证通过。
+
+### 7. 开始构建 Python 环境
+
+GPU 验证通过后，可以直接试装普通项目依赖：
+
+**项目容器内：**
+
+```bash
+pip install transformers safetensors
+pip check
+```
+
+直接安装的依赖保存在当前项目的持久 overlay 中，退出临时容器后仍然存在。受保护的 `torch`、`torchvision`、`torchaudio` 和 `triton` 不能被项目安装覆盖；不要再创建一份包含 Torch 的 venv。确实需要其他 Torch 组合时，使用[自选 PyTorch 版本](#自选-pytorch-版本)创建完整父镜像 profile。
+
+试装稳定后，把实际直接依赖写入项目的 `requirements.in`，然后退出容器。以下仍以刚才的两个包为例：
+
+**仍在项目容器内：**
+
+```bash
+printf '%s\n' 'transformers' 'safetensors' > requirements.in
+exit
+```
+
+**宿主机：**
+
+```bash
+strix-halo-rocm project lock "$PROJECT"
+strix-halo-rocm project run "$PROJECT" --build
+```
+
+至此已经具备可运行的 ROCm 7.2.1 / PyTorch 2.9.1 GPU 容器、独立项目目录、受保护的 Torch 基线和可继续扩展的 Python 环境。依赖试装、卸载和固化的完整规则见[Python 依赖与受保护 pip](#python-依赖与受保护-pip)。
+
 ## 目录
 
+- [快速开始](#快速开始)
 - [项目解决什么问题](#项目解决什么问题)
 - [支持范围与固定基线](#支持范围与固定基线)
 - [安装前准备](#安装前准备)
-- [快速安装](#快速安装)
+- [交互安装与 launcher](#交互安装与-launcher)
 - [安装模式与自动化](#安装模式与自动化)
 - [安装进度与私有日志](#安装进度与私有日志)
 - [安装后验证](#安装后验证)
@@ -123,20 +278,11 @@ mkdir -p reports
 | `1` | 需要修改或重启 |
 | `2` | 不支持的系统、错误 GPU/驱动等阻断状态 |
 
-## 快速安装
+## 交互安装与 launcher
 
-### 1. 获取固定版本
+顶部[快速开始](#快速开始)是推荐的首次部署路径。本节补充菜单入口和安装后 launcher 的位置。
 
-```bash
-git clone --branch v0.2.3 --depth 1 \
-  https://github.com/hellcatjack/strix-halo-rocm-toolkit.git
-cd strix-halo-rocm-toolkit
-git rev-parse --verify HEAD
-```
-
-不要通过 `curl | sudo bash` 运行安装器。安装脚本必须来自本地 Git checkout，以便记录源码 revision、复制版本化运行时并校验本地构建输入。
-
-### 2. 启动交互式安装器
+### 交互式安装器
 
 ```bash
 ./install.sh
@@ -150,7 +296,7 @@ git rev-parse --verify HEAD
 
 Stable 默认从公开 GHCR 匿名拉取固定 digest。只有网络获取失败或镜像不存在时，交互模式才会询问是否从当前干净 checkout 本地构建。digest、config ID、OCI 标签或内嵌锁不一致时直接阻断，不会静默回退。
 
-### 3. 让 launcher 进入 PATH
+### launcher 与安装运行时
 
 安装器把版本化运行时安装到：
 

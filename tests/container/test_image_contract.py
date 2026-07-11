@@ -42,6 +42,42 @@ def test_operator_documentation_contains_required_contract_anchors() -> None:
             assert anchor in text, f"{filename} is missing {anchor!r}"
 
 
+def test_readme_quick_start_is_ordered_complete_and_safe() -> None:
+    text = Path("README.md").read_text(encoding="utf-8")
+    required_headings = (
+        "## 快速开始",
+        "## 目录",
+        "## 项目解决什么问题",
+    )
+    for heading in required_headings:
+        assert heading in text, f"README.md is missing {heading!r}"
+
+    quick_start = text.index("## 快速开始")
+    contents = text.index("## 目录")
+    rationale = text.index("## 项目解决什么问题")
+    assert quick_start < contents < rationale
+
+    quick_text = text[quick_start:contents]
+    required_steps = (
+        "--mode full",
+        '--project-dir "$PROJECT"',
+        "sudo reboot",
+        'strix-halo-rocm project run "$PROJECT"',
+        "torch.cuda.is_available()",
+        'torch.device("cuda:0")',
+        "torch.cuda.synchronize()",
+        "pip install transformers safetensors",
+        "strix-halo-rocm project lock",
+        'strix-halo-rocm doctor "$PROJECT"',
+        "**宿主机：**",
+        "**项目容器内：**",
+    )
+    for step in required_steps:
+        assert step in quick_text, f"quick start is missing {step!r}"
+
+    assert re.search(r"(?m)^\s*sudo strix-halo-rocm(?:\s|$)", quick_text) is None
+
+
 def _completed(prefix, args):
     return subprocess.run(
         (*prefix, *args),
@@ -55,7 +91,10 @@ def _completed(prefix, args):
 @pytest.fixture(scope="module")
 def docker():
     for prefix in (("docker",), ("sudo", "-n", "docker")):
-        if _completed(prefix, ("info", "--format", "{{.ServerVersion}}")).returncode == 0:
+        if (
+            _completed(prefix, ("info", "--format", "{{.ServerVersion}}")).returncode
+            == 0
+        ):
             for image in (BASE_IMAGE, TORCH_IMAGE):
                 result = _completed(prefix, ("image", "inspect", image))
                 assert result.returncode == 0, (
