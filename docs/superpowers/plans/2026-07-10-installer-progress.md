@@ -1686,7 +1686,7 @@ git commit -m "feat: add installer progress modes"
 - Modify: `docs/install.md`
 - Create: `docs/releases/v0.2.3.md`
 
-- [ ] **Step 1: Write failing version and stable-baseline assertions**
+- [x] **Step 1: Write failing version and stable-baseline assertions**
 
 Change both version assertions in `tests/test_version.py` to `0.2.3`. Add:
 
@@ -1706,7 +1706,7 @@ def test_installer_only_release_keeps_stable_image_baseline() -> None:
     )
 ```
 
-- [ ] **Step 2: Run version tests and verify RED**
+- [x] **Step 2: Run version tests and verify RED**
 
 ```bash
 PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest tests/test_version.py -q
@@ -1715,7 +1715,7 @@ PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest tests/test_version.py -q
 Expected: version assertions fail with current `0.2.2`; stable-image
 assertions already pass.
 
-- [ ] **Step 3: Bump only toolkit version and document the complete workflow**
+- [x] **Step 3: Bump only toolkit version and document the complete workflow**
 
 Set `__version__ = "0.2.3"`. Update every current clone/tag/version example in
 README to `v0.2.3`, but leave stable release ID, ROCm 7.2.1, Python 3.12,
@@ -1742,7 +1742,7 @@ Create `docs/releases/v0.2.3.md` stating that this is an installer
 observability release, no ComfyUI/model-cache policy changes are included, and
 the two exact stable manifests are reused without image publication.
 
-- [ ] **Step 4: Verify version, documentation, and immutable release data**
+- [x] **Step 4: Verify version, documentation, and immutable release data**
 
 ```bash
 PYTHONPATH=src /app/imgMaker/.venv/bin/python -m pytest tests/test_version.py -q
@@ -1758,7 +1758,7 @@ git diff --check
 Expected: tests and Markdown pass; SHA-256 is exactly
 `4226d04bf995c9c253c6a978f08bdbb9466ccd47119f967ebd39f0c08b7bfe2d`.
 
-- [ ] **Step 5: Commit release-facing changes**
+- [x] **Step 5: Commit release-facing changes**
 
 ```bash
 git add src/amd_ai/__init__.py tests/test_version.py README.md \

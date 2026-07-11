@@ -2,10 +2,10 @@
 
 面向 **AMD Ryzen AI Max+ 395 / Radeon 8060S (`gfx1151`)** 的可恢复 ROCm 容器开发平台。它提供 Ubuntu 宿主机准备、公开且内容寻址的 ROCm/PyTorch 镜像、独立项目容器、受保护的 `pip` 工作流，以及可审计的 GPU 验证和精确修复。
 
-> - 当前工具包版本：`v0.2.2`
+> - 当前工具包版本：`v0.2.3`
 > - 正式软件基线：ROCm 7.2.1、Python 3.12、PyTorch 2.9.1
 > - 正式宿主适配器：Ubuntu 24.04.x AMD64
-> - Stable 镜像 release ID：`0.2.0`（`v0.2.2` 不重建镜像）
+> - Stable 镜像 release ID：`0.2.0`（`v0.2.3` 不重建镜像）
 
 ## 目录
 
@@ -14,6 +14,7 @@
 - [安装前准备](#安装前准备)
 - [快速安装](#快速安装)
 - [安装模式与自动化](#安装模式与自动化)
+- [安装进度与私有日志](#安装进度与私有日志)
 - [安装后验证](#安装后验证)
 - [创建和运行项目](#创建和运行项目)
 - [Python 依赖与受保护 pip](#python-依赖与受保护-pip)
@@ -107,7 +108,7 @@ sudo apt install -y git python3.12
 在任何写入前先执行只读检查：
 
 ```bash
-git clone --branch v0.2.2 --depth 1 \
+git clone --branch v0.2.3 --depth 1 \
   https://github.com/hellcatjack/strix-halo-rocm-toolkit.git
 cd strix-halo-rocm-toolkit
 mkdir -p reports
@@ -127,7 +128,7 @@ mkdir -p reports
 ### 1. 获取固定版本
 
 ```bash
-git clone --branch v0.2.2 --depth 1 \
+git clone --branch v0.2.3 --depth 1 \
   https://github.com/hellcatjack/strix-halo-rocm-toolkit.git
 cd strix-halo-rocm-toolkit
 git rev-parse --verify HEAD
@@ -232,7 +233,7 @@ sudo reboot
   --image-source pull
 ```
 
-从 `v0.2.2` 起，省略 `--state-path` 时安装器根据规范化后的项目绝对路径自动选择独立状态文件，并显示 `INFO installer state (project): ...`。不同项目不会再误用第一个项目的 `full` 状态。
+从 `v0.2.2` 起，省略 `--state-path` 时安装器根据规范化后的项目绝对路径自动选择独立状态文件。`v0.2.3` 在 `PLAN` 中显示 `状态=<路径>（per-project）`；不同项目不会再误用第一个项目的 `full` 状态。
 
 该模式仍要求以下条件全部通过：
 
@@ -298,6 +299,8 @@ printf 'accepted host plan: %s\n' "$PLAN_DIGEST"
 | `--mode container` | 仅部署容器平台 |
 | `--non-interactive` | 禁用全部提示，缺少确认即停止 |
 | `--dry-run` | 安装用户 launcher 并显示阶段，不修改宿主、镜像或项目 |
+| `--verbose` | 显示命令、精确字节、阶段枚举和 debug 诊断 |
+| `--quiet` | 终端只保留警告、失败、恢复、摘要和最终日志路径 |
 | `--project-dir PATH` | 第一个项目目录 |
 | `--project-name NAME` | 第一个项目名称 |
 | `--image-source pull` | 只接受 stable exact digest 拉取 |
@@ -311,9 +314,58 @@ printf 'accepted host plan: %s\n' "$PLAN_DIGEST"
 ~/.local/state/strix-halo-rocm-toolkit/projects/
 ```
 
-文件名由可读项目目录名和规范化绝对路径的 SHA-256 前缀组成，例如 `video-lab-b9bb64878f63.json`。若旧版全局状态 `~/.local/state/strix-halo-rocm-toolkit/install-state.json` 属于同一个项目，安装器继续原地恢复并显示 `installer state (legacy)`；它不会自动移动、删除或复制旧状态。同一项目更换安装模式仍会阻断。显式 `--state-path` 始终优先，并显示 `installer state (explicit)`。项目状态彼此独立，但固定的 toolkit 协调锁会串行化安装流程，避免不同项目并发修改宿主、镜像或检查点。
+文件名由可读项目目录名和规范化绝对路径的 SHA-256 前缀组成，例如 `video-lab-b9bb64878f63.json`。若旧版全局状态 `~/.local/state/strix-halo-rocm-toolkit/install-state.json` 属于同一个项目，安装器继续原地恢复，并在 `PLAN` 中标记 `legacy`；它不会自动移动、删除或复制旧状态。同一项目更换安装模式仍会阻断。显式 `--state-path` 始终优先，并标记 `explicit`。项目状态彼此独立，但固定的 toolkit 协调锁会串行化安装流程，避免不同项目并发修改宿主、镜像或检查点。
 
 损坏状态会被重命名为带 UTC 时间戳的证据文件；安装器不会猜测哪些动作已经成功。完整状态与退出码说明见[安装与恢复](docs/install.md)。
+
+## 安装进度与私有日志
+
+`v0.2.3` 的安装输出是确定的逐行事件，不使用 spinner，也不会依赖 TTY 原地刷新。默认顺序为 `PLAN`、`LOG`，然后每个选定阶段显示 `SKIP` 或 `START`；长步骤可显示 `DETAIL`、子命令原始进度和每 15 秒一次的 `WAIT`，检查点安全写入后才显示 `PASS`，最后显示 `SUMMARY` 和同一条 `LOG` 路径。
+
+| 事件 | 含义 |
+| --- | --- |
+| `PLAN` | 模式、项目、状态来源、镜像来源和恢复起点 |
+| `SKIP` | 输入摘要匹配，已有可信检查点，不重放动作 |
+| `START` | 阶段开始；`[i/n]` 使用当前模式的实际阶段数 |
+| `DETAIL` | 缺失层、构建估算、可用空间或已解析 release |
+| `WAIT` | 15 秒没有新输出，但命令仍在运行 |
+| `PASS` | 阶段输出已应用，检查点已成功持久化 |
+| `SUMMARY` | 成功或 dry-run 的最终结果 |
+| `FAIL` / `BLOCKED` | 当前阶段失败，或策略明确阻断 |
+| `CAUSE` | 已脱敏的首要原因和最多 40 行命令尾部 |
+| `STATE` / `RESUME` | 状态文件及下一步恢复方式 |
+| `LOG` | 本次安装的私有完整日志路径 |
+
+进度模式互斥：
+
+```bash
+# 默认：阶段、容量、下载输出和心跳
+./install.sh --mode container --project-dir /app/test/video-lab
+
+# 调试：额外显示阶段枚举、命令行、精确字节和镜像 digest
+./install.sh --verbose --mode container --project-dir /app/test/video-lab
+
+# CI：终端只保留警告、失败、恢复信息、摘要和最终日志路径
+./install.sh --quiet --non-interactive \
+  --mode container \
+  --project-dir /app/test/video-lab \
+  --image-source pull
+```
+
+`--verbose` 与 `--quiet` 不能同时使用。quiet 只抑制终端噪声，不会减少日志内容，也不会改变阶段输入摘要、状态 schema 或恢复行为。
+
+每次运行在以下目录创建一个新日志：
+
+```text
+~/.local/state/strix-halo-rocm-toolkit/logs/<project-key>/
+  install-<UTC>-<pid>.log
+```
+
+控制目录权限为 `0700`，日志文件为 `0600`。`v0.2.3` 不自动轮转或删除日志；确认不再需要审计证据后，由该用户自行清理。日志包含 Docker pull、BuildKit `plain` 输出、uv/pip、锁定 wheel 下载进度和 sudo helper 的 stderr；JSON 协议 stdout、检查命令和摘要读取仍保持捕获模式。
+
+安装器会清除终端控制序列，并脱敏 URL userinfo、Authorization、凭据参数以及名称包含 token/password/secret/key 等标记的环境值。项目路径、镜像名称、包名和其他非密钥业务信息仍可能出现；把日志发给第三方前必须人工复核。
+
+失败后不要删除状态文件。按 `CAUSE` 修复问题，再执行完全相同的 install 命令；`RESUME` 会说明普通重试还是先运行 `sudo reboot`，已有可信检查点会显示为 `SKIP`。完整输出示例见[安装与恢复](docs/install.md)。
 
 ## 安装后验证
 
@@ -633,11 +685,13 @@ git switch --detach <新发布标签>
 
 ```bash
 git fetch origin --tags
-git switch --detach v0.2.2
+git switch --detach v0.2.3
 ./install.sh
 ```
 
-再次选择相同模式和项目目录。`v0.2.1` 及后续 `0.2.x` 补丁会验证旧 `BOOTSTRAP` 输入摘要、迁移 schema 1 状态并从 `HOST_VERIFY` 续跑；它不会重新执行 `HOST_APPLY`。只有同一 `0.2.x` 系列、宿主写入已经完成且其他引导输入完全一致时才允许该迁移。
+再次选择相同模式和项目目录。对于 full 状态，`v0.2.1` 及后续 `0.2.x` 补丁会验证旧 `BOOTSTRAP` 输入摘要、迁移 schema 1 状态并从 `HOST_VERIFY` 续跑；它不会重新执行 `HOST_APPLY`。只有同一 `0.2.x` 系列、宿主写入已经完成且其他引导输入完全一致时才允许该迁移。
+
+`v0.2.3` 还可以接管已经完成 `BOOTSTRAP` 的 `v0.2.2` container 状态，包括已经完成全部 8 个阶段的状态。接管只更新安装器元数据和经过旧输入验证的 `BOOTSTRAP` 摘要，其他摘要不变，任何项目动作都不会重放。摘要损坏或输入漂移时必须按失败输出修复；不要删除状态文件绕过检查。
 
 ### 查看共享层占用
 
