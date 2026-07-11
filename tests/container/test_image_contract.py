@@ -79,6 +79,23 @@ def test_readme_quick_start_is_ordered_complete_and_safe() -> None:
     assert re.search(r"(?m)^\s*sudo strix-halo-rocm(?:\s|$)", quick_text) is None
 
 
+def test_readme_bash_examples_are_valid_shell() -> None:
+    text = Path("README.md").read_text(encoding="utf-8")
+    blocks = re.findall(r"```bash\n(.*?)\n```", text, flags=re.DOTALL)
+    assert blocks, "README.md has no Bash examples"
+
+    for index, block in enumerate(blocks, start=1):
+        result = subprocess.run(
+            ("bash", "-n"),
+            input=block,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        assert result.returncode == 0, f"Bash block {index}: {result.stderr}"
+
+
 def _completed(prefix, args):
     return subprocess.run(
         (*prefix, *args),

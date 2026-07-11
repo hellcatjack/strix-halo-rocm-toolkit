@@ -753,9 +753,11 @@ cp profiles/torch/custom.example.env /absolute/path/custom.env
 使用该 profile 创建项目：
 
 ```bash
+CUSTOM_PROFILE_ID="replace-with-your-profile-id"
+
 strix-halo-rocm project init custom-torch-lab \
   --directory "$HOME/ai-projects/custom-torch-lab" \
-  --base-profile <自定义PROFILE_ID>
+  --base-profile "$CUSTOM_PROFILE_ID"
 
 ALLOW_UNVERIFIED=1 \
   strix-halo-rocm project run "$HOME/ai-projects/custom-torch-lab"
@@ -821,8 +823,10 @@ Repair 不运行 `docker system prune`，不使用通配镜像删除，不 force
 每次升级使用明确的发布标签：
 
 ```bash
+RELEASE_TAG="v0.2.3"
+
 git fetch origin --tags
-git switch --detach <新发布标签>
+git switch --detach "$RELEASE_TAG"
 ./install.sh
 ```
 
