@@ -116,6 +116,7 @@ import torch
 
 print(f"torch={torch.__version__}")
 print(f"hip={torch.version.hip}")
+assert torch.version.hip, "PyTorch is not a ROCm build"
 assert torch.cuda.is_available(), "ROCm GPU is not available to PyTorch"
 
 device = torch.device("cuda:0")

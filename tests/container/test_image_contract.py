@@ -63,6 +63,7 @@ def test_readme_quick_start_is_ordered_complete_and_safe() -> None:
         '--project-dir "$PROJECT"',
         "sudo reboot",
         'strix-halo-rocm project run "$PROJECT"',
+        "assert torch.version.hip",
         "torch.cuda.is_available()",
         'torch.device("cuda:0")',
         "torch.cuda.synchronize()",
