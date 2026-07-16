@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from amd_ai.project import build as project_build
 from amd_ai.project.build import (
     ParentImageMetadata,
     ProjectBuildError,
@@ -141,3 +142,22 @@ def test_project_image_removal_accepts_only_exact_id() -> None:
     assert runner.calls == [command]
     with pytest.raises(ProjectBuildError):
         remove_exact_project_image("demo:latest", runner=runner)
+
+
+def test_missing_buildx_is_reported_before_project_build() -> None:
+    command = ("docker", "buildx", "version")
+    runner = FakeRunner(
+        {
+            command: CommandResult(
+                command,
+                1,
+                "",
+                "docker: unknown command: docker buildx",
+            )
+        }
+    )
+
+    with pytest.raises(ProjectBuildError, match="Buildx.*host repair"):
+        project_build._require_buildx(runner, ("docker",))
+
+    assert runner.calls == [command]

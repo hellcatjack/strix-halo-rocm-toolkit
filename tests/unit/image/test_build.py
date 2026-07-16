@@ -52,6 +52,24 @@ def test_docker_detection_does_not_probe_buildx(monkeypatch):
     ]
 
 
+def test_require_buildx_reports_healthy_daemon(monkeypatch):
+    docker = build.Docker(("docker",), "29.1.3")
+    missing = subprocess.CompletedProcess(
+        ("docker", "buildx", "version"),
+        1,
+        "",
+        "docker: unknown command: docker buildx",
+    )
+    monkeypatch.setattr(
+        docker,
+        "capture",
+        lambda args, check=False: missing,
+    )
+
+    with pytest.raises(build.BuildError, match="29.1.3.*host repair"):
+        docker.require_buildx()
+
+
 def test_build_argv_uses_content_addressed_local_parent_and_named_context():
     profile = load_profile("profiles/torch/stable.env", allow_verified=True)
     parent = "sha256:" + "a" * 64
@@ -237,6 +255,42 @@ def test_missing_wheelhouse_is_reported_as_a_build_error(tmp_path):
             tmp_path / "missing",
             Path("profiles/torch/stable.requirements.lock"),
         )
+
+
+def test_torch_build_requires_buildx_before_preparing_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class StopAfterBuildx(RuntimeError):
+        pass
+
+    class FakeDocker:
+        prefix = ("docker",)
+
+        def require_buildx(self) -> str:
+            events.append("buildx")
+            return "buildx 0.30.1"
+
+    def stop_artifact_preparation(**kwargs):
+        del kwargs
+        events.append("artifacts")
+        raise StopAfterBuildx
+
+    monkeypatch.setattr(
+        build.Docker,
+        "detect",
+        classmethod(lambda cls: FakeDocker()),
+    )
+    monkeypatch.setattr(build, "_prepare_profile_artifacts", stop_artifact_preparation)
+
+    with pytest.raises(StopAfterBuildx):
+        build.build_rocm_pytorch(
+            profile_path=Path("profiles/torch/stable.env"),
+            allow_experimental=False,
+        )
+
+    assert events == ["buildx", "artifacts"]
 
 
 def test_build_metadata_returns_the_exact_config_digest(tmp_path):

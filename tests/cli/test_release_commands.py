@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -93,3 +94,46 @@ def test_release_publish_stages_are_mutually_exclusive() -> None:
         )
 
     assert error.value.code == 2
+
+
+def test_push_only_publication_requires_buildx(monkeypatch, tmp_path) -> None:
+    calls: list[str] = []
+
+    class FakeDocker:
+        prefix = ("docker",)
+
+        def image_id(self, reference):
+            return "sha256:" + ("a" if "python" in reference else "b") * 64
+
+        def require_buildx(self):
+            calls.append("buildx")
+            return "buildx 0.30.1"
+
+    candidate = SimpleNamespace(source_revision="c" * 40, torch_local_id="id")
+    observed = SimpleNamespace(
+        base=SimpleNamespace(reference="ghcr.io/example/base@sha256:" + "d" * 64),
+        torch=SimpleNamespace(reference="ghcr.io/example/torch@sha256:" + "e" * 64),
+    )
+    monkeypatch.setattr(cli.Docker, "detect", classmethod(lambda cls: FakeDocker()))
+    monkeypatch.setattr(cli, "_clean_release_revision", lambda: "c" * 40)
+    monkeypatch.setattr(cli, "validate_publish_inputs", lambda **kwargs: candidate)
+    monkeypatch.setattr(
+        cli,
+        "verify_publish_candidate_local_images",
+        lambda value, registry: value,
+    )
+    monkeypatch.setattr(cli, "publish_images", lambda value, registry: observed)
+    monkeypatch.setattr(cli, "write_observed_release", lambda path, value: None)
+
+    code = cli.publish_release_command(
+        release_id="0.2.0",
+        qualification_path=tmp_path / "qualification.json",
+        sbom_path=tmp_path / "release.spdx.json",
+        output=tmp_path / "stable.json",
+        publish_report=tmp_path / "publish.json",
+        dry_run=False,
+        push_only=True,
+    )
+
+    assert code == 0
+    assert calls == ["buildx"]

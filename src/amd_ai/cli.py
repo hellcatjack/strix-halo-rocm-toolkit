@@ -770,6 +770,7 @@ def publish_release_command(
             f"({candidate.torch_local_id})"
         )
         return 0
+    docker.require_buildx()
     if push_only:
         observed = publish_images(candidate, registry=registry)
         write_observed_release(publish_report, observed)

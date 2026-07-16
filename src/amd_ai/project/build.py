@@ -203,6 +203,7 @@ def build_or_reuse_project(
         state = "stale" if current is not None else "missing"
         raise ProjectBuildError(f"project image is {state} and --no-build was requested")
 
+    _require_buildx(runner, docker_prefix)
     alias = project_parent_alias(config.base_image)
     tag_result = runner.run(
         [*docker_prefix, "tag", config.base_image, alias],
@@ -247,6 +248,22 @@ def build_or_reuse_project(
         built=True,
         parent=parent,
     )
+
+
+def _require_buildx(runner: Runner, docker_prefix: Sequence[str]) -> str:
+    result = runner.run(
+        [*docker_prefix, "buildx", "version"],
+        check=False,
+    )
+    version = result.stdout.strip()
+    if result.returncode != 0 or not version:
+        evidence = result.stderr.strip() or version
+        raise ProjectBuildError(
+            "Docker Buildx is required to build the project image; "
+            "run the toolkit host repair before retrying: "
+            + (evidence or "Buildx version unavailable")
+        )
+    return version
 
 
 def inspect_parent_image(

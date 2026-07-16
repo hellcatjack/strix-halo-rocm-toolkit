@@ -85,6 +85,23 @@ class Docker:
     ) -> subprocess.CompletedProcess[str]:
         return _completed((*self.prefix, *args), check=check)
 
+    def buildx_version(self) -> str | None:
+        result = self.capture(("buildx", "version"), check=False)
+        version = result.stdout.strip()
+        return version if result.returncode == 0 and version else None
+
+    def require_buildx(self) -> str:
+        result = self.capture(("buildx", "version"), check=False)
+        version = result.stdout.strip()
+        if result.returncode != 0 or not version:
+            evidence = result.stderr.strip() or version
+            raise BuildError(
+                "Docker Buildx is unavailable while Docker runtime "
+                f"{self.server_version} is healthy; run the toolkit host repair "
+                f"before building ({evidence or 'no Buildx version'})"
+            )
+        return version
+
     def live(self, args: Sequence[str], *, cwd: Path | None = None) -> None:
         completed = subprocess.run((*self.prefix, *args), check=False, cwd=cwd)
         if completed.returncode != 0:
@@ -324,8 +341,9 @@ def build_rocm_python(
     observer: CommandObserver | None = None,
 ) -> tuple[str, str]:
     repo_root = repo_root.resolve()
-    locks = _validate_rocm_locks(repo_root)
     docker = Docker.detect()
+    docker.require_buildx()
+    locks = _validate_rocm_locks(repo_root)
     revision = _git_revision(repo_root)
     attestations = _attestation_mode(docker)
     metadata = _metadata_path(repo_root, ROCM_PYTHON_TAG)
@@ -382,6 +400,8 @@ def build_rocm_pytorch(
     if profile.status == "experimental" and not allow_experimental:
         raise BuildError("experimental profile requires --allow-experimental")
 
+    docker = Docker.detect()
+    docker.require_buildx()
     wheelhouse, requirements = _prepare_profile_artifacts(
         profile=profile,
         profile_path=profile_path,
@@ -395,7 +415,6 @@ def build_rocm_pytorch(
     materialize_profile_context(profile_path, requirements, profile_context)
 
     _validate_rocm_locks(repo_root)
-    docker = Docker.detect()
     parent = docker.image_id(ROCM_PYTHON_TAG)
     assert parent is not None
     alias = immutable_parent_alias(parent)
@@ -476,6 +495,7 @@ def prune_images(
     if not selected:
         print("No unreferenced managed images matched the age filter.")
     if apply:
+        docker.require_buildx()
         for image in selected:
             docker.live(("image", "rm", image.image_id))
         docker.live(
