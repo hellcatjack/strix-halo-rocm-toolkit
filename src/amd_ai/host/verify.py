@@ -71,6 +71,7 @@ class ProbeOutcome:
 def evaluate_kernel_reboot(
     snapshot: HostSnapshot,
     *,
+    display_manager_was_loaded: bool,
     display_manager_was_active: bool,
 ) -> Report:
     preflight = evaluate_preflight(snapshot)
@@ -86,11 +87,12 @@ def evaluate_kernel_reboot(
     blocked = blocked or bool(log_findings)
 
     facts["kernel_checkpoint"] = {
+        "display_manager_was_loaded": display_manager_was_loaded,
         "display_manager_was_active": display_manager_was_active,
         "display_manager_loaded": snapshot.display_manager_loaded,
         "display_manager_active": snapshot.display_manager_active,
     }
-    if display_manager_was_active and not (
+    if (display_manager_was_loaded or display_manager_was_active) and not (
         snapshot.display_manager_loaded and snapshot.display_manager_active
     ):
         findings.append(

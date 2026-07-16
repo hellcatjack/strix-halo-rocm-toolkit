@@ -68,7 +68,7 @@ LOG      .../install-<UTC>-<pid>.log
 
 ### 中断后恢复
 
-重新执行完全相同的命令。输入摘要匹配的阶段只显示 `SKIP`，第一个未完成阶段才会启动：
+重新执行完全相同的命令。输入摘要匹配的写入阶段显示 `SKIP`，第一个未完成阶段才会启动。full 模式例外：已经完成的 `KERNEL_VERIFY` 和 `HOST_VERIFY` 仍会以 `START/PASS` 重新执行，确保当前启动内核、桌面、GPU 和日志仍然有效；它们不会写入宿主。
 
 ```text
 PLAN     共 8 个阶段，从 IMAGE_PULL_OR_BUILD 继续
@@ -107,7 +107,7 @@ LOG      .../install-<UTC>-<pid>.log
 FAIL     [6/8] 创建项目镜像与 Python 依赖（PROJECT_INIT），用时 03:12
 CAUSE    PROJECT_INIT failed: uv download failed
 STATE    .../install-state.json
-RESUME   修复问题后重新执行同一条 install 命令；已完成阶段不会重放
+RESUME   修复问题后重新执行同一条 install 命令；已完成写入阶段不会重放
 LOG      .../install-<UTC>-<pid>.log
 ```
 

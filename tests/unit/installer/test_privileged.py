@@ -75,7 +75,7 @@ def test_privileged_verify_requires_target_user(monkeypatch, capsys) -> None:
 
 
 def test_privileged_kernel_verify_forwards_display_history(monkeypatch, capsys):
-    captured: list[tuple[str, bool]] = []
+    captured: list[tuple[str, bool, bool]] = []
 
     class FakeActions:
         def __init__(self, *, effective_uid: int, **kwargs) -> None:
@@ -86,9 +86,16 @@ def test_privileged_kernel_verify_forwards_display_history(monkeypatch, capsys):
             self,
             *,
             target_user: str,
+            display_manager_was_loaded: bool,
             display_manager_was_active: bool,
         ) -> Report:
-            captured.append((target_user, display_manager_was_active))
+            captured.append(
+                (
+                    target_user,
+                    display_manager_was_loaded,
+                    display_manager_was_active,
+                )
+            )
             return Report(
                 command="host-kernel-verify",
                 status=Status.PASS,
@@ -104,13 +111,14 @@ def test_privileged_kernel_verify_forwards_display_history(monkeypatch, capsys):
         [
             "--target-user",
             "developer",
+            "--display-manager-was-loaded",
             "--display-manager-was-active",
             "verify-kernel",
         ]
     )
 
     assert code == 0
-    assert captured == [("developer", True)]
+    assert captured == [("developer", True, True)]
     assert json.loads(capsys.readouterr().out)["report"]["command"] == (
         "host-kernel-verify"
     )
@@ -159,6 +167,7 @@ def test_privileged_apply_keeps_json_on_stdout_and_progress_on_stderr(
                 digest,
                 "ubuntu-24.04",
                 "6.17.0-1028-oem",
+                True,
                 True,
             )
 

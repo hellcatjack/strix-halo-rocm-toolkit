@@ -1,0 +1,12 @@
+{
+  "gpu_driver": "amdgpu",
+  "gpu_pci_id": "1002:1586",
+  "host_preflight_status": "pass",
+  "host_verify_status": "pass",
+  "image_id": "sha256:d9fe0033288f45799af9889cce009b4ec426b17f2331cdf63340e68bc8a2954e",
+  "kernel": "6.17.0-1028-oem",
+  "qualification_report": "profiles/host/evidence/6.17.0-1028-oem-stable-gfx1151.json",
+  "qualification_report_sha256": "856aac21f2667aa27563fe272c0d9c0857d7d45d7739382ad66f7b96134a7bc4",
+  "schema_version": 1,
+  "toolkit_revision": "b1c53876933ff0b1be02dfb948820767bf466779"
+}

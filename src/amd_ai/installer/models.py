@@ -232,6 +232,7 @@ class InstallState:
     kernel_plan_digest: str | None = None
     kernel_reboot_boot_id: str | None = None
     recovery_kernel: str | None = None
+    display_manager_was_loaded: bool = False
     display_manager_was_active: bool = False
     kernel_verification_status: str | None = None
     kernel_kernel: str | None = None
@@ -284,7 +285,10 @@ class InstallState:
             raise InstallerModelError(
                 "install state Docker group acceptance is invalid"
             )
-        if type(self.display_manager_was_active) is not bool:
+        if (
+            type(self.display_manager_was_loaded) is not bool
+            or type(self.display_manager_was_active) is not bool
+        ):
             raise InstallerModelError(
                 "install state display manager history is invalid"
             )

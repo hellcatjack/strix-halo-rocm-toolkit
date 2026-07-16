@@ -86,7 +86,7 @@ cd "$TOOLKIT"
   --image-source pull
 ```
 
-不要删除安装状态，也不要切换为 `container` 模式。普通失败先读取 `CAUSE`、`LOG` 和 `RESUME`，修复原因后仍执行同一条命令；可信阶段会显示为 `SKIP`。
+不要删除安装状态，也不要切换为 `container` 模式。普通失败先读取 `CAUSE`、`LOG` 和 `RESUME`，修复原因后仍执行同一条命令；可信写入阶段会显示为 `SKIP`。full 模式的 `KERNEL_VERIFY` 和 `HOST_VERIFY` 是只读恢复关卡，每次恢复都会重新运行，防止用户在其他内核启动后复用旧检查结果。
 
 ### 5. 启动项目 Docker
 
@@ -496,7 +496,7 @@ HOST_PLAN_DIGEST="$(
 | 事件 | 含义 |
 | --- | --- |
 | `PLAN` | 模式、项目、状态来源、镜像来源和恢复起点 |
-| `SKIP` | 输入摘要匹配，已有可信检查点，不重放动作 |
+| `SKIP` | 输入摘要匹配，已有可信检查点，不重放写入动作；full 的两个只读宿主关卡例外 |
 | `START` | 阶段开始；`[i/n]` 使用当前模式的实际阶段数 |
 | `DETAIL` | 缺失层、构建估算、可用空间或已解析 release |
 | `WAIT` | 15 秒没有新输出，但命令仍在运行 |
@@ -536,7 +536,7 @@ HOST_PLAN_DIGEST="$(
 
 安装器会清除终端控制序列，并脱敏 URL userinfo、Authorization、凭据参数以及名称包含 token/password/secret/key 等标记的环境值。项目路径、镜像名称、包名和其他非密钥业务信息仍可能出现；把日志发给第三方前必须人工复核。
 
-失败后不要删除状态文件。按 `CAUSE` 修复问题，再执行完全相同的 install 命令；`RESUME` 会说明普通重试还是先运行 `sudo reboot`，已有可信检查点会显示为 `SKIP`。完整输出示例见[安装与恢复](docs/install.md)。
+失败后不要删除状态文件。按 `CAUSE` 修复问题，再执行完全相同的 install 命令；`RESUME` 会说明普通重试还是先运行 `sudo reboot`，已有可信写入检查点会显示为 `SKIP`，只读内核/宿主验证会重新运行。完整输出示例见[安装与恢复](docs/install.md)。
 
 ## 安装后验证
 

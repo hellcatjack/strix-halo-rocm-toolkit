@@ -88,6 +88,7 @@ def test_probe_uses_devices_and_actual_gids():
 def test_kernel_checkpoint_treats_ttm_as_diagnostic_only():
     report = evaluate_kernel_reboot(
         healthy_snapshot(kernel="6.17.0-1028-oem", ttm_pages_limit=1),
+        display_manager_was_loaded=True,
         display_manager_was_active=True,
     )
 
@@ -98,7 +99,22 @@ def test_kernel_checkpoint_treats_ttm_as_diagnostic_only():
 def test_kernel_checkpoint_blocks_display_regression():
     report = evaluate_kernel_reboot(
         healthy_snapshot(display_manager_active=False),
+        display_manager_was_loaded=True,
         display_manager_was_active=True,
+    )
+
+    assert report.status is Status.BLOCKED
+    assert "HOST.DISPLAY_MANAGER_INACTIVE" in finding_codes(report)
+
+
+def test_kernel_checkpoint_blocks_loaded_but_inactive_desktop_regression():
+    report = evaluate_kernel_reboot(
+        healthy_snapshot(
+            display_manager_loaded=False,
+            display_manager_active=False,
+        ),
+        display_manager_was_loaded=True,
+        display_manager_was_active=False,
     )
 
     assert report.status is Status.BLOCKED
@@ -112,6 +128,7 @@ def test_kernel_checkpoint_leaves_headless_display_state_unchanged():
             display_manager_loaded=False,
             display_manager_active=False,
         ),
+        display_manager_was_loaded=False,
         display_manager_was_active=False,
     )
 
@@ -133,6 +150,7 @@ def test_kernel_checkpoint_leaves_headless_display_state_unchanged():
 def test_kernel_checkpoint_promotes_required_kernel_facts_to_blocked(changes, code):
     report = evaluate_kernel_reboot(
         healthy_snapshot(**changes),
+        display_manager_was_loaded=False,
         display_manager_was_active=False,
     )
 
@@ -150,6 +168,7 @@ def test_kernel_checkpoint_promotes_required_kernel_facts_to_blocked(changes, co
 def test_kernel_checkpoint_blocks_fatal_gpu_init(line):
     report = evaluate_kernel_reboot(
         healthy_snapshot(dmesg=line),
+        display_manager_was_loaded=False,
         display_manager_was_active=False,
     )
 

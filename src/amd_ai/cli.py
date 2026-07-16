@@ -1126,9 +1126,16 @@ def _offer_docker_group(plan: PreparePlan) -> PreparePlan:
 
 
 def _prepare_report(plan: PreparePlan, *, mode: str, applied: bool) -> Report:
+    status = Status.CHANGE_REQUIRED
+    if applied:
+        status = (
+            Status.REBOOT_REQUIRED
+            if plan.reboot_required
+            else Status.PASS
+        )
     return Report(
         command="host-prepare",
-        status=Status.REBOOT_REQUIRED if applied else Status.CHANGE_REQUIRED,
+        status=status,
         generated_at=datetime.now(UTC).isoformat(timespec="seconds").replace(
             "+00:00", "Z"
         ),

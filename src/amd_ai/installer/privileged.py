@@ -32,6 +32,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=tuple(phase.value for phase in HostPlanPhase),
     )
     parser.add_argument(
+        "--display-manager-was-loaded",
+        action="store_true",
+    )
+    parser.add_argument(
         "--display-manager-was-active",
         action="store_true",
     )
@@ -75,11 +79,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             ):
                 raise ActionError("verify mode received plan/apply arguments")
-            if args.operation == "verify" and args.display_manager_was_active:
+            if args.operation == "verify" and (
+                args.display_manager_was_loaded
+                or args.display_manager_was_active
+            ):
                 raise ActionError("final verify received kernel-only arguments")
             report = (
                 actions.kernel_verify(
                     target_user=args.target_user,
+                    display_manager_was_loaded=(
+                        args.display_manager_was_loaded
+                    ),
                     display_manager_was_active=(
                         args.display_manager_was_active
                     ),
@@ -96,7 +106,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ActionError("plan/apply mode requires --target-user")
             if args.phase is None:
                 raise ActionError("plan/apply mode requires --phase")
-            if args.display_manager_was_active:
+            if (
+                args.display_manager_was_loaded
+                or args.display_manager_was_active
+            ):
                 raise ActionError("plan/apply mode received verify-only arguments")
             host_plan = actions.host_plan(
                 target_user=args.target_user,
@@ -110,6 +123,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "plan": prepare_plan_payload(host_plan.plan),
                 "plan_digest": host_plan.plan_digest,
                 "running_kernel": host_plan.running_kernel,
+                "display_manager_loaded": host_plan.display_manager_loaded,
                 "display_manager_active": host_plan.display_manager_active,
                 "schema_version": 1,
             }

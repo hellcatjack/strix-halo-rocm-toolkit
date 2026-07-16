@@ -103,6 +103,7 @@ def test_host_plan_uses_existing_probe_and_prepare_policy(
     assert result.plan_digest == stage_input_digest(prepare_plan_payload(expected))
     assert result.adapter_id == "ubuntu-24.04"
     assert result.running_kernel == snapshot.kernel
+    assert result.display_manager_loaded is True
     assert result.display_manager_active is True
 
 
@@ -391,6 +392,7 @@ def test_nonroot_host_plan_is_recreated_by_audited_sudo_helper() -> None:
             "plan": prepare_plan_payload(plan),
             "plan_digest": digest,
             "running_kernel": "6.14.0-1020-oem",
+            "display_manager_loaded": True,
             "display_manager_active": True,
             "schema_version": 1,
         }
@@ -424,6 +426,7 @@ def test_nonroot_host_plan_is_recreated_by_audited_sudo_helper() -> None:
     assert captured[0][phase_index + 1] == "kernel"
     assert captured[0][-3:] == ("--target-user", "developer", "plan")
     assert result.running_kernel == "6.14.0-1020-oem"
+    assert result.display_manager_loaded is True
     assert result.display_manager_active is True
     assert observer.stderr_lines == ["helper-progress\n"]
 
@@ -443,6 +446,7 @@ def test_nonroot_host_apply_passes_only_digest_and_never_reboot() -> None:
         plan_digest=digest,
         adapter_id="ubuntu-24.04",
         running_kernel="6.14.0-1020-oem",
+        display_manager_loaded=True,
         display_manager_active=True,
     )
     captured: list[tuple[str, ...]] = []
@@ -489,6 +493,7 @@ def test_nonroot_host_plan_rejects_privileged_phase_drift() -> None:
     response = json.dumps(
         {
             "adapter_id": "ubuntu-24.04",
+            "display_manager_loaded": True,
             "display_manager_active": True,
             "plan": prepare_plan_payload(tuning),
             "plan_digest": digest,
@@ -569,11 +574,13 @@ def test_nonroot_kernel_verify_uses_dedicated_read_only_helper() -> None:
         privileged_run=privileged_run,
     ).kernel_verify(
         target_user="developer",
+        display_manager_was_loaded=True,
         display_manager_was_active=True,
     )
 
     assert result.status is actions.Status.PASS
     assert captured[0][-1] == "verify-kernel"
+    assert "--display-manager-was-loaded" in captured[0]
     assert "--display-manager-was-active" in captured[0]
 
 

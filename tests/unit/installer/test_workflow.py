@@ -189,6 +189,7 @@ def test_old_kernel_stops_before_tuning_until_kernel_reboot(
     assert first.state.current_stage is InstallStage.KERNEL_REBOOT_PENDING
     assert first.state.kernel_reboot_boot_id == FIRST_BOOT_ID
     assert first.state.recovery_kernel == "6.14.0-1020-oem"
+    assert first.state.display_manager_was_loaded is True
     assert first.state.display_manager_was_active is True
     assert "kernel_apply" in actions.calls
     assert "host_plan" not in actions.calls
@@ -462,6 +463,62 @@ def test_complete_rerun_reports_all_skips_and_summary(
     assert stdout.getvalue().count("SKIP") == len(CONTAINER_STAGE_ORDER)
     assert "SUMMARY" in stdout.getvalue()
     assert actions.calls == []
+
+
+def test_complete_full_rerun_rechecks_kernel_before_trusting_checkpoints(
+    tmp_path: Path,
+) -> None:
+    options = full_options(tmp_path)
+    prompts = FakePrompts(exact={"INSTALL-KERNEL": True, "APPLY": True})
+    assert installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.full_no_reboot(),
+        options=options,
+        prompts=prompts,
+    ).run().exit_code == 0
+    resumed_actions = FakeInstallerActions.full_no_reboot()
+    resumed_actions.failures[InstallStage.KERNEL_VERIFY] = RuntimeError(
+        "recovery kernel is running"
+    )
+
+    resumed = installer_workflow(
+        tmp_path,
+        actions=resumed_actions,
+        options=options,
+        prompts=prompts,
+    ).run()
+
+    assert resumed.exit_code == 2
+    assert resumed_actions.calls == []
+    assert "recovery kernel is running" in resumed.message
+
+
+def test_complete_full_rerun_rechecks_host_before_trusting_checkpoints(
+    tmp_path: Path,
+) -> None:
+    options = full_options(tmp_path)
+    prompts = FakePrompts(exact={"INSTALL-KERNEL": True, "APPLY": True})
+    assert installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.full_no_reboot(),
+        options=options,
+        prompts=prompts,
+    ).run().exit_code == 0
+    resumed_actions = FakeInstallerActions.full_no_reboot()
+    resumed_actions.failures[InstallStage.HOST_VERIFY] = RuntimeError(
+        "current boot host verification failed"
+    )
+
+    resumed = installer_workflow(
+        tmp_path,
+        actions=resumed_actions,
+        options=options,
+        prompts=prompts,
+    ).run()
+
+    assert resumed.exit_code == 2
+    assert resumed_actions.calls == ["kernel_verify"]
+    assert "current boot host verification failed" in resumed.message
 
 
 def test_log_creation_failure_runs_no_stage(tmp_path: Path) -> None:
@@ -1255,7 +1312,7 @@ def test_compatible_patch_installer_resumes_old_host_verify_state(
     assert resumed.state.installer_version == "0.2.1"
     assert resumed.state.installer_source_revision == "e" * 40
     assert "host_apply" not in new_actions.calls
-    assert new_actions.calls[0] == "host_verify"
+    assert new_actions.calls[:2] == ["kernel_verify", "host_verify"]
     assert any(
         prefix == "WARN" and "compatible installer update" in message
         for prefix, message in prompts.statuses
@@ -1314,6 +1371,7 @@ def test_schema_two_container_state_adopts_across_v02_to_v03(
         "kernel_plan_digest",
         "kernel_reboot_boot_id",
         "recovery_kernel",
+        "display_manager_was_loaded",
         "display_manager_was_active",
         "kernel_verification_status",
         "kernel_kernel",

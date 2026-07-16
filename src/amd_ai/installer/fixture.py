@@ -122,6 +122,7 @@ class FixtureInstallerActions:
             plan_digest=stage_input_digest(prepare_plan_payload(plan)),
             adapter_id=str(self.scenario.get("adapter_id", "ubuntu-24.04")),
             running_kernel=snapshot.kernel,
+            display_manager_loaded=snapshot.display_manager_loaded,
             display_manager_active=snapshot.display_manager_active,
         )
 

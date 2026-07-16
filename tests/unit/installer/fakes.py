@@ -340,6 +340,7 @@ class FakeInstallerActions:
             plan_digest=stage_input_digest(prepare_plan_payload(plan)),
             adapter_id="ubuntu-24.04",
             running_kernel=running_kernel or self.snapshot.kernel,
+            display_manager_loaded=self.snapshot.display_manager_loaded,
             display_manager_active=self.snapshot.display_manager_active,
         )
 

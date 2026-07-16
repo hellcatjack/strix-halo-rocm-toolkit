@@ -335,6 +335,18 @@ class InstallerWorkflow:
             if stage.value in state.completed_stage_input_digests:
                 inputs = self._stage_inputs(stage, state)
                 validate_completed_stage(state, stage, inputs)
+                if stage in {
+                    InstallStage.KERNEL_VERIFY,
+                    InstallStage.HOST_VERIFY,
+                }:
+                    state, guard_result = self._rerun_completed_guard(
+                        state,
+                        stage,
+                        position,
+                    )
+                    if guard_result is not None:
+                        return guard_result
+                    continue
                 self.progress.stage_skipped(position)
                 continue
             if state.current_stage is not stage:
@@ -428,6 +440,51 @@ class InstallerWorkflow:
             0, state, message, ProgressOutcome.SUCCESS
         )
 
+    def _rerun_completed_guard(
+        self,
+        state: InstallState,
+        stage: InstallStage,
+        position: StagePosition,
+    ) -> tuple[InstallState, WorkflowResult | None]:
+        self.progress.stage_started(position)
+        try:
+            output = self._dispatch(stage, state)
+        except KeyboardInterrupt:
+            return state, WorkflowResult(
+                1,
+                state,
+                f"{stage.value} interrupted",
+                ProgressOutcome.ACTION,
+            )
+        except Exception as error:
+            return state, WorkflowResult(
+                2,
+                state,
+                f"{stage.value} failed: {error}",
+                ProgressOutcome.FAILURE,
+            )
+
+        outcome = self._stage_result(stage, output)
+        if outcome.blocked:
+            state = self._record_reports(state, outcome)
+            save_state(self.options.state_path, state)
+            return state, WorkflowResult(
+                2,
+                state,
+                outcome.message or f"{stage.value} is blocked",
+                ProgressOutcome.BLOCKED,
+            )
+        state = self._apply_output(state, stage, output, outcome)
+        save_state(self.options.state_path, state)
+        self.progress.stage_passed(position)
+        if (
+            stage is InstallStage.HOST_VERIFY
+            and isinstance(output, Report)
+            and output.status is Status.UNVERIFIED
+        ):
+            self._status("WARN", outcome.message)
+        return state, None
+
     def _run_dry(self, state: InstallState) -> WorkflowResult:
         mutating = {
             InstallStage.KERNEL_APPLY,
@@ -494,6 +551,9 @@ class InstallerWorkflow:
                 raise WorkflowError("host target user is unavailable")
             return self.actions.kernel_verify(
                 target_user=state.target_user,
+                display_manager_was_loaded=(
+                    state.display_manager_was_loaded
+                ),
                 display_manager_was_active=state.display_manager_was_active,
             )
         if stage is InstallStage.HOST_PLAN:
@@ -656,6 +716,9 @@ class InstallerWorkflow:
                     "host_adapter_id": state.host_adapter_id,
                     "kernel_reboot_boot_id": state.kernel_reboot_boot_id,
                     "recovery_kernel": state.recovery_kernel,
+                    "display_manager_was_loaded": (
+                        state.display_manager_was_loaded
+                    ),
                     "display_manager_was_active": (
                         state.display_manager_was_active
                     ),
@@ -849,6 +912,9 @@ class InstallerWorkflow:
                         else None
                     ),
                     "recovery_kernel": plan.running_kernel,
+                    "display_manager_was_loaded": (
+                        plan.display_manager_loaded
+                    ),
                     "display_manager_was_active": (
                         plan.display_manager_active
                     ),

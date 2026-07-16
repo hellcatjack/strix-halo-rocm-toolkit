@@ -5,6 +5,8 @@ import pytest
 
 from amd_ai import cli
 from amd_ai.cli import main
+from amd_ai.host.models import HostPlanPhase, PreparePlan
+from amd_ai.report import Status
 from amd_ai.runner import CommandResult
 from tests.unit.host.fakes import FakeRunner
 
@@ -95,6 +97,20 @@ def test_prepare_apply_rejects_any_confirmation_except_apply(monkeypatch, capsys
 
     assert code == 2
     assert "confirmation" in capsys.readouterr().err.lower()
+
+
+def test_applied_platform_plan_does_not_report_a_reboot() -> None:
+    plan = PreparePlan(
+        supported=True,
+        target_user="customer",
+        actions=(),
+        reboot_required=False,
+        phase=HostPlanPhase.TUNING,
+    )
+
+    report = cli._prepare_report(plan, mode="apply", applied=True)
+
+    assert report.status is Status.PASS
 
 
 def test_prepare_resolves_groups_for_target_user_not_sudo_process(monkeypatch):

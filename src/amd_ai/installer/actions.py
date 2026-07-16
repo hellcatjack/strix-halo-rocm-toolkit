@@ -110,6 +110,7 @@ class HostPlanResult:
     plan_digest: str
     adapter_id: str
     running_kernel: str
+    display_manager_loaded: bool
     display_manager_active: bool
 
     def __post_init__(self) -> None:
@@ -128,7 +129,10 @@ class HostPlanResult:
             self.running_kernel,
         ) is None:
             raise ActionError("host plan running kernel is invalid")
-        if type(self.display_manager_active) is not bool:
+        if (
+            type(self.display_manager_loaded) is not bool
+            or type(self.display_manager_active) is not bool
+        ):
             raise ActionError("host plan display manager state is invalid")
 
 
@@ -254,6 +258,7 @@ class ProductionInstallerActions:
             plan_digest=stage_input_digest(prepare_plan_payload(plan)),
             adapter_id=adapter.adapter_id,
             running_kernel=snapshot.kernel,
+            display_manager_loaded=snapshot.display_manager_loaded,
             display_manager_active=snapshot.display_manager_active,
         )
 
@@ -323,6 +328,7 @@ class ProductionInstallerActions:
                 "plan",
                 "plan_digest",
                 "running_kernel",
+                "display_manager_loaded",
                 "display_manager_active",
             },
         )
@@ -350,6 +356,7 @@ class ProductionInstallerActions:
             plan_digest=plan_digest,
             adapter_id=adapter_id,
             running_kernel=payload["running_kernel"],
+            display_manager_loaded=payload["display_manager_loaded"],
             display_manager_active=payload["display_manager_active"],
         )
 
@@ -422,10 +429,13 @@ class ProductionInstallerActions:
         self,
         *,
         target_user: str,
+        display_manager_was_loaded: bool,
         display_manager_was_active: bool,
     ) -> Report:
         command = self._sudo_helper_command()
         command.extend(("--target-user", target_user))
+        if display_manager_was_loaded:
+            command.append("--display-manager-was-loaded")
         if display_manager_was_active:
             command.append("--display-manager-was-active")
         command.append("verify-kernel")
@@ -514,17 +524,23 @@ class ProductionInstallerActions:
         self,
         *,
         target_user: str,
+        display_manager_was_loaded: bool,
         display_manager_was_active: bool,
     ) -> Report:
-        if type(display_manager_was_active) is not bool:
+        if (
+            type(display_manager_was_loaded) is not bool
+            or type(display_manager_was_active) is not bool
+        ):
             raise ActionError("display manager history must be a boolean")
         if self.effective_uid != 0:
             return self._sudo_kernel_verify(
                 target_user=target_user,
+                display_manager_was_loaded=display_manager_was_loaded,
                 display_manager_was_active=display_manager_was_active,
             )
         return evaluate_kernel_reboot(
             self._snapshot(target_user=target_user),
+            display_manager_was_loaded=display_manager_was_loaded,
             display_manager_was_active=display_manager_was_active,
         )
 

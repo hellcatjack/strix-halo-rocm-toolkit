@@ -33,7 +33,7 @@ mkdir -p reports
 
 退出码：`0` 表示通过或明确的 `unverified`，`1` 表示需要修改/重启，`2` 表示阻断。高于最低版本但未纳入版本化已测内核清单的 OEM patch kernel 会报告 `HOST.UPSTREAM_UNVERIFIED`。
 
-只有当前内核低于最低要求或不是 OEM kernel 时，才应引导安装/启动 `linux-oem-24.04`。对更新但尚未登记的 OEM patch kernel，不自动升级、降级或固定旧包；先执行设备与容器探针，普通安装可带 `unverified` 记录继续，正式发布前再运行完整硬件资格测试。
+只有当前内核低于最低要求或不是 OEM kernel 时，才应引导安装/启动 `linux-oem-6.17`。对更新但尚未登记的 OEM patch kernel，不自动升级、降级或固定旧包；先执行设备与容器探针，普通安装可带 `unverified` 记录继续，正式发布前再运行完整硬件资格测试。
 
 预检核对：
 
