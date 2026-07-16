@@ -2,10 +2,10 @@
 
 面向 **AMD Ryzen AI Max+ 395 / Radeon 8060S (`gfx1151`)** 的可恢复 ROCm 容器开发平台。它提供 Ubuntu 宿主机准备、公开且内容寻址的 ROCm/PyTorch 镜像、独立项目容器、受保护的 `pip` 工作流，以及可审计的 GPU 验证和精确修复。
 
-> - 当前工具包版本：`v0.3.0`
+> - 当前工具包版本：`v0.3.1`
 > - 正式软件基线：ROCm 7.2.1、Python 3.12、PyTorch 2.9.1
 > - 正式宿主适配器：Ubuntu 24.04.x AMD64
-> - Stable 镜像 release ID：`0.2.0`（`v0.3.0` 不重建镜像）
+> - Stable 镜像 release ID：`0.2.0`（`v0.3.1` 不重建镜像）
 
 ## 快速开始
 
@@ -38,7 +38,7 @@ TOOLKIT="$HOME/src/strix-halo-rocm-toolkit"
 PROJECT="$HOME/ai-projects/video-lab"
 
 mkdir -p "$(dirname "$TOOLKIT")"
-git clone --branch v0.3.0 --depth 1 \
+git clone --branch v0.3.1 --depth 1 \
   https://github.com/hellcatjack/strix-halo-rocm-toolkit.git \
   "$TOOLKIT"
 cd "$TOOLKIT"
@@ -264,7 +264,7 @@ sudo apt install -y git python3.12
 在任何写入前先执行只读检查：
 
 ```bash
-git clone --branch v0.3.0 --depth 1 \
+git clone --branch v0.3.1 --depth 1 \
   https://github.com/hellcatjack/strix-halo-rocm-toolkit.git
 cd strix-halo-rocm-toolkit
 mkdir -p reports
@@ -382,7 +382,7 @@ sudo reboot
   --image-source pull
 ```
 
-省略 `--state-path` 时安装器根据规范化后的项目绝对路径自动选择独立状态文件。`v0.3.0` 在 `PLAN` 中显示 `状态=<路径>（per-project）`；不同项目不会误用第一个项目的 `full` 状态。
+省略 `--state-path` 时安装器根据规范化后的项目绝对路径自动选择独立状态文件。`v0.3.1` 在 `PLAN` 中显示 `状态=<路径>（per-project）`；不同项目不会误用第一个项目的 `full` 状态。
 
 该模式仍要求以下条件全部通过：
 
@@ -491,7 +491,7 @@ HOST_PLAN_DIGEST="$(
 
 ## 安装进度与私有日志
 
-`v0.3.0` 的安装输出是确定的逐行事件，不使用 spinner，也不会依赖 TTY 原地刷新。默认顺序为 `PLAN`、`LOG`，然后每个选定阶段显示 `SKIP` 或 `START`；长步骤可显示 `DETAIL`、子命令原始进度和每 15 秒一次的 `WAIT`，检查点安全写入后才显示 `PASS`，最后显示 `SUMMARY` 和同一条 `LOG` 路径。
+`v0.3.1` 的安装输出是确定的逐行事件，不使用 spinner，也不会依赖 TTY 原地刷新。默认顺序为 `PLAN`、`LOG`，然后每个选定阶段显示 `SKIP` 或 `START`；长步骤可显示 `DETAIL`、子命令原始进度和每 15 秒一次的 `WAIT`，检查点安全写入后才显示 `PASS`，最后显示 `SUMMARY` 和同一条 `LOG` 路径。
 
 | 事件 | 含义 |
 | --- | --- |
@@ -532,7 +532,7 @@ HOST_PLAN_DIGEST="$(
   install-<UTC>-<pid>.log
 ```
 
-控制目录权限为 `0700`，日志文件为 `0600`。`v0.3.0` 不自动轮转或删除日志；确认不再需要审计证据后，由该用户自行清理。日志包含 Docker pull、BuildKit `plain` 输出、uv/pip、锁定 wheel 下载进度和 sudo helper 的 stderr；JSON 协议 stdout、检查命令和摘要读取仍保持捕获模式。
+控制目录权限为 `0700`，日志文件为 `0600`。`v0.3.1` 不自动轮转或删除日志；确认不再需要审计证据后，由该用户自行清理。日志包含 Docker pull、BuildKit `plain` 输出、uv/pip、锁定 wheel 下载进度和 sudo helper 的 stderr；JSON 协议 stdout、检查命令和摘要读取仍保持捕获模式。
 
 安装器会清除终端控制序列，并脱敏 URL userinfo、Authorization、凭据参数以及名称包含 token/password/secret/key 等标记的环境值。项目路径、镜像名称、包名和其他非密钥业务信息仍可能出现；把日志发给第三方前必须人工复核。
 
@@ -847,7 +847,7 @@ Repair 不运行 `docker system prune`，不使用通配镜像删除，不 force
 每次升级使用明确的发布标签：
 
 ```bash
-RELEASE_TAG="v0.3.0"
+RELEASE_TAG="v0.3.1"
 
 git fetch origin --tags
 git switch --detach "$RELEASE_TAG"
@@ -856,15 +856,15 @@ git switch --detach "$RELEASE_TAG"
 
 安装器为每个版本创建独立运行时，再原子切换 `current`。不要从含有未提交修改的 checkout 执行正式本地构建。
 
-从旧版升级时切换到 v0.3.0：
+从旧版升级时切换到 v0.3.1：
 
 ```bash
 git fetch origin --tags
-git switch --detach v0.3.0
+git switch --detach v0.3.1
 ./install.sh
 ```
 
-再次选择相同模式和项目目录。v0.3.0 使用状态 schema 3 和新的 17 阶段 full 流程。可重建旧 `BOOTSTRAP` 摘要的 `0.2.x` container 状态可以接管；full 状态会从 `BOOTSTRAP` 重新评估，但保留不可变镜像身份，且绝不复用旧宿主审批。升级后必须重新审阅独立的内核与平台计划。摘要损坏或输入漂移时必须按失败输出修复；不要删除状态文件绕过检查。
+再次选择相同模式和项目目录。v0.3.1 使用状态 schema 3 和 17 阶段 full 流程。`v0.3.0` full 状态从 `KERNEL_VERIFY` 起可由该诊断补丁原地接管，container 状态在完成 `BOOTSTRAP` 后可接管；可重建旧 `BOOTSTRAP` 摘要的 `0.2.x` container 状态也可以接管。更早的旧 full 状态仍从 `BOOTSTRAP` 重新评估，但保留不可变镜像身份，且绝不复用旧宿主审批。升级后必须重新审阅独立的内核与平台计划。摘要损坏或输入漂移时必须按失败输出修复；不要删除状态文件绕过检查。
 
 ### 查看共享层占用
 
@@ -917,6 +917,8 @@ rm -rf "$HOME/.local/state/strix-halo-rocm-toolkit"
 | `python3.12 is required` | 在宿主安装 Python 3.12；ROCm 和 Torch 不需要装到宿主 Python |
 | `interactive install requires a terminal` | 在真实交互终端运行，或提供完整 `--non-interactive` 参数 |
 | 安装器显示 `KERNEL_REBOOT_PENDING` | 执行 `sudo reboot`，随后重新运行完全相同的安装命令；平台阶段不会要求第二次重启 |
+| `host-verify returned change-required` | 这表示宿主策略尚未满足，不是 Docker/Buildx 安装失败。`v0.3.1` 的同一行 `CAUSE` 会列出 finding code 和 `action`；按提示修复后重新执行原安装命令，不要删除状态 |
+| `GPU.BIOS_VRAM_HIGH` | 在 BIOS/UEFI 将 UMA Frame Buffer 设为主板允许的最小值，建议 512 MiB；工具不会修改 GTT/TTM 或代替固件设置 |
 | Docker permission denied | 重新登录以刷新组成员关系，或运行 `sudo -v` 后让工具使用 `sudo docker` |
 | 找不到 `/dev/kfd` | 直接在宿主运行 `host-preflight`；不要用未映射设备的普通容器报告判断宿主 |
 | `HOST.UNSUPPORTED_OS` | 该发行版只支持只读采集，不能强制套用 Ubuntu 写入适配器 |

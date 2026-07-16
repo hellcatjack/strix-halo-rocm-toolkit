@@ -9,13 +9,15 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
+from amd_ai.report import Status
+
 
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 PROJECT_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
 USER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,31}")
 STATE_SCHEMA_VERSION = 3
-HOST_VERIFICATION_STATUSES = frozenset({"pass", "unverified"})
+VERIFICATION_STATUSES = frozenset(status.value for status in Status)
 FINDING_CODE_PATTERN = re.compile(r"[A-Z][A-Z0-9_.-]{1,127}")
 KERNEL_NAME_PATTERN = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}")
 
@@ -455,7 +457,7 @@ def _validate_verification_identity(
     kernel: str | None,
     findings: tuple[str, ...],
 ) -> tuple[str, ...]:
-    if status is not None and status not in HOST_VERIFICATION_STATUSES:
+    if status is not None and status not in VERIFICATION_STATUSES:
         raise InstallerModelError(
             f"install state {label} verification status is invalid"
         )

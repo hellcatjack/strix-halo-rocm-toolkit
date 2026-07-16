@@ -233,7 +233,7 @@ def test_early_schema_three_container_state_keeps_position(
         ({"recovery_kernel": "bad kernel"}, "recovery_kernel"),
         ({"display_manager_was_loaded": 1}, "display manager"),
         ({"display_manager_was_active": 1}, "display manager"),
-        ({"kernel_verification_status": "blocked"}, "status"),
+        ({"kernel_verification_status": "invalid"}, "status"),
         (
             {"kernel_verification_status": "pass"},
             "identity is incomplete",
@@ -251,6 +251,25 @@ def test_schema_three_rejects_invalid_kernel_checkpoint_fields(
 ):
     with pytest.raises(InstallerModelError, match=message):
         install_state(tmp_path, **changes)
+
+
+@pytest.mark.parametrize(
+    "status",
+    ("change-required", "reboot-required", "blocked"),
+)
+def test_schema_three_accepts_nonpassing_verification_statuses(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    state = install_state(
+        tmp_path,
+        kernel_verification_status=status,
+        kernel_kernel="6.17.0-1028-oem",
+        kernel_verification_findings=("GPU.INIT_FATAL",),
+    )
+
+    assert state.kernel_verification_status == status
+    assert state.kernel_verification_findings == ("GPU.INIT_FATAL",)
 
 
 def test_state_round_trip_uses_atomic_replace(

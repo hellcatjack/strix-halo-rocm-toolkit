@@ -386,6 +386,8 @@ class InstallerWorkflow:
 
             outcome = self._stage_result(stage, output)
             if outcome.blocked:
+                if isinstance(output, Report):
+                    state = self._apply_output(state, stage, output, outcome)
                 state = self._record_reports(state, outcome)
                 save_state(self.options.state_path, state)
                 return WorkflowResult(
@@ -466,6 +468,8 @@ class InstallerWorkflow:
 
         outcome = self._stage_result(stage, output)
         if outcome.blocked:
+            if isinstance(output, Report):
+                state = self._apply_output(state, stage, output, outcome)
             state = self._record_reports(state, outcome)
             save_state(self.options.state_path, state)
             return state, WorkflowResult(
@@ -475,6 +479,7 @@ class InstallerWorkflow:
                 ProgressOutcome.BLOCKED,
             )
         state = self._apply_output(state, stage, output, outcome)
+        state = self._record_reports(state, outcome)
         save_state(self.options.state_path, state)
         self.progress.stage_passed(position)
         if (
@@ -855,10 +860,14 @@ class InstallerWorkflow:
                 message = (
                     "kernel verification failed; reboot and select the retained "
                     "recovery kernel under Advanced options for Ubuntu, then "
-                    "inspect the current-boot amdgpu log"
+                    "inspect the current-boot amdgpu log; "
+                    + _report_finding_message(output)
                 )
             elif blocked:
-                message = f"{output.command} returned {output.status.value}"
+                message = (
+                    f"{output.command} returned {output.status.value}; "
+                    + _report_finding_message(output)
+                )
             else:
                 message = ""
             return StageResult(
@@ -1051,7 +1060,16 @@ class InstallerWorkflow:
             previous_series is not None and previous_series == current_series
         )
         if state.mode is InstallMode.FULL:
-            start = FULL_STAGE_ORDER.index(InstallStage.HOST_VERIFY)
+            diagnostic_patch = (
+                state.installer_version == "0.3.0"
+                and self.installer_version == "0.3.1"
+            )
+            start_stage = (
+                InstallStage.KERNEL_VERIFY
+                if diagnostic_patch
+                else InstallStage.HOST_VERIFY
+            )
+            start = FULL_STAGE_ORDER.index(start_stage)
             compatible_stage = state.current_stage in FULL_STAGE_ORDER[start:]
             compatible_version = same_series
         elif state.mode is InstallMode.CONTAINER:
@@ -1399,6 +1417,15 @@ def _report_kernel(report: Report, label: str) -> str:
     ) is None:
         raise WorkflowError(f"{label} report has no valid kernel identity")
     return kernel
+
+
+def _report_finding_message(report: Report) -> str:
+    if not report.findings:
+        return "no diagnostic findings were returned"
+    return " | ".join(
+        f"{finding.code}: {finding.summary}; action: {finding.remediation}"
+        for finding in report.findings
+    )
 
 
 def _require_disk_space(requirement: DiskRequirement) -> str | None:

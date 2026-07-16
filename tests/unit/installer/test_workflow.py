@@ -6,6 +6,8 @@ import shutil
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from amd_ai.host.models import HostPlanPhase, PlannedAction
 from amd_ai.installer.actions import prepare_plan_payload
 from amd_ai.installer.models import (
@@ -142,6 +144,19 @@ def returning_host_report(actions: FakeInstallerActions, report: Report) -> None
         return report
 
     actions.host_verify = host_verify  # type: ignore[method-assign]
+
+
+def returning_kernel_report(actions: FakeInstallerActions, report: Report) -> None:
+    def kernel_verify(**kwargs: object) -> Report:
+        assert kwargs == {
+            "target_user": "developer",
+            "display_manager_was_loaded": True,
+            "display_manager_was_active": True,
+        }
+        actions.calls.append("kernel_verify")
+        return report
+
+    actions.kernel_verify = kernel_verify  # type: ignore[method-assign]
 
 
 def full_options(
@@ -1177,6 +1192,59 @@ def test_changed_boot_resumes_at_kernel_verify_and_completes(
     )
 
 
+@pytest.mark.parametrize(
+    "status",
+    (Status.CHANGE_REQUIRED, Status.REBOOT_REQUIRED, Status.BLOCKED),
+)
+def test_kernel_verify_block_records_finding_and_recovery_action(
+    tmp_path: Path,
+    status: Status,
+) -> None:
+    first = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.host_change_requires_kernel_reboot(),
+        options=full_options(tmp_path),
+        prompts=FakePrompts(exact={"INSTALL-KERNEL": True, "APPLY": True}),
+        boot_id_reader=lambda: FIRST_BOOT_ID,
+    ).run()
+    assert first.exit_code == 1
+
+    report = Report(
+        command="host-kernel-verify",
+        status=status,
+        generated_at="2026-07-16T12:00:00Z",
+        facts={"kernel": "6.17.0-1028-oem"},
+        findings=(
+            Finding(
+                code="GPU.INIT_FATAL",
+                severity=Severity.ERROR,
+                summary="amdgpu initialization failed",
+                evidence="probe failed with error -22",
+                remediation="Boot the retained recovery kernel.",
+            ),
+        ),
+    )
+    resumed_actions = FakeInstallerActions.host_change_requires_kernel_reboot()
+    returning_kernel_report(resumed_actions, report)
+    result = installer_workflow(
+        tmp_path,
+        actions=resumed_actions,
+        options=full_options(tmp_path),
+        prompts=FakePrompts(),
+        boot_id_reader=lambda: SECOND_BOOT_ID,
+    ).run()
+
+    assert result.exit_code == 2
+    assert result.state is not None
+    assert result.state.current_stage is InstallStage.KERNEL_VERIFY
+    assert result.state.kernel_verification_status == status.value
+    assert result.state.kernel_verification_findings == ("GPU.INIT_FATAL",)
+    assert "GPU.INIT_FATAL" in result.message
+    assert "amdgpu initialization failed" in result.message
+    assert "Boot the retained recovery kernel" in result.message
+    assert "host_plan" not in resumed_actions.calls
+
+
 def test_unverified_newer_oem_kernel_warns_records_and_continues(
     tmp_path: Path,
 ) -> None:
@@ -1233,18 +1301,197 @@ def test_host_verify_change_required_remains_blocked(
 
     resumed_actions = FakeInstallerActions.host_change_requires_kernel_reboot()
     returning_host_report(resumed_actions, host_verify_report(Status.CHANGE_REQUIRED))
+    progress, _, stderr = workflow_progress(tmp_path)
     result = installer_workflow(
         tmp_path,
         actions=resumed_actions,
         options=full_options(tmp_path),
         prompts=FakePrompts(exact={"APPLY": True}),
         boot_id_reader=lambda: second_boot,
+        progress=progress,
     ).run()
 
     assert result.exit_code == 2
     assert result.state is not None
     assert result.state.current_stage is InstallStage.HOST_VERIFY
+    assert result.state.host_verification_status == "change-required"
+    assert result.state.host_verification_findings == ("GPU.PERMISSION",)
+    assert "GPU.PERMISSION" in result.message
+    assert "Start a new login session" in result.message
+    assert "CAUSE    host-verify returned change-required" in stderr.getvalue()
+    assert "GPU.PERMISSION" in stderr.getvalue()
+    assert "GPU groups are missing" in stderr.getvalue()
     assert "resolve_release" not in resumed_actions.calls
+
+    recovered_actions = FakeInstallerActions.host_change_requires_kernel_reboot()
+    returning_host_report(recovered_actions, host_verify_report(Status.PASS))
+    recovered = installer_workflow(
+        tmp_path,
+        actions=recovered_actions,
+        options=full_options(tmp_path),
+        prompts=FakePrompts(),
+        boot_id_reader=lambda: second_boot,
+    ).run()
+
+    assert recovered.exit_code == 0
+    assert recovered_actions.calls.index("kernel_verify") < (
+        recovered_actions.calls.index("host_verify")
+    )
+    assert recovered_actions.calls.index("host_verify") < (
+        recovered_actions.calls.index("resolve_release")
+    )
+    assert "host_apply" not in recovered_actions.calls
+    assert recovered.state is not None
+    assert recovered.state.host_verification_status == "pass"
+    assert recovered.state.host_verification_findings == ()
+
+
+def test_completed_host_guard_block_recovers_without_replaying_writes(
+    tmp_path: Path,
+) -> None:
+    options = full_options(tmp_path)
+    initial_actions = FakeInstallerActions.full_no_reboot()
+    returning_host_report(initial_actions, host_verify_report(Status.PASS))
+    initial = installer_workflow(
+        tmp_path,
+        actions=initial_actions,
+        options=options,
+        prompts=FakePrompts(exact={"INSTALL-KERNEL": True, "APPLY": True}),
+    ).run()
+    assert initial.exit_code == 0
+
+    blocked_actions = FakeInstallerActions.full_no_reboot()
+    returning_host_report(
+        blocked_actions,
+        host_verify_report(Status.CHANGE_REQUIRED),
+    )
+    blocked = installer_workflow(
+        tmp_path,
+        actions=blocked_actions,
+        options=options,
+        prompts=FakePrompts(),
+    ).run()
+
+    assert blocked.exit_code == 2
+    assert blocked.state is not None
+    assert blocked.state.host_verification_status == "change-required"
+    assert blocked.state.host_verification_findings == ("GPU.PERMISSION",)
+    assert "host_apply" not in blocked_actions.calls
+
+    recovered_actions = FakeInstallerActions.full_no_reboot()
+    returning_host_report(recovered_actions, host_verify_report(Status.PASS))
+    recovered = installer_workflow(
+        tmp_path,
+        actions=recovered_actions,
+        options=options,
+        prompts=FakePrompts(),
+    ).run()
+
+    assert recovered.exit_code == 0
+    assert recovered.state is not None
+    assert recovered.state.host_verification_status == "pass"
+    assert recovered.state.host_verification_findings == ()
+    assert recovered_actions.calls == ["kernel_verify", "host_verify"]
+
+
+def test_completed_verification_guards_refresh_state_timestamp(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    options = full_options(tmp_path)
+    initial_actions = FakeInstallerActions.full_no_reboot()
+    returning_host_report(initial_actions, host_verify_report(Status.PASS))
+    initial = installer_workflow(
+        tmp_path,
+        actions=initial_actions,
+        options=options,
+        prompts=FakePrompts(exact={"INSTALL-KERNEL": True, "APPLY": True}),
+    ).run()
+    assert initial.exit_code == 0
+
+    refreshed_at = "2030-01-02T03:04:05Z"
+    monkeypatch.setattr(
+        "amd_ai.installer.workflow._utc_timestamp",
+        lambda: refreshed_at,
+    )
+    guard_actions = FakeInstallerActions.full_no_reboot()
+    returning_host_report(guard_actions, host_verify_report(Status.PASS))
+    guarded = installer_workflow(
+        tmp_path,
+        actions=guard_actions,
+        options=options,
+        prompts=FakePrompts(),
+    ).run()
+
+    assert guarded.exit_code == 0
+    assert guarded.state is not None
+    assert guarded.state.updated_at == refreshed_at
+
+
+def test_v031_adopts_v030_state_blocked_at_kernel_verify(
+    tmp_path: Path,
+) -> None:
+    first = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.host_change_requires_kernel_reboot(),
+        options=full_options(tmp_path),
+        prompts=FakePrompts(exact={"INSTALL-KERNEL": True, "APPLY": True}),
+        boot_id_reader=lambda: FIRST_BOOT_ID,
+        installer_version="0.3.0",
+        installer_source_revision="d" * 40,
+    ).run()
+    assert first.exit_code == 1
+
+    old_actions = FakeInstallerActions.host_change_requires_kernel_reboot()
+    old_actions.failures[InstallStage.KERNEL_VERIFY] = RuntimeError(
+        "old installer hid the kernel finding"
+    )
+    old_result = installer_workflow(
+        tmp_path,
+        actions=old_actions,
+        options=full_options(tmp_path),
+        prompts=FakePrompts(),
+        boot_id_reader=lambda: SECOND_BOOT_ID,
+        installer_version="0.3.0",
+        installer_source_revision="d" * 40,
+    ).run()
+    assert old_result.exit_code == 2
+    assert old_result.state is not None
+    assert old_result.state.current_stage is InstallStage.KERNEL_VERIFY
+
+    report = Report(
+        command="host-kernel-verify",
+        status=Status.BLOCKED,
+        generated_at="2026-07-16T12:00:00Z",
+        facts={"kernel": "6.17.0-1028-oem"},
+        findings=(
+            Finding(
+                code="GPU.INIT_FATAL",
+                severity=Severity.ERROR,
+                summary="amdgpu initialization failed",
+                evidence="probe failed with error -22",
+                remediation="Boot the retained recovery kernel.",
+            ),
+        ),
+    )
+    patch_actions = FakeInstallerActions.host_change_requires_kernel_reboot()
+    returning_kernel_report(patch_actions, report)
+    patched = installer_workflow(
+        tmp_path,
+        actions=patch_actions,
+        options=full_options(tmp_path),
+        prompts=FakePrompts(),
+        boot_id_reader=lambda: SECOND_BOOT_ID,
+        installer_version="0.3.1",
+        installer_source_revision="e" * 40,
+    ).run()
+
+    assert patched.exit_code == 2
+    assert patched.state is not None
+    assert patched.state.installer_version == "0.3.1"
+    assert patched.state.kernel_verification_status == "blocked"
+    assert "GPU.INIT_FATAL" in patched.message
+    assert patch_actions.calls == ["kernel_verify"]
 
 
 def test_compatible_patch_installer_resumes_old_host_verify_state(
