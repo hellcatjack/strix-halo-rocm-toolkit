@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from amd_ai.host.models import PreparePlan
+from amd_ai.host.models import HostPlanPhase, PreparePlan
 from amd_ai.installer import privileged
 from amd_ai.installer.actions import HostPlanResult, prepare_plan_payload
 from amd_ai.installer.state import stage_input_digest
@@ -59,6 +59,48 @@ def test_privileged_verify_requires_target_user(monkeypatch, capsys) -> None:
     assert "requires --target-user" in capsys.readouterr().err
 
 
+def test_privileged_kernel_verify_forwards_display_history(monkeypatch, capsys):
+    captured: list[tuple[str, bool]] = []
+
+    class FakeActions:
+        def __init__(self, *, effective_uid: int, **kwargs) -> None:
+            del kwargs
+            assert effective_uid == 0
+
+        def kernel_verify(
+            self,
+            *,
+            target_user: str,
+            display_manager_was_active: bool,
+        ) -> Report:
+            captured.append((target_user, display_manager_was_active))
+            return Report(
+                command="host-kernel-verify",
+                status=Status.PASS,
+                generated_at="2026-07-10T20:28:14Z",
+                facts={"kernel": "6.17.0-1028-oem"},
+                findings=(),
+            )
+
+    monkeypatch.setattr(privileged.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(privileged, "ProductionInstallerActions", FakeActions)
+
+    code = privileged.main(
+        [
+            "--target-user",
+            "developer",
+            "--display-manager-was-active",
+            "verify-kernel",
+        ]
+    )
+
+    assert code == 0
+    assert captured == [("developer", True)]
+    assert json.loads(capsys.readouterr().out)["report"]["command"] == (
+        "host-kernel-verify"
+    )
+
+
 @pytest.mark.parametrize(
     ("progress_args", "progress_visible"),
     [
@@ -73,6 +115,7 @@ def test_privileged_apply_keeps_json_on_stdout_and_progress_on_stderr(
     progress_visible: bool,
 ) -> None:
     plan = PreparePlan(
+        phase=HostPlanPhase.TUNING,
         supported=True,
         target_user="developer",
         actions=(),
@@ -92,10 +135,18 @@ def test_privileged_apply_keeps_json_on_stdout_and_progress_on_stderr(
             assert effective_uid == 0
             self.command_observer = command_observer
 
-        def host_plan(self, *, target_user: str, memory_gib=None):
+        def host_plan(self, *, target_user: str, phase, memory_gib=None):
             del memory_gib
             assert target_user == "developer"
-            return HostPlanResult(None, plan, digest, "ubuntu-24.04")
+            assert phase is HostPlanPhase.TUNING
+            return HostPlanResult(
+                None,
+                plan,
+                digest,
+                "ubuntu-24.04",
+                "6.17.0-1028-oem",
+                True,
+            )
 
         def host_apply(self, host_plan, *, include_docker_group: bool):
             del host_plan, include_docker_group
@@ -118,6 +169,8 @@ def test_privileged_apply_keeps_json_on_stdout_and_progress_on_stderr(
         *progress_args,
         "--target-user",
         "developer",
+        "--phase",
+        "tuning",
         "--expected-plan-digest",
         digest,
         "apply",

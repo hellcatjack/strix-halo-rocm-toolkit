@@ -15,11 +15,16 @@ from amd_ai.doctor.checks import run_doctor
 from amd_ai.doctor.models import DoctorReport
 from amd_ai.host.adapters.base import select_adapter
 from amd_ai.host.apply import execute_plan
-from amd_ai.host.models import HostSnapshot, PlannedAction, PreparePlan
+from amd_ai.host.models import (
+    HostPlanPhase,
+    HostSnapshot,
+    PlannedAction,
+    PreparePlan,
+)
 from amd_ai.host.policy import evaluate_preflight
 from amd_ai.host.prepare import create_prepare_plan, with_docker_group_action
 from amd_ai.host.probe import HostProbe
-from amd_ai.host.verify import evaluate_post_reboot
+from amd_ai.host.verify import evaluate_kernel_reboot, evaluate_post_reboot
 from amd_ai.image.build import (
     ROCM_PYTHON_TAG,
     STABLE_TORCH_TAG,
@@ -104,6 +109,27 @@ class HostPlanResult:
     plan: PreparePlan
     plan_digest: str
     adapter_id: str
+    running_kernel: str
+    display_manager_active: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.plan_digest, str) or re.fullmatch(
+            r"[0-9a-f]{64}", self.plan_digest
+        ) is None:
+            raise ActionError("host plan digest is invalid")
+        if (
+            not isinstance(self.adapter_id, str)
+            or not self.adapter_id
+            or "\0" in self.adapter_id
+        ):
+            raise ActionError("host plan adapter ID is invalid")
+        if not isinstance(self.running_kernel, str) or re.fullmatch(
+            r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}",
+            self.running_kernel,
+        ) is None:
+            raise ActionError("host plan running kernel is invalid")
+        if type(self.display_manager_active) is not bool:
+            raise ActionError("host plan display manager state is invalid")
 
 
 @dataclass(frozen=True)
@@ -202,11 +228,17 @@ class ProductionInstallerActions:
         self,
         *,
         target_user: str,
+        phase: HostPlanPhase,
         memory_gib: int | None = None,
     ) -> HostPlanResult:
+        try:
+            phase = HostPlanPhase(phase)
+        except (TypeError, ValueError) as error:
+            raise ActionError("host plan phase is invalid") from error
         if self.effective_uid != 0:
             return self._sudo_host_plan(
                 target_user=target_user,
+                phase=phase,
                 memory_gib=memory_gib,
             )
         snapshot = self._snapshot(target_user=target_user)
@@ -217,12 +249,15 @@ class ProductionInstallerActions:
             snapshot,
             target_user=target_user,
             memory_gib=memory_gib,
+            phase=phase,
         )
         return HostPlanResult(
             snapshot=snapshot,
             plan=plan,
             plan_digest=stage_input_digest(prepare_plan_payload(plan)),
             adapter_id=adapter.adapter_id,
+            running_kernel=snapshot.kernel,
+            display_manager_active=snapshot.display_manager_active,
         )
 
     def host_apply(
@@ -231,6 +266,11 @@ class ProductionInstallerActions:
         *,
         include_docker_group: bool,
     ) -> StageResult:
+        if (
+            include_docker_group
+            and host_plan.plan.phase is not HostPlanPhase.TUNING
+        ):
+            raise ActionError("Docker group authorization belongs to tuning only")
         if self.effective_uid != 0:
             return self._sudo_host_apply(
                 host_plan,
@@ -238,6 +278,10 @@ class ProductionInstallerActions:
             )
         if host_plan.snapshot is None:
             raise ActionError("root host apply requires a fresh host snapshot")
+        if stage_input_digest(prepare_plan_payload(host_plan.plan)) != (
+            host_plan.plan_digest
+        ):
+            raise ActionError("host plan changed before apply; replan is required")
         plan = (
             with_docker_group_action(host_plan.plan)
             if include_docker_group
@@ -259,13 +303,19 @@ class ProductionInstallerActions:
                 "skipped_codes": list(result.skipped_codes),
                 "reboot_required": plan.reboot_required,
                 "docker_group_added": include_docker_group,
+                "phase": plan.phase.value,
             }
         )
 
     def _sudo_host_plan(
-        self, *, target_user: str, memory_gib: int | None
+        self,
+        *,
+        target_user: str,
+        phase: HostPlanPhase,
+        memory_gib: int | None,
     ) -> HostPlanResult:
         command = self._sudo_helper_command()
+        command.extend(("--phase", phase.value))
         if memory_gib is not None:
             command.extend(("--memory-gib", str(memory_gib)))
         command.extend(("--target-user", target_user, "plan"))
@@ -273,7 +323,14 @@ class ProductionInstallerActions:
         _require_exact_keys(
             "privileged host plan",
             payload,
-            {"schema_version", "adapter_id", "plan", "plan_digest"},
+            {
+                "schema_version",
+                "adapter_id",
+                "plan",
+                "plan_digest",
+                "running_kernel",
+                "display_manager_active",
+            },
         )
         if payload["schema_version"] != 1:
             raise ActionError("privileged host plan schema is invalid")
@@ -289,6 +346,8 @@ class ProductionInstallerActions:
         plan = prepare_plan_from_payload(payload["plan"])
         if plan.target_user != target_user:
             raise ActionError("privileged host plan target user changed")
+        if plan.phase is not phase:
+            raise ActionError("privileged host plan phase changed")
         if stage_input_digest(prepare_plan_payload(plan)) != plan_digest:
             raise ActionError("privileged host plan digest does not match payload")
         return HostPlanResult(
@@ -296,6 +355,8 @@ class ProductionInstallerActions:
             plan=plan,
             plan_digest=plan_digest,
             adapter_id=adapter_id,
+            running_kernel=payload["running_kernel"],
+            display_manager_active=payload["display_manager_active"],
         )
 
     def _sudo_host_apply(
@@ -311,6 +372,8 @@ class ProductionInstallerActions:
                 host_plan.plan.target_user,
                 "--expected-plan-digest",
                 host_plan.plan_digest,
+                "--phase",
+                host_plan.plan.phase.value,
             )
         )
         if include_docker_group:
@@ -333,6 +396,7 @@ class ProductionInstallerActions:
             "executed_codes",
             "reboot_required",
             "skipped_codes",
+            "phase",
         }
         _require_exact_keys("privileged host apply facts", facts, expected)
         if (
@@ -342,6 +406,7 @@ class ProductionInstallerActions:
             or type(facts["reboot_required"]) is not bool
             or not _string_list(facts["executed_codes"])
             or not _string_list(facts["skipped_codes"])
+            or facts["phase"] != host_plan.plan.phase.value
         ):
             raise ActionError("privileged host apply facts are invalid")
         return StageResult(facts=facts)
@@ -358,6 +423,30 @@ class ProductionInstallerActions:
         if payload["schema_version"] != 1:
             raise ActionError("privileged host verify schema is invalid")
         return report_from_payload(payload["report"])
+
+    def _sudo_kernel_verify(
+        self,
+        *,
+        target_user: str,
+        display_manager_was_active: bool,
+    ) -> Report:
+        command = self._sudo_helper_command()
+        command.extend(("--target-user", target_user))
+        if display_manager_was_active:
+            command.append("--display-manager-was-active")
+        command.append("verify-kernel")
+        payload = self._run_sudo_helper(command, operation="kernel verify")
+        _require_exact_keys(
+            "privileged kernel verify",
+            payload,
+            {"schema_version", "report"},
+        )
+        if payload["schema_version"] != 1:
+            raise ActionError("privileged kernel verify schema is invalid")
+        return report_from_payload(
+            payload["report"],
+            expected_command="host-kernel-verify",
+        )
 
     def _sudo_helper_command(self) -> list[str]:
         command = ["sudo"]
@@ -425,6 +514,24 @@ class ProductionInstallerActions:
             return self._sudo_host_verify(target_user=target_user)
         return evaluate_post_reboot(
             self._snapshot(target_user=target_user)
+        )
+
+    def kernel_verify(
+        self,
+        *,
+        target_user: str,
+        display_manager_was_active: bool,
+    ) -> Report:
+        if type(display_manager_was_active) is not bool:
+            raise ActionError("display manager history must be a boolean")
+        if self.effective_uid != 0:
+            return self._sudo_kernel_verify(
+                target_user=target_user,
+                display_manager_was_active=display_manager_was_active,
+            )
+        return evaluate_kernel_reboot(
+            self._snapshot(target_user=target_user),
+            display_manager_was_active=display_manager_was_active,
         )
 
     def container_host_check(self) -> StageResult:
@@ -731,6 +838,7 @@ class ProductionInstallerActions:
 
 def prepare_plan_payload(plan: PreparePlan) -> dict[str, object]:
     return {
+        "phase": plan.phase.value,
         "supported": plan.supported,
         "target_user": plan.target_user,
         "actions": [asdict(action) for action in plan.actions],
@@ -744,7 +852,7 @@ def prepare_plan_from_payload(value: object) -> PreparePlan:
     _require_exact_keys(
         "privileged host plan payload",
         value,
-        {"supported", "target_user", "actions", "reboot_required"},
+        {"phase", "supported", "target_user", "actions", "reboot_required"},
     )
     if (
         type(value["supported"]) is not bool
@@ -755,6 +863,10 @@ def prepare_plan_from_payload(value: object) -> PreparePlan:
     ):
         raise ActionError("privileged host plan payload fields are invalid")
     actions: list[PlannedAction] = []
+    try:
+        phase = HostPlanPhase(value["phase"])
+    except (TypeError, ValueError) as error:
+        raise ActionError("privileged host plan phase is invalid") from error
     for raw in value["actions"]:
         if not isinstance(raw, dict):
             raise ActionError("privileged host plan action is not an object")
@@ -784,6 +896,7 @@ def prepare_plan_from_payload(value: object) -> PreparePlan:
             )
         )
     return PreparePlan(
+        phase=phase,
         supported=value["supported"],
         target_user=value["target_user"],
         actions=tuple(actions),
@@ -791,7 +904,11 @@ def prepare_plan_from_payload(value: object) -> PreparePlan:
     )
 
 
-def report_from_payload(value: object) -> Report:
+def report_from_payload(
+    value: object,
+    *,
+    expected_command: str = "host-verify",
+) -> Report:
     if not isinstance(value, dict):
         raise ActionError("privileged host report is not an object")
     _require_exact_keys(
@@ -808,7 +925,7 @@ def report_from_payload(value: object) -> Report:
     )
     if (
         value["schema_version"] != 1
-        or value["command"] != "host-verify"
+        or value["command"] != expected_command
         or not isinstance(value["generated_at"], str)
         or not value["generated_at"].endswith("Z")
         or not isinstance(value["facts"], dict)

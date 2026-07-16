@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from amd_ai.host.models import PreparePlan
+from amd_ai.host.models import HostPlanPhase, PreparePlan
 from amd_ai.installer import actions
 from amd_ai.installer.actions import (
     ActionError,
@@ -68,16 +68,24 @@ def test_host_plan_uses_existing_probe_and_prepare_policy(
             return snapshot
 
     expected = PreparePlan(
+        phase=HostPlanPhase.KERNEL,
         supported=True,
         target_user="developer",
         actions=(),
         reboot_required=False,
     )
 
-    def create(snapshot_value, *, target_user: str, memory_gib=None):
+    def create(
+        snapshot_value,
+        *,
+        target_user: str,
+        phase: HostPlanPhase,
+        memory_gib=None,
+    ):
         del snapshot_value, memory_gib
         calls.append("create_prepare_plan")
         assert target_user == "developer"
+        assert phase is HostPlanPhase.KERNEL
         return expected
 
     monkeypatch.setattr(actions, "HostProbe", Probe)
@@ -87,13 +95,16 @@ def test_host_plan_uses_existing_probe_and_prepare_policy(
     )
 
     result = ProductionInstallerActions(effective_uid=0).host_plan(
-        target_user="developer"
+        target_user="developer",
+        phase=HostPlanPhase.KERNEL,
     )
 
     assert calls == ["HostProbe.collect", "create_prepare_plan"]
     assert result.plan == expected
     assert result.plan_digest == stage_input_digest(prepare_plan_payload(expected))
     assert result.adapter_id == "ubuntu-24.04"
+    assert result.running_kernel == snapshot.kernel
+    assert result.display_manager_active is True
 
 
 def test_release_pull_calls_exact_release_api(
@@ -368,6 +379,7 @@ def test_default_release_registry_pull_uses_empty_auth_context(
 
 def test_nonroot_host_plan_is_recreated_by_audited_sudo_helper() -> None:
     plan = PreparePlan(
+        phase=HostPlanPhase.KERNEL,
         supported=True,
         target_user="developer",
         actions=(),
@@ -379,6 +391,8 @@ def test_nonroot_host_plan_is_recreated_by_audited_sudo_helper() -> None:
             "adapter_id": "ubuntu-24.04",
             "plan": prepare_plan_payload(plan),
             "plan_digest": digest,
+            "running_kernel": "6.14.0-1020-oem",
+            "display_manager_active": True,
             "schema_version": 1,
         }
     )
@@ -398,7 +412,7 @@ def test_nonroot_host_plan_is_recreated_by_audited_sudo_helper() -> None:
         non_interactive=True,
         privileged_run=privileged_run,
         command_observer=observer,
-    ).host_plan(target_user="developer")
+    ).host_plan(target_user="developer", phase=HostPlanPhase.KERNEL)
 
     assert result.snapshot is None
     assert result.plan == plan
@@ -407,12 +421,17 @@ def test_nonroot_host_plan_is_recreated_by_audited_sudo_helper() -> None:
     assert "amd_ai.installer.privileged" in captured[0]
     progress_index = captured[0].index("--progress-mode")
     assert captured[0][progress_index + 1] == "default"
+    phase_index = captured[0].index("--phase")
+    assert captured[0][phase_index + 1] == "kernel"
     assert captured[0][-3:] == ("--target-user", "developer", "plan")
+    assert result.running_kernel == "6.14.0-1020-oem"
+    assert result.display_manager_active is True
     assert observer.stderr_lines == ["helper-progress\n"]
 
 
 def test_nonroot_host_apply_passes_only_digest_and_never_reboot() -> None:
     plan = PreparePlan(
+        phase=HostPlanPhase.KERNEL,
         supported=True,
         target_user="developer",
         actions=(),
@@ -424,6 +443,8 @@ def test_nonroot_host_apply_passes_only_digest_and_never_reboot() -> None:
         plan=plan,
         plan_digest=digest,
         adapter_id="ubuntu-24.04",
+        running_kernel="6.14.0-1020-oem",
+        display_manager_active=True,
     )
     captured: list[tuple[str, ...]] = []
 
@@ -437,6 +458,7 @@ def test_nonroot_host_apply_passes_only_digest_and_never_reboot() -> None:
                 "executed_codes": [],
                 "reboot_required": True,
                 "skipped_codes": ["HOST.REBOOT"],
+                "phase": "kernel",
             },
             "schema_version": 1,
         }
@@ -452,7 +474,42 @@ def test_nonroot_host_apply_passes_only_digest_and_never_reboot() -> None:
     command = captured[0]
     assert "--expected-plan-digest" in command
     assert digest in command
+    assert command[command.index("--phase") + 1] == "kernel"
     assert "reboot" not in command
+
+
+def test_nonroot_host_plan_rejects_privileged_phase_drift() -> None:
+    tuning = PreparePlan(
+        phase=HostPlanPhase.TUNING,
+        supported=True,
+        target_user="developer",
+        actions=(),
+        reboot_required=False,
+    )
+    digest = stage_input_digest(prepare_plan_payload(tuning))
+    response = json.dumps(
+        {
+            "adapter_id": "ubuntu-24.04",
+            "display_manager_active": True,
+            "plan": prepare_plan_payload(tuning),
+            "plan_digest": digest,
+            "running_kernel": "6.17.0-1028-oem",
+            "schema_version": 1,
+        }
+    )
+
+    production = ProductionInstallerActions(
+        effective_uid=1000,
+        privileged_run=lambda argv, *, observer: CommandResult(
+            tuple(argv), 0, response, ""
+        ),
+    )
+
+    with pytest.raises(ActionError, match="phase changed"):
+        production.host_plan(
+            target_user="developer",
+            phase=HostPlanPhase.KERNEL,
+        )
 
 
 def test_nonroot_host_verify_uses_privileged_read_only_helper() -> None:
@@ -485,6 +542,40 @@ def test_nonroot_host_verify_uses_privileged_read_only_helper() -> None:
     assert captured[0][-1] == "verify"
     assert captured[0][captured[0].index("--target-user") + 1] == "developer"
     assert "apply" not in captured[0]
+
+
+def test_nonroot_kernel_verify_uses_dedicated_read_only_helper() -> None:
+    report = {
+        "command": "host-kernel-verify",
+        "facts": {"kernel": "6.17.0-1028-oem"},
+        "findings": [],
+        "generated_at": "2026-07-10T12:00:00Z",
+        "schema_version": 1,
+        "status": "pass",
+    }
+    captured: list[tuple[str, ...]] = []
+
+    def privileged_run(argv, *, observer):
+        del observer
+        captured.append(tuple(argv))
+        return CommandResult(
+            tuple(argv),
+            0,
+            json.dumps({"report": report, "schema_version": 1}),
+            "",
+        )
+
+    result = ProductionInstallerActions(
+        effective_uid=1000,
+        privileged_run=privileged_run,
+    ).kernel_verify(
+        target_user="developer",
+        display_manager_was_active=True,
+    )
+
+    assert result.status is actions.Status.PASS
+    assert captured[0][-1] == "verify-kernel"
+    assert "--display-manager-was-active" in captured[0]
 
 
 @pytest.mark.parametrize(
@@ -521,7 +612,10 @@ def test_privileged_protocol_rejects_polluted_or_truncated_stdout(
     )
 
     with pytest.raises(ActionError) as error:
-        production.host_plan(target_user="developer")
+        production.host_plan(
+            target_user="developer",
+            phase=HostPlanPhase.TUNING,
+        )
 
     assert "bounded helper evidence" in str(error.value)
     assert "secret-protocol-data" not in terminal.getvalue()

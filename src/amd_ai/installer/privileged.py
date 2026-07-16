@@ -12,6 +12,7 @@ from amd_ai.installer.actions import (
     ProductionInstallerActions,
     prepare_plan_payload,
 )
+from amd_ai.host.models import HostPlanPhase
 from amd_ai.installer.progress import (
     ProgressMode,
     StderrCommandObserver,
@@ -28,11 +29,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-plan-digest")
     parser.add_argument("--include-docker-group", action="store_true")
     parser.add_argument(
+        "--phase",
+        choices=tuple(phase.value for phase in HostPlanPhase),
+    )
+    parser.add_argument(
+        "--display-manager-was-active",
+        action="store_true",
+    )
+    parser.add_argument(
         "--progress-mode",
         choices=tuple(mode.value for mode in ProgressMode),
         default=ProgressMode.QUIET.value,
     )
-    parser.add_argument("operation", choices=("plan", "apply", "verify"))
+    parser.add_argument(
+        "operation",
+        choices=("plan", "apply", "verify", "verify-kernel"),
+    )
     return parser
 
 
@@ -53,7 +65,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             command_observer=observer,
             progress_mode=progress_mode,
         )
-        if args.operation == "verify":
+        if args.operation in {"verify", "verify-kernel"}:
             if not args.target_user:
                 raise ActionError("verify mode requires --target-user")
             if any(
@@ -61,20 +73,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.memory_gib is not None,
                     args.expected_plan_digest is not None,
                     args.include_docker_group,
+                    args.phase is not None,
                 )
             ):
                 raise ActionError("verify mode received plan/apply arguments")
+            if args.operation == "verify" and args.display_manager_was_active:
+                raise ActionError("final verify received kernel-only arguments")
+            report = (
+                actions.kernel_verify(
+                    target_user=args.target_user,
+                    display_manager_was_active=(
+                        args.display_manager_was_active
+                    ),
+                )
+                if args.operation == "verify-kernel"
+                else actions.host_verify(target_user=args.target_user)
+            )
             payload = {
-                "report": actions.host_verify(
-                    target_user=args.target_user
-                ).to_dict(),
+                "report": report.to_dict(),
                 "schema_version": 1,
             }
         else:
             if not args.target_user:
                 raise ActionError("plan/apply mode requires --target-user")
+            if args.phase is None:
+                raise ActionError("plan/apply mode requires --phase")
+            if args.display_manager_was_active:
+                raise ActionError("plan/apply mode received verify-only arguments")
             host_plan = actions.host_plan(
                 target_user=args.target_user,
+                phase=HostPlanPhase(args.phase),
                 memory_gib=args.memory_gib,
             )
         if args.operation == "plan":
@@ -84,6 +112,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "adapter_id": host_plan.adapter_id,
                 "plan": prepare_plan_payload(host_plan.plan),
                 "plan_digest": host_plan.plan_digest,
+                "running_kernel": host_plan.running_kernel,
+                "display_manager_active": host_plan.display_manager_active,
                 "schema_version": 1,
             }
         elif args.operation == "apply":
