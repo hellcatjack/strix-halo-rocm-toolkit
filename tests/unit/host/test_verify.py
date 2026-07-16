@@ -199,13 +199,19 @@ def test_unavailable_dmesg_blocks_verification():
     assert "HOST.DMESG_UNAVAILABLE" in finding_codes(report)
 
 
-def test_live_ttm_must_match_the_computed_128_gib_target():
+@pytest.mark.parametrize("live_limit", [None, 0, 1, 8183158])
+def test_final_verification_treats_ttm_limit_as_diagnostic_only(live_limit):
     report = evaluate_post_reboot(
-        healthy_snapshot(kernel="6.14.0-1018-oem", ttm_pages_limit=1)
+        healthy_snapshot(
+            kernel="6.17.0-1028-oem",
+            ttm_pages_limit=live_limit,
+        )
     )
 
-    assert report.status.value == "reboot-required"
-    assert "HOST.TTM_MISMATCH" in finding_codes(report)
+    assert report.status is Status.UNVERIFIED
+    assert report.facts["ttm_pages_limit"] == live_limit
+    assert "HOST.TTM_MISMATCH" not in finding_codes(report)
+    assert "HOST.MEMORY_CONFLICT" not in finding_codes(report)
 
 
 def test_unlisted_oem_617_and_successful_gfx1151_probe_is_unverified():

@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from amd_ai.host.models import HostSnapshot
 from amd_ai.host.policy import evaluate_preflight
-from amd_ai.host.ttm import MemoryConflict, compute_ttm_plan
 from amd_ai.report import Finding, Report, Severity, Status
 from amd_ai.runner import CommandResult, Runner
 
@@ -125,41 +124,6 @@ def evaluate_post_reboot(snapshot: HostSnapshot) -> Report:
     findings = list(preflight.findings)
     statuses = [preflight.status]
     facts = dict(preflight.facts)
-
-    try:
-        ttm = compute_ttm_plan(
-            mem_total_kib=snapshot.mem_total_kib,
-            page_size=snapshot.page_size,
-            dmi_memory_bytes=snapshot.dmi_memory_bytes,
-        )
-    except (MemoryConflict, ValueError) as error:
-        findings.append(
-            Finding(
-                code="HOST.MEMORY_CONFLICT",
-                severity=Severity.ERROR,
-                summary="The TTM target cannot be computed safely",
-                evidence=str(error),
-                remediation="Resolve the memory discrepancy or use an explicit reviewed capacity.",
-            )
-        )
-        statuses.append(Status.BLOCKED)
-    else:
-        facts["expected_ttm_pages_limit"] = ttm.pages_limit
-        facts["nominal_memory_gib"] = ttm.nominal_gib
-        if snapshot.ttm_pages_limit != ttm.pages_limit:
-            findings.append(
-                Finding(
-                    code="HOST.TTM_MISMATCH",
-                    severity=Severity.ERROR,
-                    summary="The live TTM page limit does not match the AI Max target",
-                    evidence=(
-                        f"live={snapshot.ttm_pages_limit!r}, "
-                        f"expected={ttm.pages_limit}"
-                    ),
-                    remediation="Apply the TTM plan, reboot, and run host-verify again.",
-                )
-            )
-            statuses.append(Status.REBOOT_REQUIRED)
 
     log_findings = _current_boot_gpu_findings(snapshot)
     findings.extend(log_findings)
