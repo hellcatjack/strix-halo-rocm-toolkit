@@ -16,7 +16,10 @@ class FakeRunner:
 
     @classmethod
     def healthy_target(cls, *, with_rocm64: bool = False) -> "FakeRunner":
-        package_output = "linux-firmware\t20240318.git3b128b60-0ubuntu2\n"
+        package_output = (
+            "linux-firmware\t20240318.git3b128b60-0ubuntu2\n"
+            "docker-ce-cli\t5:27.5.1-1~ubuntu.24.04~noble\n"
+        )
         if with_rocm64:
             package_output += (
                 "rocm-core:amd64\t6.4.43483-1\n"
@@ -47,7 +50,29 @@ class FakeRunner:
             ),
             ("dkms", "status"): (0, "", ""),
             ("docker", "version", "--format", "{{.Server.Version}}"): (0, "27.5.1\n", ""),
+            ("docker", "buildx", "version"): (
+                0,
+                "github.com/docker/buildx v0.30.1\n",
+                "",
+            ),
             ("docker", "version"): (0, "Docker version 27.5.1\n", ""),
+            ("apt-cache", "policy", "linux-oem-6.17"): (
+                0,
+                "linux-oem-6.17:\n  Candidate: 6.17.0-1028.28\n",
+                "",
+            ),
+            (
+                "systemctl",
+                "show",
+                "display-manager",
+                "--property=LoadState",
+                "--value",
+            ): (0, "loaded\n", ""),
+            ("systemctl", "is-active", "display-manager"): (
+                0,
+                "active\n",
+                "",
+            ),
             ("dmesg", "--color=never"): (
                 0,
                 "amdgpu: 512M of VRAM memory ready\n",

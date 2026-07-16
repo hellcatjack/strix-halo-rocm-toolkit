@@ -1,6 +1,7 @@
 import shutil
 from pathlib import Path
 
+from amd_ai.host.models import DockerDistribution
 from amd_ai.host.probe import HostProbe
 from amd_ai.runner import CommandResult
 from tests.unit.host.fakes import FakeRunner
@@ -26,6 +27,12 @@ def test_probe_collects_target_snapshot():
     assert snapshot.dedicated_vram_mib == 512
     assert snapshot.device_gids == {"/dev/kfd": 0, "/dev/dri/renderD128": 128}
     assert snapshot.docker_version == "27.5.1"
+    assert snapshot.docker_buildx_version == "github.com/docker/buildx v0.30.1"
+    assert snapshot.docker_buildx_error is None
+    assert snapshot.docker_distribution is DockerDistribution.DOCKER_CE
+    assert snapshot.kernel_oem_617_candidate == "6.17.0-1028.28"
+    assert snapshot.display_manager_loaded is True
+    assert snapshot.display_manager_active is True
     assert snapshot.dmesg_available is True
 
 

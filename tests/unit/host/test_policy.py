@@ -12,6 +12,21 @@ def finding_codes(report):
     return {finding.code for finding in report.findings}
 
 
+def test_report_exposes_docker_kernel_candidate_and_display_facts():
+    report = evaluate_preflight(healthy_snapshot())
+
+    assert report.facts["docker_runtime_version"] == "27.5.1"
+    assert report.facts["docker_buildx_version"] == (
+        "github.com/docker/buildx v0.30.1"
+    )
+    assert report.facts["docker_distribution"] == "docker-ce"
+    assert report.facts["kernel_oem_617_candidate"] == "6.17.0-1028.28"
+    assert report.facts["display_manager"] == {
+        "loaded": True,
+        "active": True,
+    }
+
+
 def test_healthy_gfx1151_oem_host_passes():
     report = evaluate_preflight(healthy_snapshot(kernel="6.14.0-1018-oem"))
 
@@ -109,4 +124,3 @@ def test_ubuntu_2404_amd64_selects_the_write_adapter():
 
     assert adapter is not None
     assert adapter.adapter_id == "ubuntu-24.04"
-

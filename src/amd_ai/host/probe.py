@@ -7,6 +7,8 @@ from pathlib import Path
 
 from amd_ai.host.models import AptSourceFile, HostSnapshot, InstalledPackage
 from amd_ai.host.parsers import (
+    classify_docker_distribution,
+    parse_apt_candidate,
     parse_apt_policy_origin,
     parse_cmdline,
     parse_dmi_memory_bytes,
@@ -118,6 +120,24 @@ class HostProbe:
                 "{{.Server.Version}}",
             ]
         )
+        buildx_result = self._run(
+            [*self._docker_prefix, "buildx", "version"]
+        )
+        kernel_candidate_result = self._run(
+            ["apt-cache", "policy", "linux-oem-6.17"]
+        )
+        display_load_result = self._run(
+            [
+                "systemctl",
+                "show",
+                "display-manager",
+                "--property=LoadState",
+                "--value",
+            ]
+        )
+        display_active_result = self._run(
+            ["systemctl", "is-active", "display-manager"]
+        )
         dmesg_result = self._run(["dmesg", "--color=never"])
         if dmesg_result.returncode != 0 and self._dmesg_fallback is not None:
             dmesg_result = self._run(list(self._dmesg_fallback))
@@ -127,6 +147,20 @@ class HostProbe:
             InstalledPackage(name, version, self._package_origin(name))
             for name, version in parse_dpkg_packages(package_result.stdout)
         )
+        docker_version = (
+            docker_result.stdout.strip()
+            if docker_result.returncode == 0 and docker_result.stdout.strip()
+            else None
+        )
+        buildx_version = (
+            buildx_result.stdout.strip()
+            if buildx_result.returncode == 0 and buildx_result.stdout.strip()
+            else None
+        )
+        buildx_error = None
+        if buildx_version is None:
+            evidence = buildx_result.stderr or buildx_result.stdout
+            buildx_error = evidence.strip()[:512] or "Buildx version unavailable"
         ttm_text = self._read("sys/module/ttm/parameters/pages_limit", required=False)
         if not ttm_text:
             ttm_text = self._read(
@@ -152,7 +186,24 @@ class HostProbe:
             packages=packages,
             apt_sources=self._read_apt_sources(),
             dkms_status=dkms_result.stdout.strip(),
-            docker_version=docker_result.stdout.strip() if docker_result.returncode == 0 else None,
+            docker_version=docker_version,
+            docker_buildx_version=buildx_version,
+            docker_buildx_error=buildx_error,
+            docker_distribution=classify_docker_distribution(
+                packages,
+                runtime_available=docker_version is not None,
+            ),
+            kernel_oem_617_candidate=parse_apt_candidate(
+                kernel_candidate_result.stdout
+            ),
+            display_manager_loaded=(
+                display_load_result.returncode == 0
+                and display_load_result.stdout.strip() == "loaded"
+            ),
+            display_manager_active=(
+                display_active_result.returncode == 0
+                and display_active_result.stdout.strip() == "active"
+            ),
             dmesg=(
                 dmesg_result.stdout
                 if dmesg_result.returncode == 0

@@ -1,4 +1,9 @@
+import pytest
+
+from amd_ai.host.models import DockerDistribution, InstalledPackage
 from amd_ai.host.parsers import (
+    classify_docker_distribution,
+    parse_apt_candidate,
     parse_apt_policy_origin,
     parse_cmdline,
     parse_dmi_memory_bytes,
@@ -8,6 +13,41 @@ from amd_ai.host.parsers import (
     parse_os_release,
     parse_vram_mib,
 )
+
+
+def test_parse_apt_candidate():
+    assert (
+        parse_apt_candidate("  Candidate: 6.17.0-1028.28\n")
+        == "6.17.0-1028.28"
+    )
+    assert parse_apt_candidate("  Candidate: (none)\n") is None
+
+
+@pytest.mark.parametrize(
+    ("names", "expected"),
+    [
+        ({"docker-ce-cli"}, DockerDistribution.DOCKER_CE),
+        ({"docker.io"}, DockerDistribution.UBUNTU_DOCKER_IO),
+        ({"docker.io", "docker-ce"}, DockerDistribution.MIXED),
+        (set(), DockerDistribution.EXTERNAL),
+    ],
+)
+def test_classify_docker_distribution(names, expected):
+    packages = tuple(InstalledPackage(name, "1") for name in sorted(names))
+
+    assert (
+        classify_docker_distribution(packages, runtime_available=True)
+        is expected
+    )
+
+
+def test_missing_runtime_takes_precedence_over_installed_package():
+    packages = (InstalledPackage("docker-ce-cli", "1"),)
+
+    assert (
+        classify_docker_distribution(packages, runtime_available=False)
+        is DockerDistribution.MISSING
+    )
 
 
 def test_parse_target_host_facts():

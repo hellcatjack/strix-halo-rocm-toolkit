@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 
@@ -88,3 +89,31 @@ def parse_dpkg_packages(text: str) -> tuple[tuple[str, str], ...]:
 def parse_apt_policy_origin(text: str) -> str | None:
     match = re.search(r"https://repo\.radeon\.com/[^\s]+", text)
     return match.group(0).rstrip("/") if match else None
+
+
+def parse_apt_candidate(text: str) -> str | None:
+    match = re.search(r"^\s*Candidate:\s*(\S+)\s*$", text, re.MULTILINE)
+    if match is None or match.group(1) == "(none)":
+        return None
+    return match.group(1)
+
+
+def classify_docker_distribution(
+    packages: Sequence[object],
+    *,
+    runtime_available: bool,
+) -> "DockerDistribution":
+    from amd_ai.host.models import DockerDistribution
+
+    if not runtime_available:
+        return DockerDistribution.MISSING
+    names = {getattr(package, "name", None) for package in packages}
+    docker_ce = bool({"docker-ce", "docker-ce-cli"}.intersection(names))
+    docker_io = "docker.io" in names
+    if docker_ce and docker_io:
+        return DockerDistribution.MIXED
+    if docker_ce:
+        return DockerDistribution.DOCKER_CE
+    if docker_io:
+        return DockerDistribution.UBUNTU_DOCKER_IO
+    return DockerDistribution.EXTERNAL

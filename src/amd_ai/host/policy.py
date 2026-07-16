@@ -226,5 +226,13 @@ def _snapshot_facts(snapshot: HostSnapshot) -> dict[str, object]:
         "apt_source_paths": [source.path for source in snapshot.apt_sources],
         "dkms_status": snapshot.dkms_status,
         "docker_version": snapshot.docker_version,
+        "docker_runtime_version": snapshot.docker_version,
+        "docker_buildx_version": snapshot.docker_buildx_version,
+        "docker_buildx_error": snapshot.docker_buildx_error,
+        "docker_distribution": snapshot.docker_distribution.value,
+        "kernel_oem_617_candidate": snapshot.kernel_oem_617_candidate,
+        "display_manager": {
+            "loaded": snapshot.display_manager_loaded,
+            "active": snapshot.display_manager_active,
+        },
     }
-
