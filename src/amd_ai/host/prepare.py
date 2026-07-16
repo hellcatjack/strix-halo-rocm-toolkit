@@ -9,7 +9,9 @@ from urllib.parse import urlparse
 from amd_ai.host.adapters.base import select_adapter
 from amd_ai.host.models import (
     AptSourceFile,
+    DockerDistribution,
     HostSnapshot,
+    HostPlanPhase,
     InstalledPackage,
     PlannedAction,
     PreparePlan,
@@ -72,6 +74,7 @@ def create_prepare_plan(
     *,
     target_user: str,
     memory_gib: int | None = None,
+    phase: HostPlanPhase | None = None,
 ) -> PreparePlan:
     adapter = select_adapter(snapshot)
     if adapter is None:
@@ -89,7 +92,17 @@ def create_prepare_plan(
         raise HostPlanningError(
             "host preparation is blocked by preflight: " + ", ".join(blocking_codes)
         )
-    return adapter.create_prepare_plan(snapshot, target_user, memory_gib)
+    selected_phase = phase or (
+        HostPlanPhase.KERNEL
+        if _kernel_upgrade_required(snapshot.kernel)
+        else HostPlanPhase.TUNING
+    )
+    return adapter.create_prepare_plan(
+        snapshot,
+        target_user,
+        memory_gib,
+        selected_phase,
+    )
 
 
 def with_docker_group_action(plan: PreparePlan) -> PreparePlan:
@@ -104,11 +117,16 @@ def with_docker_group_action(plan: PreparePlan) -> PreparePlan:
         privileged=True,
     )
     actions = list(plan.actions)
+    docker_action_codes = {
+        "DOCKER.INSTALL_IF_MISSING",
+        "DOCKER.INSTALL_BUILDX_PLUGIN",
+        "DOCKER.INSTALL_UBUNTU_BUILDX",
+    }
     insertion = next(
         (
             index + 1
             for index, existing in enumerate(actions)
-            if existing.code == "DOCKER.INSTALL_IF_MISSING"
+            if existing.code in docker_action_codes
         ),
         next(
             (
@@ -127,17 +145,20 @@ def create_ubuntu_prepare_plan(
     snapshot: HostSnapshot,
     target_user: str,
     memory_gib: int | None,
+    phase: HostPlanPhase = HostPlanPhase.TUNING,
 ) -> PreparePlan:
-    ttm = compute_ttm_plan(
-        mem_total_kib=snapshot.mem_total_kib,
-        page_size=snapshot.page_size,
-        dmi_memory_bytes=snapshot.dmi_memory_bytes,
-        explicit_gib=memory_gib,
-    )
+    if phase is HostPlanPhase.KERNEL:
+        return create_kernel_prepare_plan(snapshot, target_user)
+    return create_tuning_prepare_plan(snapshot, target_user, memory_gib)
+
+
+def create_kernel_prepare_plan(
+    snapshot: HostSnapshot,
+    target_user: str,
+) -> PreparePlan:
     actions: list[PlannedAction] = [
         _internal_action("BACKUP.SNAPSHOT", "Back up the current host state")
     ]
-
     mixed_sources = mixed_old_rocm_source_paths(snapshot.apt_sources)
     if mixed_sources:
         raise HostPlanningError(
@@ -153,7 +174,6 @@ def create_ubuntu_prepare_plan(
                 input_text=json.dumps(source_paths),
             )
         )
-
     packages = cleanup_candidates(snapshot.packages)
     if packages:
         actions.append(
@@ -164,38 +184,64 @@ def create_ubuntu_prepare_plan(
                 privileged=True,
             )
         )
+    install_kernel = _kernel_upgrade_required(snapshot.kernel)
+    if install_kernel:
+        actions.append(
+            _internal_action(
+                "APT.INSTALL_OEM_617",
+                "Install the Ubuntu OEM 6.17 kernel branch and firmware",
+            )
+        )
+    reboot_required = install_kernel or "amdgpu-dkms" in packages
+    if reboot_required:
+        actions.append(
+            PlannedAction(
+                code="HOST.REBOOT",
+                summary="Reboot to activate the OEM kernel changes",
+                argv=("systemctl", "reboot"),
+                privileged=True,
+            )
+        )
+    return PreparePlan(
+        supported=True,
+        target_user=target_user,
+        actions=tuple(actions),
+        reboot_required=reboot_required,
+        phase=HostPlanPhase.KERNEL,
+    )
 
-    actions.extend(
-        (
-            PlannedAction(
-                code="APT.INSTALL_OEM_KERNEL",
-                summary="Install the Ubuntu 24.04 OEM kernel, headers, and firmware",
-                argv=(
-                    "apt-get",
-                    "install",
-                    "-y",
-                    "linux-oem-24.04",
-                    "linux-headers-oem-24.04",
-                    "linux-firmware",
-                ),
-                privileged=True,
+
+def create_tuning_prepare_plan(
+    snapshot: HostSnapshot,
+    target_user: str,
+    memory_gib: int | None,
+) -> PreparePlan:
+    ttm = compute_ttm_plan(
+        mem_total_kib=snapshot.mem_total_kib,
+        page_size=snapshot.page_size,
+        dmi_memory_bytes=snapshot.dmi_memory_bytes,
+        explicit_gib=memory_gib,
+    )
+    actions: list[PlannedAction] = [
+        _internal_action("BACKUP.SNAPSHOT", "Back up the current host state")
+    ]
+
+    actions.append(
+        PlannedAction(
+            code="APT.INSTALL_HOST_TOOLS",
+            summary="Install host preparation and diagnostic tools",
+            argv=(
+                "apt-get",
+                "install",
+                "-y",
+                "ca-certificates",
+                "curl",
+                "gnupg",
+                "pciutils",
+                "python3-pip",
+                "pipx",
             ),
-            PlannedAction(
-                code="APT.INSTALL_HOST_TOOLS",
-                summary="Install host preparation and diagnostic tools",
-                argv=(
-                    "apt-get",
-                    "install",
-                    "-y",
-                    "ca-certificates",
-                    "curl",
-                    "gnupg",
-                    "pciutils",
-                    "python3-pip",
-                    "pipx",
-                ),
-                privileged=True,
-            ),
+            privileged=True,
         )
     )
 
@@ -206,6 +252,27 @@ def create_ubuntu_prepare_plan(
                 "Install Docker Engine from the official Ubuntu repository",
             )
         )
+    elif snapshot.docker_buildx_version is None:
+        if snapshot.docker_distribution is DockerDistribution.DOCKER_CE:
+            actions.append(
+                _internal_action(
+                    "DOCKER.INSTALL_BUILDX_PLUGIN",
+                    "Install Buildx for the existing Docker CE runtime",
+                )
+            )
+        elif snapshot.docker_distribution is DockerDistribution.UBUNTU_DOCKER_IO:
+            actions.append(
+                _internal_action(
+                    "DOCKER.INSTALL_UBUNTU_BUILDX",
+                    "Install Buildx for the existing Ubuntu docker.io runtime",
+                )
+            )
+        elif snapshot.docker_distribution is DockerDistribution.MIXED:
+            raise HostPlanningError("mixed Docker CE and docker.io packages")
+        else:
+            raise HostPlanningError(
+                "Docker runtime is externally managed; install matching Buildx manually"
+            )
 
     group_names = _missing_device_group_names(snapshot)
     if group_names:
@@ -247,20 +314,30 @@ def create_ubuntu_prepare_plan(
             )
         )
 
-    actions.append(
-        PlannedAction(
-            code="HOST.REBOOT",
-            summary="Reboot to activate host kernel and TTM changes",
-            argv=("systemctl", "reboot"),
-            privileged=True,
+    reboot_required = snapshot.ttm_pages_limit != ttm.pages_limit
+    if reboot_required:
+        actions.append(
+            PlannedAction(
+                code="HOST.REBOOT",
+                summary="Reboot to activate the TTM changes",
+                argv=("systemctl", "reboot"),
+                privileged=True,
+            )
         )
-    )
     return PreparePlan(
         supported=True,
         target_user=target_user,
         actions=tuple(actions),
-        reboot_required=True,
+        reboot_required=reboot_required,
+        phase=HostPlanPhase.TUNING,
     )
+
+
+def _kernel_upgrade_required(kernel: str) -> bool:
+    match = re.fullmatch(r"(\d+)\.(\d+)\.\d+-\d+-oem", kernel)
+    if match is None:
+        return True
+    return (int(match.group(1)), int(match.group(2))) < (6, 17)
 
 
 def old_rocm_source_paths(sources: tuple[AptSourceFile, ...]) -> tuple[str, ...]:

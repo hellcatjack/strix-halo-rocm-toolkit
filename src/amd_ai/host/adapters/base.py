@@ -6,7 +6,7 @@ from amd_ai.host.models import HostSnapshot
 from amd_ai.report import Report
 
 if TYPE_CHECKING:
-    from amd_ai.host.models import PreparePlan
+    from amd_ai.host.models import HostPlanPhase, PreparePlan
 
 
 class HostAdapter(Protocol):
@@ -21,6 +21,7 @@ class HostAdapter(Protocol):
         snapshot: HostSnapshot,
         target_user: str,
         memory_gib: int | None,
+        phase: HostPlanPhase,
     ) -> PreparePlan: ...
 
 
@@ -29,4 +30,3 @@ def select_adapter(snapshot: HostSnapshot) -> HostAdapter | None:
 
     adapter = Ubuntu2404Adapter()
     return adapter if adapter.matches(snapshot) else None
-

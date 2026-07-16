@@ -3,7 +3,12 @@ from dataclasses import replace
 
 import pytest
 
-from amd_ai.host.models import AptSourceFile, InstalledPackage
+from amd_ai.host.models import (
+    AptSourceFile,
+    DockerDistribution,
+    HostPlanPhase,
+    InstalledPackage,
+)
 from amd_ai.host.parsers import GpuPciInfo
 from amd_ai.host.prepare import (
     HostPlanningError,
@@ -17,6 +22,94 @@ from tests.unit.host.fakes import healthy_snapshot
 
 def action_codes(plan):
     return [action.code for action in plan.actions]
+
+
+def test_kernel_plan_contains_no_ttm_or_docker_actions():
+    plan = create_prepare_plan(
+        healthy_snapshot(kernel="6.14.0-1020-oem"),
+        target_user="customer",
+        phase=HostPlanPhase.KERNEL,
+    )
+
+    codes = action_codes(plan)
+    assert plan.phase is HostPlanPhase.KERNEL
+    assert "APT.INSTALL_OEM_617" in codes
+    assert "HOST.REBOOT" in codes
+    assert not any(code.startswith("TTM.") for code in codes)
+    assert not any(code.startswith("DOCKER.") for code in codes)
+
+
+def test_tuning_plan_never_installs_a_kernel():
+    plan = create_prepare_plan(
+        healthy_snapshot(kernel="6.17.0-1025-oem"),
+        target_user="customer",
+        phase=HostPlanPhase.TUNING,
+    )
+
+    assert plan.phase is HostPlanPhase.TUNING
+    assert "APT.INSTALL_OEM_617" not in action_codes(plan)
+
+
+@pytest.mark.parametrize(
+    ("docker_version", "buildx_version", "distribution", "expected"),
+    [
+        (None, None, DockerDistribution.MISSING, "DOCKER.INSTALL_IF_MISSING"),
+        (
+            "27.5.1",
+            None,
+            DockerDistribution.DOCKER_CE,
+            "DOCKER.INSTALL_BUILDX_PLUGIN",
+        ),
+        (
+            "27.5.1",
+            None,
+            DockerDistribution.UBUNTU_DOCKER_IO,
+            "DOCKER.INSTALL_UBUNTU_BUILDX",
+        ),
+        ("27.5.1", "v0.30.1", DockerDistribution.DOCKER_CE, None),
+    ],
+)
+def test_tuning_plan_selects_package_matched_docker_action(
+    docker_version,
+    buildx_version,
+    distribution,
+    expected,
+):
+    snapshot = healthy_snapshot(
+        docker_version=docker_version,
+        docker_buildx_version=buildx_version,
+        docker_distribution=distribution,
+    )
+
+    plan = create_prepare_plan(
+        snapshot,
+        target_user="customer",
+        phase=HostPlanPhase.TUNING,
+    )
+    docker_actions = [
+        code for code in action_codes(plan) if code.startswith("DOCKER.INSTALL")
+    ]
+
+    assert docker_actions == ([] if expected is None else [expected])
+
+
+@pytest.mark.parametrize(
+    "distribution",
+    [DockerDistribution.MIXED, DockerDistribution.EXTERNAL],
+)
+def test_tuning_plan_refuses_unsafe_buildx_distribution(distribution):
+    snapshot = healthy_snapshot(
+        docker_version="27.5.1",
+        docker_buildx_version=None,
+        docker_distribution=distribution,
+    )
+
+    with pytest.raises(HostPlanningError):
+        create_prepare_plan(
+            snapshot,
+            target_user="customer",
+            phase=HostPlanPhase.TUNING,
+        )
 
 
 def test_cleanup_only_selects_rocm_64_and_amdgpu_dkms():
@@ -68,7 +161,9 @@ def test_plan_never_removes_generic_dkms_and_has_stable_order():
     )
     snapshot = replace(healthy_snapshot(), packages=packages)
 
-    plan = create_prepare_plan(snapshot, target_user="customer")
+    plan = create_prepare_plan(
+        snapshot, target_user="customer", phase=HostPlanPhase.KERNEL
+    )
 
     flattened = " ".join(arg for action in plan.actions for arg in action.argv)
     assert "amdgpu-dkms" in flattened
@@ -77,9 +172,6 @@ def test_plan_never_removes_generic_dkms_and_has_stable_order():
     assert action_codes(plan) == [
         "BACKUP.SNAPSHOT",
         "APT.REMOVE_OLD_ROCM_PACKAGES",
-        "APT.INSTALL_OEM_KERNEL",
-        "APT.INSTALL_HOST_TOOLS",
-        "TTM.INSTALL_AMD_DEBUG_TOOLS",
         "HOST.REBOOT",
     ]
     assert plan.reboot_required is True
@@ -107,6 +199,7 @@ def test_old_radeon_source_detection_ignores_comments_and_new_repositories():
     plan = create_prepare_plan(
         replace(healthy_snapshot(), apt_sources=sources),
         target_user="customer",
+        phase=HostPlanPhase.KERNEL,
     )
     action = next(
         action
@@ -129,27 +222,23 @@ def test_mixed_apt_source_file_is_never_disabled_wholesale():
         create_prepare_plan(
             replace(healthy_snapshot(), apt_sources=(mixed,)),
             target_user="customer",
+            phase=HostPlanPhase.KERNEL,
         )
 
 
-def test_plan_uses_exact_kernel_tools_and_ttm_commands():
+def test_tuning_plan_uses_exact_host_tools_and_ttm_commands():
     snapshot = healthy_snapshot(
         docker_version=None,
         ttm_pages_limit=1,
         kernel_args={"quiet": None, "amdgpu.gttsize": "131072"},
     )
 
-    plan = create_prepare_plan(snapshot, target_user="customer")
+    plan = create_prepare_plan(
+        snapshot, target_user="customer", phase=HostPlanPhase.TUNING
+    )
     actions = {action.code: action for action in plan.actions}
 
-    assert actions["APT.INSTALL_OEM_KERNEL"].argv == (
-        "apt-get",
-        "install",
-        "-y",
-        "linux-oem-24.04",
-        "linux-headers-oem-24.04",
-        "linux-firmware",
-    )
+    assert "APT.INSTALL_OEM_617" not in actions
     assert actions["APT.INSTALL_HOST_TOOLS"].argv == (
         "apt-get",
         "install",

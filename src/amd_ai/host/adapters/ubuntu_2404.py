@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from amd_ai.host.models import HostSnapshot
+from amd_ai.host.models import HostPlanPhase, HostSnapshot
 from amd_ai.report import Report
 
 
@@ -27,8 +27,13 @@ class Ubuntu2404Adapter:
         snapshot: HostSnapshot,
         target_user: str,
         memory_gib: int | None,
+        phase: HostPlanPhase,
     ):
         from amd_ai.host.prepare import create_ubuntu_prepare_plan
 
-        return create_ubuntu_prepare_plan(snapshot, target_user, memory_gib)
-
+        return create_ubuntu_prepare_plan(
+            snapshot,
+            target_user,
+            memory_gib,
+            phase,
+        )

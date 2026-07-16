@@ -14,18 +14,29 @@ from amd_ai.host.apply import (
     ttm_input_text,
     verify_file_sha256,
 )
-from amd_ai.host.models import PlannedAction, PreparePlan
+from amd_ai.host.models import HostPlanPhase, PlannedAction, PreparePlan
 from amd_ai.runner import CommandResult
 from tests.unit.host.fakes import FakeRunner, healthy_snapshot
 
 
 def action_plan(*actions):
     return PreparePlan(
+        phase=HostPlanPhase.TUNING,
         supported=True,
         target_user="customer",
         actions=tuple(actions),
         reboot_required=True,
     )
+
+
+class DockerRepositoryRunner(FakeRunner):
+    def run(self, args, *, check=True, input_text=None):
+        result = super().run(args, check=check, input_text=input_text)
+        if args[:2] == ["curl", "--fail"]:
+            output = Path(args[args.index("--output") + 1])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text("docker signing key", encoding="utf-8")
+        return result
 
 
 def backup_action():
@@ -137,6 +148,117 @@ def test_execute_disables_only_planned_source_after_backup(tmp_path):
         "BACKUP.SNAPSHOT",
         "APT.DISABLE_OLD_ROCM_SOURCES",
     )
+
+
+def test_install_oem_617_rejects_candidate_drift_before_apt_install(tmp_path):
+    update = ("apt-get", "update")
+    policy = ("apt-cache", "policy", "linux-oem-6.17")
+    install = (
+        "apt-get",
+        "install",
+        "-y",
+        "linux-oem-6.17",
+        "linux-firmware",
+    )
+    runner = FakeRunner.backup_only()
+    runner.responses[update] = CommandResult(update, 0, "", "")
+    runner.responses[policy] = CommandResult(
+        policy,
+        0,
+        "linux-oem-6.17:\n  Candidate: 6.18.0-1001.1\n",
+        "",
+    )
+    action = PlannedAction(
+        code="APT.INSTALL_OEM_617",
+        summary="install kernel",
+        argv=(),
+        privileged=True,
+    )
+
+    with pytest.raises(ApplyError, match="6.17 candidate"):
+        execute_plan(
+            action_plan(backup_action(), action),
+            runner,
+            effective_uid=0,
+            confirmed=True,
+            snapshot=healthy_snapshot(),
+            root=tmp_path / "root",
+            backup_destination=tmp_path / "backups",
+        )
+
+    assert install not in runner.calls
+
+
+@pytest.mark.parametrize(
+    ("code", "install"),
+    [
+        (
+            "DOCKER.INSTALL_BUILDX_PLUGIN",
+            ("apt-get", "install", "-y", "docker-buildx-plugin"),
+        ),
+        (
+            "DOCKER.INSTALL_UBUNTU_BUILDX",
+            ("apt-get", "install", "-y", "docker-buildx"),
+        ),
+    ],
+)
+def test_buildx_repair_reprobes_runtime_and_plugin(tmp_path, code, install):
+    root = tmp_path / "root"
+    responses = dict(FakeRunner.backup_only().responses)
+    update = ("apt-get", "update")
+    runtime = ("docker", "version", "--format", "{{.Server.Version}}")
+    buildx = ("docker", "buildx", "version")
+    responses.update(
+        {
+            update: CommandResult(update, 0, "", ""),
+            install: CommandResult(install, 0, "", ""),
+            runtime: CommandResult(runtime, 0, "27.5.1\n", ""),
+            buildx: CommandResult(buildx, 0, "github.com/docker/buildx v0.30.1\n", ""),
+        }
+    )
+    if code == "DOCKER.INSTALL_BUILDX_PLUGIN":
+        curl = (
+            "curl",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "https://download.docker.com/linux/ubuntu/gpg",
+            "--output",
+            str(root / "etc/apt/keyrings/docker.asc.amd-ai.tmp"),
+        )
+        gpg = (
+            "gpg",
+            "--batch",
+            "--show-keys",
+            "--with-colons",
+            str(root / "etc/apt/keyrings/docker.asc.amd-ai.tmp"),
+        )
+        responses[curl] = CommandResult(curl, 0, "", "")
+        responses[gpg] = CommandResult(
+            gpg,
+            0,
+            "fpr:::::::::9DC858229FC7DD38854AE2D88D81803C0EBFCD88:\n",
+            "",
+        )
+        runner = DockerRepositoryRunner(responses)
+    else:
+        runner = FakeRunner(responses)
+    action = PlannedAction(code=code, summary="repair Buildx", argv=(), privileged=True)
+
+    execute_plan(
+        action_plan(backup_action(), action),
+        runner,
+        effective_uid=0,
+        confirmed=True,
+        snapshot=healthy_snapshot(),
+        root=root,
+        backup_destination=tmp_path / "backups",
+    )
+
+    assert install in runner.calls
+    assert runtime in runner.calls
+    assert buildx in runner.calls
 
 
 def test_ttm_memory_rounding_failure_uses_scoped_modprobe_fallback(tmp_path):

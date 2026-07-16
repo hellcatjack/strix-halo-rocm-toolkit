@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from amd_ai.host.models import AptSourceFile, HostSnapshot, PlannedAction, PreparePlan
+from amd_ai.host.parsers import parse_apt_candidate
 from amd_ai.host.prepare import old_rocm_source_paths
 from amd_ai.runner import CommandError, CommandResult, Runner
 
@@ -177,8 +178,14 @@ def execute_plan(
 
         if action.code == "APT.DISABLE_OLD_ROCM_SOURCES":
             _disable_old_sources(action, root)
+        elif action.code == "APT.INSTALL_OEM_617":
+            _install_oem_617(runner)
         elif action.code == "DOCKER.INSTALL_IF_MISSING":
             _install_docker(runner, root)
+        elif action.code == "DOCKER.INSTALL_BUILDX_PLUGIN":
+            _install_docker_buildx_plugin(runner, root)
+        elif action.code == "DOCKER.INSTALL_UBUNTU_BUILDX":
+            _install_ubuntu_buildx(runner)
         elif action.code == "TTM.INSTALL_AMD_DEBUG_TOOLS":
             _install_amd_debug_tools(runner, root)
         elif action.code == "TTM.SET_AI_MAX":
@@ -295,7 +302,64 @@ def _install_amd_debug_tools(runner: Runner, root: Path) -> None:
     )
 
 
+def _install_oem_617(runner: Runner) -> None:
+    _run_required(runner, ("apt-get", "update"))
+    policy = _run_required(
+        runner,
+        ("apt-cache", "policy", "linux-oem-6.17"),
+    )
+    candidate = parse_apt_candidate(policy.stdout)
+    if candidate is None or not candidate.startswith("6.17."):
+        rendered = candidate or "none"
+        raise ApplyError(
+            "linux-oem-6.17 no longer has a valid 6.17 candidate "
+            f"after apt-get update (candidate: {rendered})"
+        )
+    _run_required(
+        runner,
+        (
+            "apt-get",
+            "install",
+            "-y",
+            "linux-oem-6.17",
+            "linux-firmware",
+        ),
+    )
+
+
 def _install_docker(runner: Runner, root: Path) -> None:
+    _configure_docker_repository(runner, root)
+    _run_required(runner, ("apt-get", "update"))
+    _run_required(
+        runner,
+        (
+            "apt-get",
+            "install",
+            "-y",
+            "docker-ce",
+            "docker-ce-cli",
+            "containerd.io",
+            "docker-buildx-plugin",
+            "docker-compose-plugin",
+        ),
+    )
+    _run_required(runner, ("systemctl", "enable", "--now", "docker"))
+
+
+def _install_docker_buildx_plugin(runner: Runner, root: Path) -> None:
+    _configure_docker_repository(runner, root)
+    _run_required(runner, ("apt-get", "update"))
+    _run_required(runner, ("apt-get", "install", "-y", "docker-buildx-plugin"))
+    _verify_docker_runtime_and_buildx(runner)
+
+
+def _install_ubuntu_buildx(runner: Runner) -> None:
+    _run_required(runner, ("apt-get", "update"))
+    _run_required(runner, ("apt-get", "install", "-y", "docker-buildx"))
+    _verify_docker_runtime_and_buildx(runner)
+
+
+def _configure_docker_repository(runner: Runner, root: Path) -> None:
     keyring = _rooted(root, "/etc/apt/keyrings/docker.asc")
     temporary_key = keyring.with_name("docker.asc.amd-ai.tmp")
     keyring.parent.mkdir(parents=True, exist_ok=True)
@@ -336,21 +400,19 @@ def _install_docker(runner: Runner, root: Path) -> None:
         "Signed-By: /etc/apt/keyrings/docker.asc\n",
         mode=0o644,
     )
-    _run_required(runner, ("apt-get", "update"))
-    _run_required(
-        runner,
-        (
-            "apt-get",
-            "install",
-            "-y",
-            "docker-ce",
-            "docker-ce-cli",
-            "containerd.io",
-            "docker-buildx-plugin",
-            "docker-compose-plugin",
-        ),
+
+
+def _verify_docker_runtime_and_buildx(runner: Runner) -> None:
+    probes = (
+        ("Docker daemon", ("docker", "version", "--format", "{{.Server.Version}}")),
+        ("Docker Buildx", ("docker", "buildx", "version")),
     )
-    _run_required(runner, ("systemctl", "enable", "--now", "docker"))
+    for label, argv in probes:
+        result = _run_optional(runner, argv)
+        if result.returncode == 0 and result.stdout.strip():
+            continue
+        evidence = (result.stderr or result.stdout).strip() or "no command output"
+        raise ApplyError(f"{label} verification failed after Buildx repair: {evidence}")
 
 
 def _set_ttm(

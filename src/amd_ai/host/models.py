@@ -14,6 +14,11 @@ class DockerDistribution(StrEnum):
     MISSING = "missing"
 
 
+class HostPlanPhase(StrEnum):
+    KERNEL = "kernel"
+    TUNING = "tuning"
+
+
 @dataclass(frozen=True)
 class InstalledPackage:
     name: str
@@ -72,3 +77,4 @@ class PreparePlan:
     target_user: str
     actions: tuple[PlannedAction, ...]
     reboot_required: bool
+    phase: HostPlanPhase = HostPlanPhase.TUNING

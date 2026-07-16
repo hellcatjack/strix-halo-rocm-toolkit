@@ -58,7 +58,9 @@ def test_prepare_plan_fixture_writes_actions_without_applying(tmp_path, capsys):
     assert payload["command"] == "host-prepare"
     assert payload["facts"]["mode"] == "plan"
     assert payload["facts"]["actions"][0]["code"] == "BACKUP.SNAPSHOT"
-    assert "APT.INSTALL_OEM_KERNEL" in capsys.readouterr().out
+    output_text = capsys.readouterr().out
+    assert "APT.INSTALL_HOST_TOOLS" in output_text
+    assert "APT.INSTALL_OEM_617" not in output_text
 
 
 def test_prepare_apply_rejects_any_confirmation_except_apply(monkeypatch, capsys):
