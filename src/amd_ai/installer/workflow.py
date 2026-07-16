@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Protocol
 
+from amd_ai.host.models import HostPlanPhase
 from amd_ai.installer.actions import (
     HostPlanResult,
     LocalBuildResult,
@@ -129,6 +130,7 @@ class InstallerWorkflow:
             )
         )
         self._release: StableRelease | None = None
+        self._kernel_plan: HostPlanResult | None = None
         self._host_plan: HostPlanResult | None = None
         self._boot_id_reader = boot_id_reader
         self._state_source = "explicit"
@@ -381,7 +383,7 @@ class InstallerWorkflow:
                     ProgressOutcome.BLOCKED,
                 )
             if (
-                stage is InstallStage.REBOOT_PENDING
+                stage is InstallStage.KERNEL_REBOOT_PENDING
                 and outcome.action_required
             ):
                 state = self._record_reports(state, outcome)
@@ -428,6 +430,7 @@ class InstallerWorkflow:
 
     def _run_dry(self, state: InstallState) -> WorkflowResult:
         mutating = {
+            InstallStage.KERNEL_APPLY,
             InstallStage.HOST_APPLY,
             InstallStage.IMAGE_PULL_OR_BUILD,
             InstallStage.IMAGE_VERIFY,
@@ -463,11 +466,42 @@ class InstallerWorkflow:
             return self.actions.container_host_check()
         if stage is InstallStage.HOST_PREFLIGHT:
             return self.actions.host_preflight(target_user=state.target_user)
+        if stage is InstallStage.KERNEL_PLAN:
+            if state.target_user is None:
+                raise WorkflowError("host target user is unavailable")
+            self._kernel_plan = self.actions.host_plan(
+                target_user=state.target_user,
+                phase=HostPlanPhase.KERNEL,
+            )
+            return self._kernel_plan
+        if stage is InstallStage.KERNEL_CONFIRM:
+            return self._confirm_kernel_plan(state)
+        if stage is InstallStage.KERNEL_APPLY:
+            return self.actions.host_apply(
+                self._resolved_kernel_plan(state),
+                include_docker_group=False,
+            )
+        if stage is InstallStage.KERNEL_REBOOT_PENDING:
+            return self._reboot_pending(
+                state.kernel_reboot_boot_id,
+                message=(
+                    "manual reboot into the OEM 6.17 kernel is required; "
+                    "reboot and rerun the same install command"
+                ),
+            )
+        if stage is InstallStage.KERNEL_VERIFY:
+            if state.target_user is None:
+                raise WorkflowError("host target user is unavailable")
+            return self.actions.kernel_verify(
+                target_user=state.target_user,
+                display_manager_was_active=state.display_manager_was_active,
+            )
         if stage is InstallStage.HOST_PLAN:
             if state.target_user is None:
                 raise WorkflowError("host target user is unavailable")
             self._host_plan = self.actions.host_plan(
-                target_user=state.target_user
+                target_user=state.target_user,
+                phase=HostPlanPhase.TUNING,
             )
             return self._host_plan
         if stage is InstallStage.HOST_CONFIRM:
@@ -477,18 +511,6 @@ class InstallerWorkflow:
                 self._resolved_host_plan(state),
                 include_docker_group=state.docker_group_accepted,
             )
-        if stage is InstallStage.REBOOT_PENDING:
-            if state.reboot_boot_id is None:
-                return StageResult()
-            current = self._boot_id_reader()
-            if not boot_id_changed(
-                state.reboot_boot_id, current_boot_id=current
-            ):
-                return StageResult(
-                    action_required=True,
-                    message="manual reboot is required",
-                )
-            return StageResult()
         if stage is InstallStage.HOST_VERIFY:
             if state.target_user is None:
                 raise WorkflowError("host target user is unavailable")
@@ -591,12 +613,63 @@ class InstallerWorkflow:
             )
         elif stage in {
             InstallStage.HOST_PREFLIGHT,
-            InstallStage.HOST_PLAN,
             InstallStage.CONTAINER_HOST_CHECK,
         }:
             values.update(
                 {
                     "target_user": state.target_user,
+                }
+            )
+        elif stage is InstallStage.KERNEL_PLAN:
+            values.update(
+                {
+                    "target_user": state.target_user,
+                    "phase": HostPlanPhase.KERNEL.value,
+                }
+            )
+        elif stage is InstallStage.KERNEL_CONFIRM:
+            values.update(
+                {
+                    "kernel_plan_digest": state.kernel_plan_digest,
+                    "non_interactive": self.options.non_interactive,
+                    "accepted_kernel_plan_digest": (
+                        self.options.accepted_kernel_plan_digest
+                        if self.options.non_interactive
+                        else None
+                    ),
+                }
+            )
+        elif stage is InstallStage.KERNEL_APPLY:
+            values.update(
+                {
+                    "kernel_plan_digest": state.kernel_plan_digest,
+                    "host_adapter_id": state.host_adapter_id,
+                }
+            )
+        elif stage in {
+            InstallStage.KERNEL_REBOOT_PENDING,
+            InstallStage.KERNEL_VERIFY,
+        }:
+            values.update(
+                {
+                    "kernel_plan_digest": state.kernel_plan_digest,
+                    "host_adapter_id": state.host_adapter_id,
+                    "kernel_reboot_boot_id": state.kernel_reboot_boot_id,
+                    "recovery_kernel": state.recovery_kernel,
+                    "display_manager_was_active": (
+                        state.display_manager_was_active
+                    ),
+                }
+            )
+        elif stage is InstallStage.HOST_PLAN:
+            values.update(
+                {
+                    "target_user": state.target_user,
+                    "phase": HostPlanPhase.TUNING.value,
+                    "kernel_verification_status": (
+                        state.kernel_verification_status
+                    ),
+                    "kernel_kernel": state.kernel_kernel,
                 }
             )
         elif stage is InstallStage.HOST_CONFIRM:
@@ -624,15 +697,11 @@ class InstallerWorkflow:
                     "docker_group_accepted": state.docker_group_accepted,
                 }
             )
-        elif stage in {
-            InstallStage.REBOOT_PENDING,
-            InstallStage.HOST_VERIFY,
-        }:
+        elif stage is InstallStage.HOST_VERIFY:
             values.update(
                 {
                     "host_plan_digest": state.host_plan_digest,
                     "host_adapter_id": state.host_adapter_id,
-                    "reboot_boot_id": state.reboot_boot_id,
                 }
             )
         elif stage is InstallStage.RELEASE_RESOLVE:
@@ -705,6 +774,8 @@ class InstallerWorkflow:
         if isinstance(output, Report):
             if stage is InstallStage.HOST_PREFLIGHT:
                 blocked = output.status is Status.BLOCKED
+            elif stage is InstallStage.KERNEL_VERIFY:
+                blocked = output.status is not Status.PASS
             elif stage is InstallStage.HOST_VERIFY:
                 blocked = output.status not in (
                     Status.PASS,
@@ -717,6 +788,12 @@ class InstallerWorkflow:
                 and output.status is Status.UNVERIFIED
             ):
                 message = self._unverified_host_message(output)
+            elif stage is InstallStage.KERNEL_VERIFY and blocked:
+                message = (
+                    "kernel verification failed; reboot and select the retained "
+                    "recovery kernel under Advanced options for Ubuntu, then "
+                    "inspect the current-boot amdgpu log"
+                )
             elif blocked:
                 message = f"{output.command} returned {output.status.value}"
             else:
@@ -742,9 +819,59 @@ class InstallerWorkflow:
         outcome: StageResult,
     ) -> InstallState:
         changes: dict[str, object] = {}
-        if stage is InstallStage.HOST_PLAN:
+        if stage is InstallStage.BOOTSTRAP:
+            assert self.options.source_root is not None
+            changes.update(
+                {
+                    "installer_version": self.installer_version,
+                    "installer_source_revision": self.installer_source_revision,
+                    "source_root": str(self.options.source_root),
+                }
+            )
+        elif stage is InstallStage.KERNEL_PLAN:
+            if not isinstance(output, HostPlanResult):
+                raise WorkflowError("kernel plan action returned an invalid value")
+            if output.plan.phase is not HostPlanPhase.KERNEL:
+                raise WorkflowError("kernel plan action returned the wrong phase")
+            changes.update(
+                {
+                    "kernel_plan_digest": output.plan_digest,
+                    "host_adapter_id": output.adapter_id,
+                }
+            )
+        elif stage is InstallStage.KERNEL_APPLY:
+            plan = self._resolved_kernel_plan(state)
+            changes.update(
+                {
+                    "kernel_reboot_boot_id": (
+                        self._boot_id_reader()
+                        if plan.plan.reboot_required
+                        else None
+                    ),
+                    "recovery_kernel": plan.running_kernel,
+                    "display_manager_was_active": (
+                        plan.display_manager_active
+                    ),
+                }
+            )
+        elif stage is InstallStage.KERNEL_VERIFY and isinstance(output, Report):
+            kernel = _report_kernel(output, "kernel verification")
+            changes.update(
+                {
+                    "kernel_verification_status": output.status.value,
+                    "kernel_kernel": kernel,
+                    "kernel_verification_findings": tuple(
+                        finding.code for finding in output.findings
+                    ),
+                }
+            )
+        elif stage is InstallStage.HOST_PLAN:
             if not isinstance(output, HostPlanResult):
                 raise WorkflowError("host plan action returned an invalid value")
+            if output.plan.phase is not HostPlanPhase.TUNING:
+                raise WorkflowError("host plan action returned the wrong phase")
+            if state.host_adapter_id not in (None, output.adapter_id):
+                raise WorkflowError("host adapter changed between plan phases")
             changes.update(
                 {
                     "host_plan_digest": output.plan_digest,
@@ -757,15 +884,8 @@ class InstallerWorkflow:
             changes["docker_group_accepted"] = (
                 output.docker_group_accepted
             )
-        elif stage is InstallStage.HOST_APPLY:
-            plan = self._resolved_host_plan(state).plan
-            changes["reboot_boot_id"] = (
-                self._boot_id_reader() if plan.reboot_required else None
-            )
         elif stage is InstallStage.HOST_VERIFY and isinstance(output, Report):
-            kernel = output.facts.get("kernel")
-            if not isinstance(kernel, str) or not kernel:
-                raise WorkflowError("host verification report has no kernel identity")
+            kernel = _report_kernel(output, "host verification")
             changes.update(
                 {
                     "host_verification_status": output.status.value,
@@ -859,23 +979,27 @@ class InstallerWorkflow:
         return updated
 
     def _can_adopt_installer_update(self, state: InstallState) -> bool:
+        previous_series = _installer_series(state.installer_version)
+        current_series = _installer_series(self.installer_version)
+        same_series = (
+            previous_series is not None and previous_series == current_series
+        )
         if state.mode is InstallMode.FULL:
             start = FULL_STAGE_ORDER.index(InstallStage.HOST_VERIFY)
             compatible_stage = state.current_stage in FULL_STAGE_ORDER[start:]
+            compatible_version = same_series
         elif state.mode is InstallMode.CONTAINER:
             compatible_stage = (
                 InstallStage.BOOTSTRAP.value
                 in state.completed_stage_input_digests
                 and state.current_stage in CONTAINER_STAGE_ORDER[1:]
             )
+            compatible_version = same_series or (
+                previous_series == (0, 2) and current_series == (0, 3)
+            )
         else:
             return False
-        if not compatible_stage:
-            return False
-        previous_series = _installer_series(state.installer_version)
-        return previous_series is not None and previous_series == _installer_series(
-            self.installer_version
-        )
+        return compatible_stage and compatible_version
 
     def _unverified_host_message(self, report: Report) -> str:
         assert self.options.source_root is not None
@@ -1068,7 +1192,8 @@ class InstallerWorkflow:
             raise WorkflowError("persisted host plan identity is unavailable")
         if self._host_plan is None:
             self._host_plan = self.actions.host_plan(
-                target_user=state.target_user
+                target_user=state.target_user,
+                phase=HostPlanPhase.TUNING,
             )
         if (
             self._host_plan.plan_digest != state.host_plan_digest
@@ -1078,6 +1203,58 @@ class InstallerWorkflow:
                 "host plan digest changed after authorization; replan is required"
             )
         return self._host_plan
+
+    def _resolved_kernel_plan(self, state: InstallState) -> HostPlanResult:
+        if state.target_user is None or state.kernel_plan_digest is None:
+            raise WorkflowError("persisted kernel plan identity is unavailable")
+        if self._kernel_plan is None:
+            self._kernel_plan = self.actions.host_plan(
+                target_user=state.target_user,
+                phase=HostPlanPhase.KERNEL,
+            )
+        if (
+            self._kernel_plan.plan_digest != state.kernel_plan_digest
+            or self._kernel_plan.adapter_id != state.host_adapter_id
+            or self._kernel_plan.plan.phase is not HostPlanPhase.KERNEL
+        ):
+            raise WorkflowError(
+                "kernel plan digest changed after authorization; replan is required"
+            )
+        return self._kernel_plan
+
+    def _confirm_kernel_plan(self, state: InstallState) -> HostConfirmation:
+        kernel_plan = self._resolved_kernel_plan(state)
+        for action in kernel_plan.plan.actions:
+            self._status("ACTION", f"{action.code}: {action.summary}")
+        self._status(
+            "ACTION",
+            "Recovery kernel retained: "
+            f"{kernel_plan.running_kernel}. If the desktop fails, reboot and "
+            "select it under Advanced options for Ubuntu.",
+        )
+        if self.options.non_interactive:
+            if self.options.accepted_kernel_plan_digest != (
+                kernel_plan.plan_digest
+            ):
+                return HostConfirmation(
+                    False,
+                    False,
+                    "kernel plan requires --accept-kernel-plan-digest "
+                    f"{kernel_plan.plan_digest}",
+                )
+            return HostConfirmation(True, False)
+        self.progress.pause_heartbeat()
+        try:
+            accepted = self.prompts.confirm_exact("INSTALL-KERNEL")
+        finally:
+            self.progress.resume_heartbeat()
+        if not accepted:
+            return HostConfirmation(
+                False,
+                False,
+                "kernel plan confirmation refused; exact INSTALL-KERNEL is required",
+            )
+        return HostConfirmation(True, False)
 
     def _confirm_host_plan(self, state: InstallState) -> HostConfirmation:
         host_plan = self._resolved_host_plan(state)
@@ -1091,7 +1268,8 @@ class InstallerWorkflow:
                 return HostConfirmation(
                     False,
                     False,
-                    "accepted host plan digest does not match the current plan",
+                    "host tuning plan requires --accept-host-plan-digest "
+                    f"{host_plan.plan_digest}",
                 )
             return HostConfirmation(
                 True,
@@ -1117,6 +1295,19 @@ class InstallerWorkflow:
                 self.progress.resume_heartbeat()
         return HostConfirmation(True, docker_group)
 
+    def _reboot_pending(
+        self,
+        previous_boot_id: str | None,
+        *,
+        message: str,
+    ) -> StageResult:
+        if previous_boot_id is None:
+            return StageResult()
+        current = self._boot_id_reader()
+        if boot_id_changed(previous_boot_id, current_boot_id=current):
+            return StageResult()
+        return StageResult(action_required=True, message=message)
+
     def _stage_order(self) -> tuple[InstallStage, ...]:
         if self.options.mode is InstallMode.FULL:
             return FULL_STAGE_ORDER
@@ -1133,6 +1324,15 @@ def _validate_disk_estimate(
 ) -> None:
     if not isinstance(estimate, DiskSpaceEstimate):
         raise WorkflowError(f"{operation} returned an invalid disk estimate")
+
+
+def _report_kernel(report: Report, label: str) -> str:
+    kernel = report.facts.get("kernel")
+    if not isinstance(kernel, str) or re.fullmatch(
+        r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}", kernel
+    ) is None:
+        raise WorkflowError(f"{label} report has no valid kernel identity")
+    return kernel
 
 
 def _require_disk_space(requirement: DiskRequirement) -> str | None:

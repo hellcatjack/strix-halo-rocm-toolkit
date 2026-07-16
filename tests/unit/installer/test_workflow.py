@@ -6,7 +6,7 @@ import shutil
 from dataclasses import replace
 from pathlib import Path
 
-from amd_ai.host.models import PlannedAction
+from amd_ai.host.models import HostPlanPhase, PlannedAction
 from amd_ai.installer.actions import prepare_plan_payload
 from amd_ai.installer.models import (
     CONTAINER_STAGE_ORDER,
@@ -35,6 +35,9 @@ from amd_ai.installer.workflow import InstallerWorkflow
 from amd_ai.report import Finding, Report, Severity, Status
 from tests.unit.installer.fakes import FakeInstallerActions, FakePrompts
 
+
+FIRST_BOOT_ID = "12345678-1234-4abc-8def-1234567890ab"
+SECOND_BOOT_ID = "87654321-4321-4abc-8def-ba0987654321"
 
 def workflow_options(
     tmp_path: Path,
@@ -145,6 +148,7 @@ def full_options(
     tmp_path: Path,
     *,
     non_interactive: bool = False,
+    accepted_kernel_plan_digest: str | None = None,
     accepted_host_plan_digest: str | None = None,
     accept_docker_group: bool = False,
 ) -> InstallOptions:
@@ -155,6 +159,7 @@ def full_options(
         project_name="demo",
         image_source="pull",
         target_user="developer",
+        accepted_kernel_plan_digest=accepted_kernel_plan_digest,
         accepted_host_plan_digest=accepted_host_plan_digest,
         accept_docker_group=accept_docker_group,
         source_root=Path.cwd(),
@@ -164,6 +169,52 @@ def full_options(
         state_path=tmp_path / "install-state.json",
         coordination_state_path=tmp_path / "coordination-state.json",
     )
+
+
+def test_old_kernel_stops_before_tuning_until_kernel_reboot(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.host_change_requires_kernel_reboot()
+
+    first = installer_workflow(
+        tmp_path,
+        actions=actions,
+        options=full_options(tmp_path),
+        prompts=FakePrompts(exact={"INSTALL-KERNEL": True}),
+        boot_id_reader=lambda: FIRST_BOOT_ID,
+    ).run()
+
+    assert first.exit_code == 1
+    assert first.state is not None
+    assert first.state.current_stage is InstallStage.KERNEL_REBOOT_PENDING
+    assert first.state.kernel_reboot_boot_id == FIRST_BOOT_ID
+    assert first.state.recovery_kernel == "6.14.0-1020-oem"
+    assert first.state.display_manager_was_active is True
+    assert "kernel_apply" in actions.calls
+    assert "host_plan" not in actions.calls
+    assert "host_apply" not in actions.calls
+
+
+def test_platform_apply_never_creates_second_reboot_checkpoint(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.full_no_reboot()
+
+    result = installer_workflow(
+        tmp_path,
+        actions=actions,
+        options=full_options(tmp_path),
+        prompts=FakePrompts(
+            exact={"INSTALL-KERNEL": True, "APPLY": True}
+        ),
+    ).run()
+
+    assert result.exit_code == 0
+    assert result.state is not None
+    assert result.state.reboot_boot_id is None
+    assert "host_verify" in actions.calls
+    assert actions.calls.index("host_apply") < actions.calls.index("host_verify")
+    assert actions.calls.index("host_verify") < actions.calls.index("pull_release")
 
 
 def noninteractive_container_options(
@@ -512,7 +563,8 @@ def test_full_progress_uses_selected_workflow_positions(
 ) -> None:
     progress, stdout, _ = workflow_progress(tmp_path)
     prompts = FakePrompts(
-        exact={"APPLY": True}, yes_no={"docker-group": False}
+        exact={"INSTALL-KERNEL": True, "APPLY": True},
+        yes_no={"docker-group": False},
     )
 
     result = installer_workflow(
@@ -525,10 +577,10 @@ def test_full_progress_uses_selected_workflow_positions(
 
     assert result.exit_code == 0
     output = stdout.getvalue()
-    assert "共 13 个阶段" in output
-    assert "[2/13] 检查宿主" in output
-    assert "[7/13] 验证重启后的宿主" in output
-    assert "[13/13] 完成安装" in output
+    assert "共 17 个阶段" in output
+    assert "[2/17] 检查宿主" in output
+    assert "[11/17] 验证重启后的宿主" in output
+    assert "[17/17] 完成安装" in output
 
 
 def test_dry_run_progress_is_positioned_without_persisting_state(
@@ -907,7 +959,8 @@ def test_full_mode_requires_exact_apply_and_separate_docker_group_prompt(
     tmp_path: Path,
 ) -> None:
     prompts = FakePrompts(
-        exact={"APPLY": True}, yes_no={"docker-group": False}
+        exact={"INSTALL-KERNEL": True, "APPLY": True},
+        yes_no={"docker-group": False},
     )
     actions = FakeInstallerActions.host_change_requires_reboot()
 
@@ -919,9 +972,10 @@ def test_full_mode_requires_exact_apply_and_separate_docker_group_prompt(
         boot_id_reader=lambda: "12345678-1234-4abc-8def-1234567890ab",
     ).run()
 
-    assert result.exit_code == 1
+    assert result.exit_code == 0
     assert result.state is not None
-    assert result.state.current_stage == InstallStage.REBOOT_PENDING
+    assert result.state.current_stage == InstallStage.COMPLETE
+    assert result.state.reboot_boot_id is None
     assert actions.host_apply_include_docker_group is False
     assert any(
         prefix == "ACTION" and "HOST.CHANGE" in message
@@ -936,6 +990,7 @@ def test_noninteractive_full_mode_requires_matching_plan_digest(
     options = full_options(
         tmp_path,
         non_interactive=True,
+        accepted_kernel_plan_digest=actions.kernel_plan_result.plan_digest,
         accepted_host_plan_digest="0" * 64,
     )
 
@@ -947,7 +1002,7 @@ def test_noninteractive_full_mode_requires_matching_plan_digest(
     ).run()
 
     assert result.exit_code == 2
-    assert "host plan digest" in result.message
+    assert "--accept-host-plan-digest" in result.message
     assert "host_apply" not in actions.calls
 
 
@@ -955,7 +1010,8 @@ def test_full_mode_docker_group_authorization_reaches_apply(
     tmp_path: Path,
 ) -> None:
     prompts = FakePrompts(
-        exact={"APPLY": True}, yes_no={"docker-group": True}
+        exact={"INSTALL-KERNEL": True, "APPLY": True},
+        yes_no={"docker-group": True},
     )
     actions = FakeInstallerActions.host_change_requires_reboot()
 
@@ -970,21 +1026,21 @@ def test_full_mode_docker_group_authorization_reaches_apply(
     assert actions.host_apply_include_docker_group is True
 
 
-def test_same_boot_remains_pending_without_reapplying_host(
+def test_same_boot_remains_pending_without_reapplying_kernel(
     tmp_path: Path,
 ) -> None:
     boot_id = "12345678-1234-4abc-8def-1234567890ab"
-    first_actions = FakeInstallerActions.host_change_requires_reboot()
+    first_actions = FakeInstallerActions.host_change_requires_kernel_reboot()
     first = installer_workflow(
         tmp_path,
         actions=first_actions,
         options=full_options(tmp_path),
-        prompts=FakePrompts(exact={"APPLY": True}),
+        prompts=FakePrompts(exact={"INSTALL-KERNEL": True, "APPLY": True}),
         boot_id_reader=lambda: boot_id,
     ).run()
     assert first.exit_code == 1
 
-    resumed_actions = FakeInstallerActions.host_change_requires_reboot()
+    resumed_actions = FakeInstallerActions.host_change_requires_kernel_reboot()
     resumed = installer_workflow(
         tmp_path,
         actions=resumed_actions,
@@ -994,6 +1050,7 @@ def test_same_boot_remains_pending_without_reapplying_host(
     ).run()
 
     assert resumed.exit_code == 1
+    assert "kernel_apply" not in resumed_actions.calls
     assert "host_apply" not in resumed_actions.calls
     assert "host_verify" not in resumed_actions.calls
 
@@ -1004,14 +1061,14 @@ def test_same_boot_progress_names_exact_manual_reboot_resume(
     boot_id = "12345678-1234-4abc-8def-1234567890ab"
     first = installer_workflow(
         tmp_path,
-        actions=FakeInstallerActions.host_change_requires_reboot(),
+        actions=FakeInstallerActions.host_change_requires_kernel_reboot(),
         options=full_options(tmp_path),
-        prompts=FakePrompts(exact={"APPLY": True}),
+        prompts=FakePrompts(exact={"INSTALL-KERNEL": True, "APPLY": True}),
         boot_id_reader=lambda: boot_id,
     ).run()
     assert first.exit_code == 1
     progress, _, stderr = workflow_progress(tmp_path)
-    actions = FakeInstallerActions.host_change_requires_reboot()
+    actions = FakeInstallerActions.host_change_requires_kernel_reboot()
 
     resumed = installer_workflow(
         tmp_path,
@@ -1030,32 +1087,37 @@ def test_same_boot_progress_names_exact_manual_reboot_resume(
     assert "host_apply" not in actions.calls
 
 
-def test_changed_boot_resumes_at_host_verify_and_completes(
+def test_changed_boot_resumes_at_kernel_verify_and_completes(
     tmp_path: Path,
 ) -> None:
     first_boot = "12345678-1234-4abc-8def-1234567890ab"
     second_boot = "87654321-4321-4abc-8def-ba0987654321"
     first = installer_workflow(
         tmp_path,
-        actions=FakeInstallerActions.host_change_requires_reboot(),
+        actions=FakeInstallerActions.host_change_requires_kernel_reboot(),
         options=full_options(tmp_path),
-        prompts=FakePrompts(exact={"APPLY": True}),
+        prompts=FakePrompts(exact={"INSTALL-KERNEL": True, "APPLY": True}),
         boot_id_reader=lambda: first_boot,
     ).run()
     assert first.exit_code == 1
 
-    resumed_actions = FakeInstallerActions.host_change_requires_reboot()
+    resumed_actions = FakeInstallerActions.host_change_requires_kernel_reboot()
     resumed = installer_workflow(
         tmp_path,
         actions=resumed_actions,
         options=full_options(tmp_path),
-        prompts=FakePrompts(),
+        prompts=FakePrompts(exact={"APPLY": True}),
         boot_id_reader=lambda: second_boot,
     ).run()
 
     assert resumed.exit_code == 0
-    assert "host_apply" not in resumed_actions.calls
-    assert resumed_actions.calls[0] == "host_verify"
+    assert resumed_actions.calls[0] == "kernel_verify"
+    assert resumed_actions.calls.index("kernel_verify") < (
+        resumed_actions.calls.index("host_plan")
+    )
+    assert resumed_actions.calls.index("host_verify") < (
+        resumed_actions.calls.index("pull_release")
+    )
 
 
 def test_unverified_newer_oem_kernel_warns_records_and_continues(
@@ -1065,15 +1127,15 @@ def test_unverified_newer_oem_kernel_warns_records_and_continues(
     second_boot = "87654321-4321-4abc-8def-ba0987654321"
     first = installer_workflow(
         tmp_path,
-        actions=FakeInstallerActions.host_change_requires_reboot(),
+        actions=FakeInstallerActions.host_change_requires_kernel_reboot(),
         options=full_options(tmp_path),
-        prompts=FakePrompts(exact={"APPLY": True}),
+        prompts=FakePrompts(exact={"INSTALL-KERNEL": True, "APPLY": True}),
         boot_id_reader=lambda: first_boot,
     ).run()
     assert first.exit_code == 1
 
-    prompts = FakePrompts()
-    resumed_actions = FakeInstallerActions.host_change_requires_reboot()
+    prompts = FakePrompts(exact={"APPLY": True})
+    resumed_actions = FakeInstallerActions.host_change_requires_kernel_reboot()
     returning_host_report(resumed_actions, host_verify_report(Status.UNVERIFIED))
     result = installer_workflow(
         tmp_path,
@@ -1105,20 +1167,20 @@ def test_host_verify_change_required_remains_blocked(
     second_boot = "87654321-4321-4abc-8def-ba0987654321"
     first = installer_workflow(
         tmp_path,
-        actions=FakeInstallerActions.host_change_requires_reboot(),
+        actions=FakeInstallerActions.host_change_requires_kernel_reboot(),
         options=full_options(tmp_path),
-        prompts=FakePrompts(exact={"APPLY": True}),
+        prompts=FakePrompts(exact={"INSTALL-KERNEL": True, "APPLY": True}),
         boot_id_reader=lambda: first_boot,
     ).run()
     assert first.exit_code == 1
 
-    resumed_actions = FakeInstallerActions.host_change_requires_reboot()
+    resumed_actions = FakeInstallerActions.host_change_requires_kernel_reboot()
     returning_host_report(resumed_actions, host_verify_report(Status.CHANGE_REQUIRED))
     result = installer_workflow(
         tmp_path,
         actions=resumed_actions,
         options=full_options(tmp_path),
-        prompts=FakePrompts(),
+        prompts=FakePrompts(exact={"APPLY": True}),
         boot_id_reader=lambda: second_boot,
     ).run()
 
@@ -1135,16 +1197,16 @@ def test_compatible_patch_installer_resumes_old_host_verify_state(
     second_boot = "87654321-4321-4abc-8def-ba0987654321"
     first = installer_workflow(
         tmp_path,
-        actions=FakeInstallerActions.host_change_requires_reboot(),
+        actions=FakeInstallerActions.host_change_requires_kernel_reboot(),
         options=full_options(tmp_path),
-        prompts=FakePrompts(exact={"APPLY": True}),
+        prompts=FakePrompts(exact={"INSTALL-KERNEL": True, "APPLY": True}),
         boot_id_reader=lambda: first_boot,
         installer_version="0.2.0",
         installer_source_revision="d" * 40,
     ).run()
     assert first.exit_code == 1
 
-    old_actions = FakeInstallerActions.host_change_requires_reboot()
+    old_actions = FakeInstallerActions.host_change_requires_kernel_reboot()
     old_actions.failures[InstallStage.HOST_VERIFY] = RuntimeError(
         "old installer rejected unverified host"
     )
@@ -1152,7 +1214,7 @@ def test_compatible_patch_installer_resumes_old_host_verify_state(
         tmp_path,
         actions=old_actions,
         options=full_options(tmp_path),
-        prompts=FakePrompts(),
+        prompts=FakePrompts(exact={"APPLY": True}),
         boot_id_reader=lambda: second_boot,
         installer_version="0.2.0",
         installer_source_revision="d" * 40,
@@ -1161,7 +1223,7 @@ def test_compatible_patch_installer_resumes_old_host_verify_state(
     assert old_result.state is not None
     assert old_result.state.current_stage is InstallStage.HOST_VERIFY
 
-    incompatible_actions = FakeInstallerActions.host_change_requires_reboot()
+    incompatible_actions = FakeInstallerActions.host_change_requires_kernel_reboot()
     incompatible = installer_workflow(
         tmp_path,
         actions=incompatible_actions,
@@ -1175,7 +1237,7 @@ def test_compatible_patch_installer_resumes_old_host_verify_state(
     assert "inputs changed" in incompatible.message
     assert incompatible_actions.calls == []
 
-    new_actions = FakeInstallerActions.host_change_requires_reboot()
+    new_actions = FakeInstallerActions.host_change_requires_kernel_reboot()
     returning_host_report(new_actions, host_verify_report(Status.UNVERIFIED))
     prompts = FakePrompts()
     resumed = installer_workflow(
@@ -1235,6 +1297,45 @@ def test_compatible_patch_installer_adopts_container_state(
     assert changed == {InstallStage.BOOTSTRAP.value}
 
 
+def test_schema_two_container_state_adopts_across_v02_to_v03(
+    tmp_path: Path,
+) -> None:
+    first = installer_workflow(
+        tmp_path,
+        actions=FakeInstallerActions.healthy(),
+        installer_version="0.2.3",
+        installer_source_revision="d" * 40,
+    ).run()
+    assert first.exit_code == 0
+    path = tmp_path / "install-state.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 2
+    for key in (
+        "kernel_plan_digest",
+        "kernel_reboot_boot_id",
+        "recovery_kernel",
+        "display_manager_was_active",
+        "kernel_verification_status",
+        "kernel_kernel",
+        "kernel_verification_findings",
+    ):
+        payload.pop(key)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    resumed_actions = FakeInstallerActions.healthy()
+
+    resumed = installer_workflow(
+        tmp_path,
+        actions=resumed_actions,
+        installer_version="0.3.0",
+        installer_source_revision="e" * 40,
+    ).run()
+
+    assert resumed.exit_code == 0
+    assert resumed_actions.calls == []
+    assert resumed.state is not None
+    assert resumed.state.installer_version == "0.3.0"
+
+
 def test_incompatible_container_bootstrap_digest_is_rejected(
     tmp_path: Path,
 ) -> None:
@@ -1268,17 +1369,17 @@ def test_incompatible_container_bootstrap_digest_is_rejected(
 def test_release_must_support_applied_host_adapter(tmp_path: Path) -> None:
     first_boot = "12345678-1234-4abc-8def-1234567890ab"
     second_boot = "87654321-4321-4abc-8def-ba0987654321"
-    first_actions = FakeInstallerActions.host_change_requires_reboot()
+    first_actions = FakeInstallerActions.host_change_requires_kernel_reboot()
     first = installer_workflow(
         tmp_path,
         actions=first_actions,
         options=full_options(tmp_path),
-        prompts=FakePrompts(exact={"APPLY": True}),
+        prompts=FakePrompts(exact={"INSTALL-KERNEL": True, "APPLY": True}),
         boot_id_reader=lambda: first_boot,
     ).run()
     assert first.exit_code == 1
 
-    resumed_actions = FakeInstallerActions.host_change_requires_reboot()
+    resumed_actions = FakeInstallerActions.host_change_requires_kernel_reboot()
     resumed_actions.release = replace(
         resumed_actions.release, supported_host_adapter_ids=("other",)
     )
@@ -1286,7 +1387,7 @@ def test_release_must_support_applied_host_adapter(tmp_path: Path) -> None:
         tmp_path,
         actions=resumed_actions,
         options=full_options(tmp_path),
-        prompts=FakePrompts(),
+        prompts=FakePrompts(exact={"APPLY": True}),
         boot_id_reader=lambda: second_boot,
     ).run()
 
@@ -1304,7 +1405,9 @@ def test_interactive_apply_refusal_never_runs_host_apply(
         tmp_path,
         actions=actions,
         options=full_options(tmp_path),
-        prompts=FakePrompts(exact={"APPLY": False}),
+        prompts=FakePrompts(
+            exact={"INSTALL-KERNEL": True, "APPLY": False}
+        ),
         boot_id_reader=lambda: "12345678-1234-4abc-8def-1234567890ab",
     ).run()
 
@@ -1320,6 +1423,7 @@ def test_noninteractive_matching_digest_can_explicitly_accept_docker_group(
     options = full_options(
         tmp_path,
         non_interactive=True,
+        accepted_kernel_plan_digest=actions.kernel_plan_result.plan_digest,
         accepted_host_plan_digest=actions.host_plan_result.plan_digest,
         accept_docker_group=True,
     )
@@ -1331,7 +1435,7 @@ def test_noninteractive_matching_digest_can_explicitly_accept_docker_group(
         boot_id_reader=lambda: "12345678-1234-4abc-8def-1234567890ab",
     ).run()
 
-    assert result.exit_code == 1
+    assert result.exit_code == 0
     assert actions.host_apply_include_docker_group is True
 
 
@@ -1343,7 +1447,7 @@ def test_changed_host_plan_after_checkpoint_requires_replanning(
         tmp_path,
         actions=first_actions,
         options=full_options(tmp_path),
-        prompts=FakePrompts(),
+        prompts=FakePrompts(exact={"INSTALL-KERNEL": True}),
         boot_id_reader=lambda: "12345678-1234-4abc-8def-1234567890ab",
     ).run()
     assert first.exit_code == 1
@@ -1372,7 +1476,7 @@ def test_changed_host_plan_after_checkpoint_requires_replanning(
         tmp_path,
         actions=resumed_actions,
         options=full_options(tmp_path),
-        prompts=FakePrompts(exact={"APPLY": True}),
+        prompts=FakePrompts(exact={"INSTALL-KERNEL": True, "APPLY": True}),
         boot_id_reader=lambda: "12345678-1234-4abc-8def-1234567890ab",
     ).run()
 

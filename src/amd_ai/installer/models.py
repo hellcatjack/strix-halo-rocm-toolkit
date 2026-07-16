@@ -33,10 +33,14 @@ class InstallMode(StrEnum):
 class InstallStage(StrEnum):
     BOOTSTRAP = "BOOTSTRAP"
     HOST_PREFLIGHT = "HOST_PREFLIGHT"
+    KERNEL_PLAN = "KERNEL_PLAN"
+    KERNEL_CONFIRM = "KERNEL_CONFIRM"
+    KERNEL_APPLY = "KERNEL_APPLY"
+    KERNEL_REBOOT_PENDING = "KERNEL_REBOOT_PENDING"
+    KERNEL_VERIFY = "KERNEL_VERIFY"
     HOST_PLAN = "HOST_PLAN"
     HOST_CONFIRM = "HOST_CONFIRM"
     HOST_APPLY = "HOST_APPLY"
-    REBOOT_PENDING = "REBOOT_PENDING"
     HOST_VERIFY = "HOST_VERIFY"
     CONTAINER_HOST_CHECK = "CONTAINER_HOST_CHECK"
     RELEASE_RESOLVE = "RELEASE_RESOLVE"
@@ -50,10 +54,14 @@ class InstallStage(StrEnum):
 FULL_STAGE_ORDER = (
     InstallStage.BOOTSTRAP,
     InstallStage.HOST_PREFLIGHT,
+    InstallStage.KERNEL_PLAN,
+    InstallStage.KERNEL_CONFIRM,
+    InstallStage.KERNEL_APPLY,
+    InstallStage.KERNEL_REBOOT_PENDING,
+    InstallStage.KERNEL_VERIFY,
     InstallStage.HOST_PLAN,
     InstallStage.HOST_CONFIRM,
     InstallStage.HOST_APPLY,
-    InstallStage.REBOOT_PENDING,
     InstallStage.HOST_VERIFY,
     InstallStage.RELEASE_RESOLVE,
     InstallStage.IMAGE_PULL_OR_BUILD,
@@ -95,6 +103,7 @@ class InstallOptions:
     project_name: str = "amd-ai-project"
     image_source: str | None = None
     target_user: str | None = None
+    accepted_kernel_plan_digest: str | None = None
     accepted_host_plan_digest: str | None = None
     accept_docker_group: bool = False
     stable_manifest_path: Path | None = None
@@ -160,10 +169,13 @@ class InstallOptions:
             USER_PATTERN.fullmatch(self.target_user) is None
         ):
             raise InstallerModelError("target user is invalid")
-        if self.accepted_host_plan_digest is not None and (
-            SHA256_PATTERN.fullmatch(self.accepted_host_plan_digest) is None
+        for name in (
+            "accepted_kernel_plan_digest",
+            "accepted_host_plan_digest",
         ):
-            raise InstallerModelError("accepted host plan digest is invalid")
+            value = getattr(self, name)
+            if value is not None and SHA256_PATTERN.fullmatch(value) is None:
+                raise InstallerModelError(f"{name} is invalid")
 
         for name in (
             "source_root",
@@ -185,13 +197,6 @@ class InstallOptions:
                     raise InstallerModelError(
                         "non-interactive install requires an image source"
                     )
-            if (
-                self.mode is InstallMode.FULL
-                and self.accepted_host_plan_digest is None
-            ):
-                raise InstallerModelError(
-                    "non-interactive full install requires a host plan digest"
-                )
         return self
 
 

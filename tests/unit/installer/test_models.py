@@ -18,10 +18,14 @@ def test_full_and_container_stage_orders_match_approved_workflow() -> None:
     assert FULL_STAGE_ORDER == (
         InstallStage.BOOTSTRAP,
         InstallStage.HOST_PREFLIGHT,
+        InstallStage.KERNEL_PLAN,
+        InstallStage.KERNEL_CONFIRM,
+        InstallStage.KERNEL_APPLY,
+        InstallStage.KERNEL_REBOOT_PENDING,
+        InstallStage.KERNEL_VERIFY,
         InstallStage.HOST_PLAN,
         InstallStage.HOST_CONFIRM,
         InstallStage.HOST_APPLY,
-        InstallStage.REBOOT_PENDING,
         InstallStage.HOST_VERIFY,
         InstallStage.RELEASE_RESOLVE,
         InstallStage.IMAGE_PULL_OR_BUILD,
@@ -46,17 +50,20 @@ def test_noninteractive_options_require_project_and_explicit_image_source(
         ).validate()
 
 
-def test_noninteractive_full_mode_requires_exact_plan_digest(
+def test_noninteractive_full_mode_defers_missing_plan_digests_to_confirm_stages(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(InstallerModelError, match="plan"):
-        InstallOptions(
-            mode=InstallMode.FULL,
-            non_interactive=True,
-            project_dir=(tmp_path / "demo").resolve(),
-            image_source="pull",
-            accepted_host_plan_digest=None,
-        ).validate()
+    options = InstallOptions(
+        mode=InstallMode.FULL,
+        non_interactive=True,
+        project_dir=(tmp_path / "demo").resolve(),
+        image_source="pull",
+        accepted_kernel_plan_digest=None,
+        accepted_host_plan_digest=None,
+    ).validate()
+
+    assert options.accepted_kernel_plan_digest is None
+    assert options.accepted_host_plan_digest is None
 
 
 def test_state_path_provenance_must_be_boolean(tmp_path: Path) -> None:

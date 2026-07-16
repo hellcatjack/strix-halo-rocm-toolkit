@@ -3,7 +3,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
-from amd_ai.host.models import HostSnapshot, PlannedAction, PreparePlan
+from amd_ai.host.models import (
+    HostPlanPhase,
+    HostSnapshot,
+    PlannedAction,
+    PreparePlan,
+)
 from amd_ai.installer.actions import (
     HostPlanResult,
     LocalBuildResult,
@@ -19,6 +24,7 @@ from amd_ai.installer.models import (
 )
 from amd_ai.installer.release import load_stable_release
 from amd_ai.installer.state import stage_input_digest
+from amd_ai.report import Report, Status
 from tests.unit.host.fakes import healthy_snapshot
 
 
@@ -111,7 +117,14 @@ class FakeInstallerActions:
         )
         self.snapshot = healthy_snapshot()
         self.host_apply_include_docker_group: bool | None = None
-        self.host_plan_result = self._make_host_plan(reboot_required=True)
+        self.kernel_plan_result = self._make_host_plan(
+            phase=HostPlanPhase.KERNEL,
+            reboot_required=False,
+        )
+        self.host_plan_result = self._make_host_plan(
+            phase=HostPlanPhase.TUNING,
+            reboot_required=False,
+        )
         self.pull_error: BaseException | None = None
         self.project_init_kwargs: dict[str, object] = {}
 
@@ -130,9 +143,22 @@ class FakeInstallerActions:
         return cls.healthy()
 
     @classmethod
+    def host_change_requires_kernel_reboot(cls) -> FakeInstallerActions:
+        fake = cls.healthy()
+        fake.kernel_plan_result = fake._make_host_plan(
+            phase=HostPlanPhase.KERNEL,
+            reboot_required=True,
+            running_kernel="6.14.0-1020-oem",
+        )
+        return fake
+
+    @classmethod
     def full_no_reboot(cls) -> FakeInstallerActions:
         fake = cls.healthy()
-        fake.host_plan_result = fake._make_host_plan(reboot_required=False)
+        fake.host_plan_result = fake._make_host_plan(
+            phase=HostPlanPhase.TUNING,
+            reboot_required=False,
+        )
         return fake
 
     def stage_inputs(
@@ -158,10 +184,20 @@ class FakeInstallerActions:
         return self._record(InstallStage.HOST_PREFLIGHT, "host_preflight")
 
     def host_plan(self, **kwargs: object) -> HostPlanResult:
-        del kwargs
-        self._raise_if_needed(InstallStage.HOST_PLAN)
-        self.calls.append("host_plan")
-        return self.host_plan_result
+        phase = HostPlanPhase(kwargs["phase"])
+        stage = (
+            InstallStage.KERNEL_PLAN
+            if phase is HostPlanPhase.KERNEL
+            else InstallStage.HOST_PLAN
+        )
+        name = "kernel_plan" if phase is HostPlanPhase.KERNEL else "host_plan"
+        self._raise_if_needed(stage)
+        self.calls.append(name)
+        return (
+            self.kernel_plan_result
+            if phase is HostPlanPhase.KERNEL
+            else self.host_plan_result
+        )
 
     def host_apply(
         self,
@@ -169,9 +205,25 @@ class FakeInstallerActions:
         *,
         include_docker_group: bool,
     ) -> StageResult:
+        if host_plan.plan.phase is HostPlanPhase.KERNEL:
+            assert host_plan.plan_digest == self.kernel_plan_result.plan_digest
+            assert include_docker_group is False
+            return self._record(InstallStage.KERNEL_APPLY, "kernel_apply")
         assert host_plan.plan_digest == self.host_plan_result.plan_digest
         self.host_apply_include_docker_group = include_docker_group
         return self._record(InstallStage.HOST_APPLY, "host_apply")
+
+    def kernel_verify(self, **kwargs: object) -> Report:
+        del kwargs
+        self._raise_if_needed(InstallStage.KERNEL_VERIFY)
+        self.calls.append("kernel_verify")
+        return Report(
+            command="host-kernel-verify",
+            status=Status.PASS,
+            generated_at="2026-07-16T12:00:00Z",
+            facts={"kernel": "6.17.0-1028-oem"},
+            findings=(),
+        )
 
     def host_verify(self, **kwargs: object) -> StageResult:
         del kwargs
@@ -257,13 +309,24 @@ class FakeInstallerActions:
         if error is not None:
             raise error
 
-    def _make_host_plan(self, *, reboot_required: bool) -> HostPlanResult:
+    def _make_host_plan(
+        self,
+        *,
+        phase: HostPlanPhase,
+        reboot_required: bool,
+        running_kernel: str | None = None,
+    ) -> HostPlanResult:
         plan = PreparePlan(
+            phase=phase,
             supported=True,
             target_user="developer",
             actions=(
                 PlannedAction(
-                    code="HOST.CHANGE",
+                    code=(
+                        "KERNEL.CHANGE"
+                        if phase is HostPlanPhase.KERNEL
+                        else "HOST.CHANGE"
+                    ),
                     summary="Apply reviewed host change",
                     argv=("true",),
                     privileged=True,
@@ -276,6 +339,8 @@ class FakeInstallerActions:
             plan=plan,
             plan_digest=stage_input_digest(prepare_plan_payload(plan)),
             adapter_id="ubuntu-24.04",
+            running_kernel=running_kernel or self.snapshot.kernel,
+            display_manager_active=self.snapshot.display_manager_active,
         )
 
 
