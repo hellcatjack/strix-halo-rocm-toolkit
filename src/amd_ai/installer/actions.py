@@ -229,7 +229,6 @@ class ProductionInstallerActions:
         *,
         target_user: str,
         phase: HostPlanPhase,
-        memory_gib: int | None = None,
     ) -> HostPlanResult:
         try:
             phase = HostPlanPhase(phase)
@@ -239,7 +238,6 @@ class ProductionInstallerActions:
             return self._sudo_host_plan(
                 target_user=target_user,
                 phase=phase,
-                memory_gib=memory_gib,
             )
         snapshot = self._snapshot(target_user=target_user)
         adapter = select_adapter(snapshot)
@@ -248,7 +246,6 @@ class ProductionInstallerActions:
         plan = create_prepare_plan(
             snapshot,
             target_user=target_user,
-            memory_gib=memory_gib,
             phase=phase,
         )
         return HostPlanResult(
@@ -312,12 +309,9 @@ class ProductionInstallerActions:
         *,
         target_user: str,
         phase: HostPlanPhase,
-        memory_gib: int | None,
     ) -> HostPlanResult:
         command = self._sudo_helper_command()
         command.extend(("--phase", phase.value))
-        if memory_gib is not None:
-            command.extend(("--memory-gib", str(memory_gib)))
         command.extend(("--target-user", target_user, "plan"))
         payload = self._run_sudo_helper(command, operation="host plan")
         _require_exact_keys(

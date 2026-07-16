@@ -13,6 +13,21 @@ from amd_ai.report import Report, Status
 from amd_ai.runner import CommandStream
 
 
+def test_privileged_helper_rejects_removed_memory_gib_option():
+    with pytest.raises(SystemExit):
+        privileged.build_parser().parse_args(
+            [
+                "--target-user",
+                "developer",
+                "--phase",
+                "tuning",
+                "--memory-gib",
+                "128",
+                "plan",
+            ]
+        )
+
+
 def test_privileged_verify_collects_target_user_groups(
     monkeypatch, capsys
 ) -> None:
@@ -135,8 +150,7 @@ def test_privileged_apply_keeps_json_on_stdout_and_progress_on_stderr(
             assert effective_uid == 0
             self.command_observer = command_observer
 
-        def host_plan(self, *, target_user: str, phase, memory_gib=None):
-            del memory_gib
+        def host_plan(self, *, target_user: str, phase):
             assert target_user == "developer"
             assert phase is HostPlanPhase.TUNING
             return HostPlanResult(

@@ -80,9 +80,8 @@ def test_host_plan_uses_existing_probe_and_prepare_policy(
         *,
         target_user: str,
         phase: HostPlanPhase,
-        memory_gib=None,
     ):
-        del snapshot_value, memory_gib
+        del snapshot_value
         calls.append("create_prepare_plan")
         assert target_user == "developer"
         assert phase is HostPlanPhase.KERNEL

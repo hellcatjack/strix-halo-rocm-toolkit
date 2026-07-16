@@ -1,10 +1,26 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from amd_ai import cli
 from amd_ai.cli import main
 from amd_ai.runner import CommandResult
 from tests.unit.host.fakes import FakeRunner
+
+
+def test_host_prepare_rejects_removed_memory_gib_option():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            [
+                "host-prepare",
+                "plan",
+                "--target-user",
+                "developer",
+                "--memory-gib",
+                "128",
+            ]
+        )
 
 
 def test_preflight_fixture_writes_json_without_using_host_commands(tmp_path, capsys):

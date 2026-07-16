@@ -151,7 +151,6 @@ def build_parser() -> argparse.ArgumentParser:
     for mode in ("plan", "apply"):
         mode_parser = prepare_modes.add_parser(mode)
         mode_parser.add_argument("--target-user")
-        mode_parser.add_argument("--memory-gib", type=_positive_int)
         mode_parser.add_argument("--json", type=Path, dest="json_path")
         mode_parser.add_argument(
             "--fixture-root",
@@ -976,7 +975,6 @@ def _host_prepare(args: argparse.Namespace) -> int:
         plan = create_prepare_plan(
             snapshot,
             target_user=target_user,
-            memory_gib=args.memory_gib,
         )
     except (HostPlanningError, UnsupportedHostError, ValueError) as error:
         print(f"host-prepare: {error}", file=sys.stderr)

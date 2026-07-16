@@ -25,7 +25,6 @@ from amd_ai.runner import SubprocessRunner
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="strix-halo-rocm-host-helper")
     parser.add_argument("--target-user")
-    parser.add_argument("--memory-gib", type=_positive_int)
     parser.add_argument("--expected-plan-digest")
     parser.add_argument("--include-docker-group", action="store_true")
     parser.add_argument(
@@ -70,7 +69,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ActionError("verify mode requires --target-user")
             if any(
                 (
-                    args.memory_gib is not None,
                     args.expected_plan_digest is not None,
                     args.include_docker_group,
                     args.phase is not None,
@@ -103,7 +101,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             host_plan = actions.host_plan(
                 target_user=args.target_user,
                 phase=HostPlanPhase(args.phase),
-                memory_gib=args.memory_gib,
             )
         if args.operation == "plan":
             if args.expected_plan_digest is not None or args.include_docker_group:
@@ -150,13 +147,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-
-
-def _positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be positive")
-    return parsed
 
 
 if __name__ == "__main__":
