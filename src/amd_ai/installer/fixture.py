@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from amd_ai.host.models import HostSnapshot, PlannedAction, PreparePlan
+from amd_ai.host.models import (
+    DockerDistribution,
+    HostSnapshot,
+    PlannedAction,
+    PreparePlan,
+)
 from amd_ai.host.parsers import GpuPciInfo
 from amd_ai.installer.actions import (
     HostPlanResult,
@@ -259,6 +264,12 @@ def _fixture_snapshot() -> HostSnapshot:
         apt_sources=(),
         dkms_status="",
         docker_version="fixture",
+        docker_buildx_version="fixture-buildx",
+        docker_buildx_error=None,
+        docker_distribution=DockerDistribution.DOCKER_CE,
+        kernel_oem_617_candidate="6.17.0-1028.28",
+        display_manager_loaded=True,
+        display_manager_active=True,
         dmesg="",
         dmesg_available=True,
         dedicated_vram_mib=512,

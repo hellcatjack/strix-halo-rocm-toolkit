@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import sys
+import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -13,7 +14,7 @@ SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 PROJECT_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
 USER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,31}")
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 HOST_VERIFICATION_STATUSES = frozenset({"pass", "unverified"})
 FINDING_CODE_PATTERN = re.compile(r"[A-Z][A-Z0-9_.-]{1,127}")
 KERNEL_NAME_PATTERN = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}")
@@ -223,6 +224,13 @@ class InstallState:
     host_verification_status: str | None = None
     host_kernel: str | None = None
     host_verification_findings: tuple[str, ...] = ()
+    kernel_plan_digest: str | None = None
+    kernel_reboot_boot_id: str | None = None
+    recovery_kernel: str | None = None
+    display_manager_was_active: bool = False
+    kernel_verification_status: str | None = None
+    kernel_kernel: str | None = None
+    kernel_verification_findings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or (
@@ -254,6 +262,7 @@ class InstallState:
             "torch_manifest_digest", self.torch_manifest_digest, prefixed=True
         )
         _require_optional_sha256("host_plan_digest", self.host_plan_digest)
+        _require_optional_sha256("kernel_plan_digest", self.kernel_plan_digest)
         _require_optional_sha256(
             "base_config_digest", self.base_config_digest, prefixed=True
         )
@@ -270,44 +279,36 @@ class InstallState:
             raise InstallerModelError(
                 "install state Docker group acceptance is invalid"
             )
-        if (
-            self.host_verification_status is not None
-            and self.host_verification_status not in HOST_VERIFICATION_STATUSES
-        ):
+        if type(self.display_manager_was_active) is not bool:
             raise InstallerModelError(
-                "install state host verification status is invalid"
+                "install state display manager history is invalid"
             )
-        if self.host_kernel is not None and (
-            not isinstance(self.host_kernel, str)
-            or KERNEL_NAME_PATTERN.fullmatch(self.host_kernel) is None
-        ):
-            raise InstallerModelError("install state host kernel is invalid")
-        if (self.host_verification_status is None) != (self.host_kernel is None):
-            raise InstallerModelError(
-                "install state host verification identity is incomplete"
-            )
-        finding_codes: list[str] = []
-        for code in self.host_verification_findings:
-            if (
-                not isinstance(code, str)
-                or FINDING_CODE_PATTERN.fullmatch(code) is None
-            ):
-                raise InstallerModelError(
-                    "install state host verification finding is invalid"
-                )
-            finding_codes.append(code)
-        if len(finding_codes) != len(set(finding_codes)):
-            raise InstallerModelError(
-                "install state host verification findings contain duplicates"
-            )
-        if self.host_verification_status is None and finding_codes:
-            raise InstallerModelError(
-                "install state host verification findings have no status"
-            )
+        _require_optional_boot_id("reboot_boot_id", self.reboot_boot_id)
+        _require_optional_boot_id(
+            "kernel_reboot_boot_id", self.kernel_reboot_boot_id
+        )
+        _require_optional_kernel("recovery_kernel", self.recovery_kernel)
+        host_findings = _validate_verification_identity(
+            "host",
+            self.host_verification_status,
+            self.host_kernel,
+            self.host_verification_findings,
+        )
+        kernel_findings = _validate_verification_identity(
+            "kernel",
+            self.kernel_verification_status,
+            self.kernel_kernel,
+            self.kernel_verification_findings,
+        )
         object.__setattr__(
             self,
             "host_verification_findings",
-            tuple(finding_codes),
+            host_findings,
+        )
+        object.__setattr__(
+            self,
+            "kernel_verification_findings",
+            kernel_findings,
         )
 
         source_root = _absolute_path(Path(self.source_root))
@@ -418,6 +419,64 @@ def _require_optional_sha256(
         prefixed and not value.startswith("sha256:")
     ):
         raise InstallerModelError(f"{name} is invalid")
+
+
+def _require_optional_boot_id(name: str, value: str | None) -> None:
+    if value is None:
+        return
+    try:
+        parsed = uuid.UUID(value)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise InstallerModelError(f"{name} is invalid") from error
+    if str(parsed) != value:
+        raise InstallerModelError(f"{name} is invalid")
+
+
+def _require_optional_kernel(name: str, value: str | None) -> None:
+    if value is not None and (
+        not isinstance(value, str)
+        or KERNEL_NAME_PATTERN.fullmatch(value) is None
+    ):
+        raise InstallerModelError(f"{name} is invalid")
+
+
+def _validate_verification_identity(
+    label: str,
+    status: str | None,
+    kernel: str | None,
+    findings: tuple[str, ...],
+) -> tuple[str, ...]:
+    if status is not None and status not in HOST_VERIFICATION_STATUSES:
+        raise InstallerModelError(
+            f"install state {label} verification status is invalid"
+        )
+    _require_optional_kernel(
+        f"install state {label} kernel",
+        kernel,
+    )
+    if (status is None) != (kernel is None):
+        raise InstallerModelError(
+            f"install state {label} verification identity is incomplete"
+        )
+    finding_codes: list[str] = []
+    for code in findings:
+        if (
+            not isinstance(code, str)
+            or FINDING_CODE_PATTERN.fullmatch(code) is None
+        ):
+            raise InstallerModelError(
+                f"install state {label} verification finding is invalid"
+            )
+        finding_codes.append(code)
+    if len(finding_codes) != len(set(finding_codes)):
+        raise InstallerModelError(
+            f"install state {label} verification findings contain duplicates"
+        )
+    if status is None and finding_codes:
+        raise InstallerModelError(
+            f"install state {label} verification findings have no status"
+        )
+    return tuple(finding_codes)
 
 
 @dataclass(frozen=True)

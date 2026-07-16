@@ -12,6 +12,7 @@ from amd_ai.installer.models import (
     InstallStage,
     InstallState,
     InstallerModelError,
+    STATE_SCHEMA_VERSION,
 )
 from amd_ai.installer.state import (
     CorruptInstallState,
@@ -33,7 +34,7 @@ from amd_ai.installer.state import (
 
 def install_state(tmp_path: Path, **changes: object) -> InstallState:
     values: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": STATE_SCHEMA_VERSION,
         "installer_version": "0.2.0",
         "mode": InstallMode.CONTAINER,
         "target_user": "developer",
@@ -62,6 +63,38 @@ def install_state(tmp_path: Path, **changes: object) -> InstallState:
     return InstallState(**values)  # type: ignore[arg-type]
 
 
+def write_schema_two_state(
+    tmp_path: Path,
+    *,
+    mode: str,
+    current_stage: str,
+) -> Path:
+    path = tmp_path / f"schema-two-{mode}.json"
+    save_state(
+        path,
+        install_state(
+            tmp_path,
+            mode=mode,
+            current_stage=current_stage,
+            host_plan_digest="e" * 64,
+        ),
+    )
+    payload = json.loads(path.read_text(encoding="ascii"))
+    payload["schema_version"] = 2
+    for key in (
+        "kernel_plan_digest",
+        "kernel_reboot_boot_id",
+        "recovery_kernel",
+        "display_manager_was_active",
+        "kernel_verification_status",
+        "kernel_kernel",
+        "kernel_verification_findings",
+    ):
+        payload.pop(key, None)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
 def test_stage_digest_is_canonical_across_mapping_order() -> None:
     left = stage_input_digest(
         {"mode": "container", "facts": {"b": 2, "a": 1}}
@@ -72,6 +105,96 @@ def test_stage_digest_is_canonical_across_mapping_order() -> None:
 
     assert left == right
     assert len(left) == 64
+
+
+def test_schema_two_full_state_restarts_host_audit_and_keeps_images(tmp_path):
+    path = write_schema_two_state(
+        tmp_path,
+        mode="full",
+        current_stage="COMPLETE",
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["docker_group_accepted"] = True
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = load_state(path)
+
+    assert migrated is not None
+    assert migrated.schema_version == 3
+    assert migrated.current_stage is InstallStage.BOOTSTRAP
+    assert migrated.completed_stage_input_digests == {}
+    assert migrated.torch_image_reference == (
+        "ghcr.io/example/torch@sha256:" + "c" * 64
+    )
+    assert migrated.kernel_plan_digest is None
+    assert migrated.host_plan_digest is None
+    assert migrated.docker_group_accepted is True
+    assert migrated.last_report_paths == (
+        str((tmp_path / "report.json").resolve()),
+    )
+
+
+def test_schema_two_container_state_keeps_compatible_position(tmp_path):
+    path = write_schema_two_state(
+        tmp_path,
+        mode="container",
+        current_stage="IMAGE_VERIFY",
+    )
+
+    migrated = load_state(path)
+
+    assert migrated is not None
+    assert migrated.schema_version == 3
+    assert migrated.current_stage is InstallStage.IMAGE_VERIFY
+    assert (
+        InstallStage.RELEASE_RESOLVE.value
+        in migrated.completed_stage_input_digests
+    )
+
+
+def test_schema_three_kernel_checkpoint_fields_round_trip(tmp_path):
+    path = tmp_path / "kernel-checkpoint.json"
+    expected = install_state(
+        tmp_path,
+        kernel_plan_digest="f" * 64,
+        kernel_reboot_boot_id="12345678-1234-4abc-8def-1234567890ab",
+        recovery_kernel="6.14.0-1020-oem",
+        display_manager_was_active=True,
+        kernel_verification_status="pass",
+        kernel_kernel="6.17.0-1028-oem",
+        kernel_verification_findings=("HOST.SWAP_DISABLED",),
+    )
+
+    save_state(path, expected)
+
+    assert load_state(path) == expected
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"kernel_plan_digest": "bad"}, "kernel_plan_digest"),
+        ({"kernel_reboot_boot_id": "not-a-uuid"}, "kernel_reboot_boot_id"),
+        ({"recovery_kernel": "bad kernel"}, "recovery_kernel"),
+        ({"display_manager_was_active": 1}, "display manager"),
+        ({"kernel_verification_status": "blocked"}, "status"),
+        (
+            {"kernel_verification_status": "pass"},
+            "identity is incomplete",
+        ),
+        (
+            {"kernel_verification_findings": ("GPU.INIT_FATAL",)},
+            "findings have no status",
+        ),
+    ],
+)
+def test_schema_three_rejects_invalid_kernel_checkpoint_fields(
+    tmp_path,
+    changes,
+    message,
+):
+    with pytest.raises(InstallerModelError, match=message):
+        install_state(tmp_path, **changes)
 
 
 def test_state_round_trip_uses_atomic_replace(
@@ -237,12 +360,22 @@ def test_schema_one_state_migrates_with_empty_host_verification_fields(
     payload.pop("host_verification_status", None)
     payload.pop("host_kernel", None)
     payload.pop("host_verification_findings", None)
+    for key in (
+        "kernel_plan_digest",
+        "kernel_reboot_boot_id",
+        "recovery_kernel",
+        "display_manager_was_active",
+        "kernel_verification_status",
+        "kernel_kernel",
+        "kernel_verification_findings",
+    ):
+        payload.pop(key, None)
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     migrated = load_state(path)
 
     assert migrated is not None
-    assert migrated.schema_version == 2
+    assert migrated.schema_version == 3
     assert migrated.host_verification_status is None
     assert migrated.host_kernel is None
     assert migrated.host_verification_findings == ()

@@ -1222,7 +1222,7 @@ def test_compatible_patch_installer_adopts_container_state(
 
     assert resumed.exit_code == 0
     assert resumed_actions.calls == []
-    assert resumed.state is not None and resumed.state.schema_version == 2
+    assert resumed.state is not None and resumed.state.schema_version == 3
     persisted = load_state(tmp_path / "install-state.json")
     assert persisted is not None
     assert persisted.installer_version == "0.2.3"

@@ -304,7 +304,7 @@ def test_real_install_implicitly_isolates_second_project_from_legacy_state(
     save_state(
         legacy,
         InstallState(
-            schema_version=2,
+                schema_version=3,
             installer_version="0.2.1",
             mode=InstallMode.FULL,
             target_user="developer",

@@ -52,11 +52,22 @@ STATE_KEYS_V1 = frozenset(
         "last_report_paths",
     }
 )
-STATE_KEYS = STATE_KEYS_V1 | frozenset(
+STATE_KEYS_V2 = STATE_KEYS_V1 | frozenset(
     {
         "host_verification_status",
         "host_kernel",
         "host_verification_findings",
+    }
+)
+STATE_KEYS = STATE_KEYS_V2 | frozenset(
+    {
+        "kernel_plan_digest",
+        "kernel_reboot_boot_id",
+        "recovery_kernel",
+        "display_manager_was_active",
+        "kernel_verification_status",
+        "kernel_kernel",
+        "kernel_verification_findings",
     }
 )
 
@@ -311,6 +322,15 @@ def _state_payload(state: InstallState) -> dict[str, object]:
         "host_verification_status": state.host_verification_status,
         "host_kernel": state.host_kernel,
         "host_verification_findings": list(state.host_verification_findings),
+        "kernel_plan_digest": state.kernel_plan_digest,
+        "kernel_reboot_boot_id": state.kernel_reboot_boot_id,
+        "recovery_kernel": state.recovery_kernel,
+        "display_manager_was_active": state.display_manager_was_active,
+        "kernel_verification_status": state.kernel_verification_status,
+        "kernel_kernel": state.kernel_kernel,
+        "kernel_verification_findings": list(
+            state.kernel_verification_findings
+        ),
     }
 
 
@@ -328,18 +348,22 @@ def _decode_state(raw: str) -> InstallState:
     completed = payload["completed_stage_input_digests"]
     reports = payload["last_report_paths"]
     host_findings = payload["host_verification_findings"]
+    kernel_findings = payload["kernel_verification_findings"]
     if not isinstance(completed, dict):
         raise ValueError("completed stage digests must be an object")
     if not isinstance(reports, list):
         raise ValueError("last report paths must be an array")
     if not isinstance(host_findings, list):
         raise ValueError("host verification findings must be an array")
+    if not isinstance(kernel_findings, list):
+        raise ValueError("kernel verification findings must be an array")
     return InstallState(
         **{
             **payload,
             "completed_stage_input_digests": completed,
             "last_report_paths": tuple(reports),
             "host_verification_findings": tuple(host_findings),
+            "kernel_verification_findings": tuple(kernel_findings),
         }
     )
 
@@ -359,23 +383,63 @@ def _migrate_payload(payload: dict[str, Any]) -> dict[str, Any]:
     version = payload.get("schema_version")
     if type(version) is not int:
         raise ValueError("install state schema version is invalid")
-    if version == STATE_SCHEMA_VERSION:
-        return payload
-    if version != 1:
+    if version == 1:
+        _require_schema_keys(payload, STATE_KEYS_V1)
+        payload = {
+            **payload,
+            "schema_version": 2,
+            "host_verification_status": None,
+            "host_kernel": None,
+            "host_verification_findings": [],
+        }
+        version = 2
+    if version == 2:
+        _require_schema_keys(payload, STATE_KEYS_V2)
+        payload = _migrate_schema_two(payload)
+        version = STATE_SCHEMA_VERSION
+    if version != STATE_SCHEMA_VERSION:
         raise ValueError("install state schema version is invalid")
-    unknown = sorted(set(payload).difference(STATE_KEYS_V1))
+    return payload
+
+
+def _require_schema_keys(
+    payload: Mapping[str, Any],
+    expected: frozenset[str],
+) -> None:
+    unknown = sorted(set(payload).difference(expected))
     if unknown:
         raise ValueError("unknown install state keys: " + ", ".join(unknown))
-    missing = sorted(STATE_KEYS_V1.difference(payload))
+    missing = sorted(expected.difference(payload))
     if missing:
         raise ValueError("missing install state keys: " + ", ".join(missing))
-    return {
+
+
+def _migrate_schema_two(payload: dict[str, Any]) -> dict[str, Any]:
+    migrated = {
         **payload,
         "schema_version": STATE_SCHEMA_VERSION,
-        "host_verification_status": None,
-        "host_kernel": None,
-        "host_verification_findings": [],
+        "kernel_plan_digest": None,
+        "kernel_reboot_boot_id": None,
+        "recovery_kernel": None,
+        "display_manager_was_active": False,
+        "kernel_verification_status": None,
+        "kernel_kernel": None,
+        "kernel_verification_findings": [],
     }
+    if payload.get("mode") == "full":
+        migrated.update(
+            {
+                "current_stage": InstallStage.BOOTSTRAP.value,
+                "completed_stage_input_digests": {},
+                "reboot_boot_id": None,
+                "host_plan_digest": None,
+                "host_adapter_id": None,
+                "host_verification_status": None,
+                "host_kernel": None,
+                "host_verification_findings": [],
+            }
+        )
+    return migrated
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> Mapping[str, Any]:
