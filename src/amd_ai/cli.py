@@ -134,6 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--project-name", default="amd-ai-project")
     install.add_argument("--image-source", choices=("pull", "build"))
     install.add_argument("--target-user")
+    install.add_argument("--accept-kernel-plan-digest")
     install.add_argument("--accept-host-plan-digest")
     install.add_argument("--accept-docker-group", action="store_true")
     install.add_argument("--manifest", type=Path)
@@ -478,6 +479,7 @@ def _install_command(args: argparse.Namespace) -> int:
         project_name=args.project_name,
         image_source=args.image_source,
         target_user=args.target_user,
+        accepted_kernel_plan_digest=args.accept_kernel_plan_digest,
         accepted_host_plan_digest=args.accept_host_plan_digest,
         accept_docker_group=args.accept_docker_group,
         stable_manifest_path=manifest,

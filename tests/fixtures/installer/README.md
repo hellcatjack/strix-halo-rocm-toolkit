@@ -6,4 +6,5 @@ rejects the fixture environment unless `AMD_AI_INSTALLER_ENABLE_FIXTURES=1` is
 also present.
 
 `boot_id` is mutable test evidence. A full-mode run remains at
-`REBOOT_PENDING` until its canonical UUID changes.
+`KERNEL_REBOOT_PENDING` until its canonical UUID changes. Platform preparation
+never creates a second reboot checkpoint.

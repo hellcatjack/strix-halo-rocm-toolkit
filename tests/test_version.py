@@ -9,11 +9,11 @@ from amd_ai.cli import main
 
 
 def test_version_constant_and_cli(capsys):
-    assert __version__ == "0.2.3"
+    assert __version__ == "0.3.0"
     with pytest.raises(SystemExit) as exit_info:
         main(["--version"])
     assert exit_info.value.code == 0
-    assert capsys.readouterr().out.strip() == "amd-ai 0.2.3"
+    assert capsys.readouterr().out.strip() == "amd-ai 0.3.0"
 
 
 def test_installer_only_release_keeps_stable_image_baseline() -> None:

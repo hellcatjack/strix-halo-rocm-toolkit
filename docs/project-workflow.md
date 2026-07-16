@@ -79,7 +79,7 @@ debug = false
 # shm_size_gib = 16
 ```
 
-共享内存默认由宿主总内存和 TTM 规划动态计算，范围为 4 至 16 GiB。项目配置可固定 1 至 128 GiB，也可单次覆盖：
+共享内存默认仅根据宿主总内存动态选择，范围为 4 至 16 GiB。该值只传给容器 `--shm-size`，不会计算或写入宿主 GTT/TTM。项目配置可固定 1 至 128 GiB，也可单次覆盖：
 
 ```bash
 ./bin/project-run video-lab --shm-size-gib 24

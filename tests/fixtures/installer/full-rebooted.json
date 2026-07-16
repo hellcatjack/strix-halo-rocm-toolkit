@@ -2,6 +2,6 @@
   "adapter_id": "ubuntu-24.04",
   "blocked_stage": null,
   "fact_revision": "rebooted-v1",
-  "reboot_required": true,
+  "kernel_reboot_required": true,
   "schema_version": 1
 }

@@ -1268,7 +1268,7 @@ class InstallerWorkflow:
                 return HostConfirmation(
                     False,
                     False,
-                    "host tuning plan requires --accept-host-plan-digest "
+                    "host platform plan requires --accept-host-plan-digest "
                     f"{host_plan.plan_digest}",
                 )
             return HostConfirmation(

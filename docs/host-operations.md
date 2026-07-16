@@ -18,16 +18,9 @@
 
 进入 BIOS/UEFI，将 UMA Frame Buffer 或 Dedicated VRAM 设置为最小可用值 **512 MiB（0.5 GiB）**。脚本只能检查内核报告的专用 VRAM，不能修改 BIOS。
 
-Ryzen AI Max+ 395 使用统一物理内存。512 MiB 是固定帧缓冲基线，其余内存保持为普通系统 RAM，并由 GPU 通过 TTM/GTT 按需映射。`ttm.pages_limit` 是可映射上限，不会在开机时立即、永久占用同等容量。
+Ryzen AI Max+ 395 使用统一物理内存。512 MiB 是固定帧缓冲基线，其余内存保持为普通系统 RAM，并由 GPU 通过 TTM/GTT 按需映射。BIOS 设置属于人工固件操作，不是安装器的宿主调优步骤。
 
-本机标称 128 GiB、4 KiB 页的目标为：
-
-```text
-ttm.pages_limit=33554432
-amdgpu.gttsize=131072  # 仅保留已有兼容参数，不在新主机上主动新增
-```
-
-容量优先使用 DMI；DMI 不可用时使用 `/proc/meminfo`，并向上归一到 8 GiB 档。两者推导结果相差超过 8 GiB 时会停止自动应用，需使用 `--memory-gib` 明确确认。已有 `amdgpu.gttsize`、`amdgpu.cwsr_enable`、`amdgpu.mcbp` 和 `amdgpu.gpu_recovery` 参数会保留，不由本流程顺带改写。
+工具不会安装 `amd-debug-tools`、调用 `amd-ttm`、创建、替换或删除 `/etc/modprobe.d/ttm.conf`，也不会设置 `ttm.pages_limit`、`amdgpu.gttsize` 或因 GTT/TTM 执行 `update-initramfs`/重启。live TTM 页数、内核命令行和相关日志只作为诊断事实采集，不计算目标值，不参与安装通过判定。
 
 ## 3. 标准流程
 
@@ -62,11 +55,7 @@ sudo ./bin/host-prepare plan --target-user "$USER" \
   --json reports/host-prepare-plan.json
 ```
 
-确认输出中的包名、APT 源、目标用户、128 GiB TTM 计算和重启动作。若 DMI 信息异常，可在核实物理容量后显式使用：
-
-```bash
-sudo ./bin/host-prepare plan --target-user "$USER" --memory-gib 128
-```
+确认输出中的阶段、包名、APT 源、目标用户和重启动作。旧于 6.17 的内核会生成内核阶段计划；启动 6.17 OEM 内核后再次运行，才会生成不重启的平台阶段计划。任何计划都不包含 GTT/TTM 写入。
 
 ### 3.3 应用
 
@@ -75,16 +64,14 @@ sudo ./bin/host-prepare apply --target-user "$USER" \
   --json reports/host-prepare-apply.json
 ```
 
-输入 `APPLY` 后才会执行。主要顺序为：
+输入 `APPLY` 后才会执行。完整安装器将以下动作拆为两个独立审批阶段：
 
-1. 创建私有备份和命令快照。
-2. 禁用确认属于 ROCm 6.4 的源，清理确认的旧包和 `amdgpu-dkms`。
-3. 安装 `linux-oem-24.04`、匹配 headers、firmware 和主机工具。
-4. Docker 缺失时，校验官方密钥完整指纹后安装 Engine、Buildx 和 Compose 插件。
-5. 按 `--target-user` 的 passwd/group 数据补充实际 `/dev/kfd`、render node 所属设备组，不以调用 sudo 的 root 进程组作为判断依据。
-6. 校验固定 SHA-256 后安装 `amd-debug-tools==0.2.19`，设置 AI Max TTM 上限。
+1. 内核阶段创建私有备份，禁用确认属于 ROCm 6.4 的源，清理确认的旧包和 `amdgpu-dkms`，安装 OEM 6.17 内核、匹配 headers 与 firmware。
+2. 一次手工重启后，严格验证当前内核、显示管理器、Radeon 8060S、KFD/render node 和当前启动日志。
+3. 平台阶段创建新的快照，安装宿主诊断工具；Docker 缺失时安装 Engine、Buildx 和 Compose 插件，Buildx 缺失时使用与当前 Docker 发行方式匹配的包修复。
+4. 按 `--target-user` 的 passwd/group 数据补充实际 `/dev/kfd`、render node 所属设备组，不以调用 sudo 的 root 进程组作为判断依据。
 
-`amd-ttm` 的重启提示始终由包装器拒绝，重启策略由本工具统一控制。仅在该版本因“归一后的标称容量略高于可见 MemTotal”而拒绝时，才写入等价的 `ttm.conf`，并立即执行 `update-initramfs -u`；其他错误立即停止。
+平台阶段不要求重启。工具既不调节 GTT/TTM，也不会为 Docker、Buildx 或组变更创建第二个重启检查点。
 
 自动化确认可使用 `--yes`，但它不会替用户授权 Docker 组，也不会自动重启：
 
@@ -100,7 +87,7 @@ sudo ./bin/host-prepare apply --target-user "$USER" --yes
 sudo reboot
 ```
 
-只有明确希望应用器在全部动作成功后立即重启时，才向 `host-prepare apply` 传入 `--reboot`。
+只有直接使用低级 `host-prepare apply`，并明确希望内核阶段成功后立即重启时，才传入 `--reboot`。推荐的 `install.sh --mode full` 永远由操作员手工重启，以便保留桌面恢复窗口。
 
 ### 3.5 构建探针镜像并验证
 
@@ -114,11 +101,12 @@ sudo -v
 
 验证要求：
 
-- live TTM 页数等于按物理内存和实际页大小计算的目标；
 - `/dev/kfd` 和 `/dev/dri/render*` 均存在，目标用户覆盖实际设备 GID；
 - 探针使用 `--device /dev/kfd`、`--device /dev/dri` 和动态 `--group-add`，不使用 `--privileged` 或 `--ipc=host`；
 - 容器输出包含 `gfx1151`；
 - 当前启动的 `dmesg` 中没有 MES timeout、GPU reset、amdgpu page fault、firmware 加载失败或 ring timeout。
+
+报告继续包含 `ttm_pages_limit`、当前内核命令行和 TTM 日志事实，但这些只用于排障。缺失或不同的 live limit 不会产生 `HOST.TTM_MISMATCH` 或 `HOST.MEMORY_CONFLICT`。
 
 `host-verify` 本身保持以普通目标用户运行，以便正确判断该用户的设备组；普通 `dmesg` 或 Docker daemon 不可访问时，只回退到固定的 `sudo -n dmesg` 与 `sudo -n docker` 命令。先运行 `sudo -v` 可刷新凭据，但不会让整条验证流程以 root 身份误判用户权限。两条路径都无法读取 dmesg 时会得到 `HOST.DMESG_UNAVAILABLE`，不会把空输出当成“没有 GPU 错误”。独立 `host-verify` 命令只有在宿主检查和容器探针均正式通过时返回 0；满足最低要求但未登记的 OEM 内核保持 `unverified` 并返回 1，阻断错误返回 2。交互安装器从 `v0.2.1` 起会明确记录该 `unverified` 状态并继续普通部署。
 
@@ -137,17 +125,7 @@ sudo ls -1dt /var/backups/amd-ai/*
 sudo less /var/backups/amd-ai/<UTC时间戳>/manifest.json
 ```
 
-恢复 TTM 配置前先停止 GPU 工作负载。若备份中原来存在该文件：
-
-```bash
-BACKUP=/var/backups/amd-ai/<UTC时间戳>
-sudo install -m 0644 "$BACKUP/etc/modprobe.d/ttm.conf" \
-  /etc/modprobe.d/ttm.conf
-sudo update-initramfs -u
-sudo reboot
-```
-
-若备份清单显示原来没有 `/etc/modprobe.d/ttm.conf`，而本次应用新建了它，可在核对内容后删除，再执行 `update-initramfs -u` 和重启。
+备份可能包含安装前已经存在的 `/etc/modprobe.d/ttm.conf`，仅用于保留诊断证据。工具从不创建、替换或删除该文件，因此没有由本工具产生的 TTM 回滚步骤。若操作员或其他软件修改过它，应按该修改来源的文档单独处理，不能归因于本工具。
 
 恢复 GRUB 配置：
 

@@ -18,7 +18,7 @@ def test_operator_documentation_contains_required_contract_anchors() -> None:
         "docs/install.md": [
             "--mode container",
             "--non-interactive",
-            "REBOOT_PENDING",
+            "KERNEL_REBOOT_PENDING",
         ],
         "docs/protected-pip.md": [
             "pip install",

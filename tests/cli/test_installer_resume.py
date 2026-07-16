@@ -6,6 +6,7 @@ import stat
 import subprocess
 from pathlib import Path
 
+from amd_ai.host.models import HostPlanPhase
 from amd_ai.installer.fixture import fixture_host_plan_digest
 from amd_ai.installer.models import (
     FULL_STAGE_ORDER,
@@ -191,8 +192,18 @@ def test_full_fixture_resumes_only_after_boot_id_changes(
     home = tmp_path / "home"
     state = tmp_path / "state.json"
     project = tmp_path / "project"
-    digest = fixture_host_plan_digest("developer")
-    extra = ("--accept-host-plan-digest", digest)
+    kernel_digest = fixture_host_plan_digest(
+        "developer",
+        phase=HostPlanPhase.KERNEL,
+        reboot_required=True,
+    )
+    host_digest = fixture_host_plan_digest("developer")
+    extra = (
+        "--accept-kernel-plan-digest",
+        kernel_digest,
+        "--accept-host-plan-digest",
+        host_digest,
+    )
 
     first = run_install(
         home=home,
@@ -224,9 +235,14 @@ def test_full_fixture_resumes_only_after_boot_id_changes(
     assert second.returncode == 1
     assert third.returncode == 0, third.stderr
     calls = (fixture / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert calls.count("kernel_apply") == 1
     assert calls.count("host_apply") == 1
+    assert calls.count("kernel_verify") == 1
     assert calls.count("host_verify") == 1
+    assert calls.index("kernel_apply") < calls.index("kernel_verify")
+    assert calls.index("kernel_verify") < calls.index("host_plan")
     assert calls.index("host_apply") < calls.index("host_verify")
+    assert calls.index("host_verify") < calls.index("pull_release")
 
 
 def test_real_install_preserves_corrupt_state_without_replaying_actions(

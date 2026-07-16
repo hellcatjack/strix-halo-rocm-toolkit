@@ -5,6 +5,7 @@ from pathlib import Path
 
 from amd_ai.host.models import (
     DockerDistribution,
+    HostPlanPhase,
     HostSnapshot,
     PlannedAction,
     PreparePlan,
@@ -25,6 +26,7 @@ from amd_ai.installer.models import (
 from amd_ai.installer.release import load_stable_release
 from amd_ai.installer.state import read_boot_id, stage_input_digest
 from amd_ai.project.config import load_project_config
+from amd_ai.report import Report, Status
 
 
 class FixtureBackendError(RuntimeError):
@@ -88,20 +90,39 @@ class FixtureInstallerActions:
         del kwargs
         return self._result(InstallStage.HOST_PREFLIGHT, "host_preflight")
 
-    def host_plan(self, *, target_user: str, **kwargs: object) -> HostPlanResult:
-        del kwargs
-        result = self._result(InstallStage.HOST_PLAN, "host_plan")
+    def host_plan(
+        self,
+        *,
+        target_user: str,
+        phase: HostPlanPhase,
+    ) -> HostPlanResult:
+        phase = HostPlanPhase(phase)
+        stage = (
+            InstallStage.KERNEL_PLAN
+            if phase is HostPlanPhase.KERNEL
+            else InstallStage.HOST_PLAN
+        )
+        call = "kernel_plan" if phase is HostPlanPhase.KERNEL else "host_plan"
+        result = self._result(stage, call)
         if result.blocked:
             raise FixtureBackendError(result.message)
         plan = fixture_prepare_plan(
             target_user,
-            reboot_required=bool(self.scenario.get("reboot_required", True)),
+            phase=phase,
+            reboot_required=(
+                bool(self.scenario.get("kernel_reboot_required", True))
+                if phase is HostPlanPhase.KERNEL
+                else False
+            ),
         )
+        snapshot = _fixture_snapshot()
         return HostPlanResult(
-            snapshot=_fixture_snapshot(),
+            snapshot=snapshot,
             plan=plan,
             plan_digest=stage_input_digest(prepare_plan_payload(plan)),
             adapter_id=str(self.scenario.get("adapter_id", "ubuntu-24.04")),
+            running_kernel=snapshot.kernel,
+            display_manager_active=snapshot.display_manager_active,
         )
 
     def host_apply(
@@ -110,12 +131,24 @@ class FixtureInstallerActions:
         *,
         include_docker_group: bool,
     ) -> StageResult:
-        del host_plan, include_docker_group
+        del include_docker_group
+        if host_plan.plan.phase is HostPlanPhase.KERNEL:
+            return self._result(InstallStage.KERNEL_APPLY, "kernel_apply")
         return self._result(InstallStage.HOST_APPLY, "host_apply")
 
-    def host_verify(self, **kwargs: object) -> StageResult:
+    def kernel_verify(self, **kwargs: object) -> Report:
         del kwargs
-        return self._result(InstallStage.HOST_VERIFY, "host_verify")
+        result = self._result(InstallStage.KERNEL_VERIFY, "kernel_verify")
+        if result.blocked:
+            raise FixtureBackendError(result.message)
+        return _fixture_report("host-kernel-verify")
+
+    def host_verify(self, **kwargs: object) -> Report:
+        del kwargs
+        result = self._result(InstallStage.HOST_VERIFY, "host_verify")
+        if result.blocked:
+            raise FixtureBackendError(result.message)
+        return _fixture_report("host-verify")
 
     def resolve_release(self, manifest_path: Path) -> StableRelease:
         blocked = self._result(InstallStage.RELEASE_RESOLVE, "resolve_release")
@@ -222,14 +255,22 @@ class FixtureInstallerActions:
 
 
 def fixture_prepare_plan(
-    target_user: str, *, reboot_required: bool = True
+    target_user: str,
+    *,
+    phase: HostPlanPhase = HostPlanPhase.TUNING,
+    reboot_required: bool = False,
 ) -> PreparePlan:
     return PreparePlan(
+        phase=phase,
         supported=True,
         target_user=target_user,
         actions=(
             PlannedAction(
-                code="HOST.FIXTURE_CHANGE",
+                code=(
+                    "KERNEL.FIXTURE_CHANGE"
+                    if phase is HostPlanPhase.KERNEL
+                    else "HOST.FIXTURE_CHANGE"
+                ),
                 summary="Apply fixture host change",
                 argv=("true",),
                 privileged=True,
@@ -239,9 +280,30 @@ def fixture_prepare_plan(
     )
 
 
-def fixture_host_plan_digest(target_user: str) -> str:
+def fixture_host_plan_digest(
+    target_user: str,
+    *,
+    phase: HostPlanPhase = HostPlanPhase.TUNING,
+    reboot_required: bool = False,
+) -> str:
     return stage_input_digest(
-        prepare_plan_payload(fixture_prepare_plan(target_user))
+        prepare_plan_payload(
+            fixture_prepare_plan(
+                target_user,
+                phase=phase,
+                reboot_required=reboot_required,
+            )
+        )
+    )
+
+
+def _fixture_report(command: str) -> Report:
+    return Report(
+        command=command,
+        status=Status.PASS,
+        generated_at="2026-07-16T12:00:00Z",
+        facts={"kernel": "6.17.0-1028-oem"},
+        findings=(),
     )
 
 
