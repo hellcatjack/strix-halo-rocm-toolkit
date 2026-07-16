@@ -129,7 +129,7 @@ def test_schema_two_full_state_restarts_host_audit_and_keeps_images(tmp_path):
     )
     assert migrated.kernel_plan_digest is None
     assert migrated.host_plan_digest is None
-    assert migrated.docker_group_accepted is True
+    assert migrated.docker_group_accepted is False
     assert migrated.last_report_paths == (
         str((tmp_path / "report.json").resolve()),
     )
@@ -170,6 +170,59 @@ def test_schema_three_kernel_checkpoint_fields_round_trip(tmp_path):
     save_state(path, expected)
 
     assert load_state(path) == expected
+
+
+def test_early_schema_three_full_state_restarts_for_display_history(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "early-schema-three-full.json"
+    expected = install_state(
+        tmp_path,
+        mode="full",
+        current_stage="COMPLETE",
+        kernel_plan_digest="f" * 64,
+        host_plan_digest="e" * 64,
+        kernel_verification_status="pass",
+        kernel_kernel="6.17.0-1028-oem",
+    )
+    save_state(path, expected)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("display_manager_was_loaded")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = load_state(path)
+
+    assert migrated is not None
+    assert migrated.current_stage is InstallStage.BOOTSTRAP
+    assert migrated.completed_stage_input_digests == {}
+    assert migrated.kernel_plan_digest is None
+    assert migrated.host_plan_digest is None
+    assert migrated.kernel_verification_status is None
+    assert migrated.torch_image_reference == expected.torch_image_reference
+
+
+def test_early_schema_three_container_state_keeps_position(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "early-schema-three-container.json"
+    expected = install_state(
+        tmp_path,
+        mode="container",
+        current_stage="IMAGE_VERIFY",
+    )
+    save_state(path, expected)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("display_manager_was_loaded")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = load_state(path)
+
+    assert migrated is not None
+    assert migrated.current_stage is InstallStage.IMAGE_VERIFY
+    assert migrated.completed_stage_input_digests == (
+        expected.completed_stage_input_digests
+    )
+    assert migrated.display_manager_was_loaded is False
 
 
 @pytest.mark.parametrize(

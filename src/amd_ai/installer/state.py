@@ -399,6 +399,20 @@ def _migrate_payload(payload: dict[str, Any]) -> dict[str, Any]:
         _require_schema_keys(payload, STATE_KEYS_V2)
         payload = _migrate_schema_two(payload)
         version = STATE_SCHEMA_VERSION
+    if (
+        version == STATE_SCHEMA_VERSION
+        and "display_manager_was_loaded" not in payload
+    ):
+        early_schema_three_keys = STATE_KEYS.difference(
+            {"display_manager_was_loaded"}
+        )
+        _require_schema_keys(payload, early_schema_three_keys)
+        payload = {
+            **payload,
+            "display_manager_was_loaded": False,
+        }
+        if payload.get("mode") == "full":
+            payload = _restart_full_host_audit(payload)
     if version != STATE_SCHEMA_VERSION:
         raise ValueError("install state schema version is invalid")
     return payload
@@ -430,19 +444,31 @@ def _migrate_schema_two(payload: dict[str, Any]) -> dict[str, Any]:
         "kernel_verification_findings": [],
     }
     if payload.get("mode") == "full":
-        migrated.update(
-            {
-                "current_stage": InstallStage.BOOTSTRAP.value,
-                "completed_stage_input_digests": {},
-                "reboot_boot_id": None,
-                "host_plan_digest": None,
-                "host_adapter_id": None,
-                "host_verification_status": None,
-                "host_kernel": None,
-                "host_verification_findings": [],
-            }
-        )
+        migrated = _restart_full_host_audit(migrated)
     return migrated
+
+
+def _restart_full_host_audit(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **payload,
+        "current_stage": InstallStage.BOOTSTRAP.value,
+        "completed_stage_input_digests": {},
+        "reboot_boot_id": None,
+        "kernel_plan_digest": None,
+        "kernel_reboot_boot_id": None,
+        "recovery_kernel": None,
+        "display_manager_was_loaded": False,
+        "display_manager_was_active": False,
+        "kernel_verification_status": None,
+        "kernel_kernel": None,
+        "kernel_verification_findings": [],
+        "host_plan_digest": None,
+        "host_adapter_id": None,
+        "docker_group_accepted": False,
+        "host_verification_status": None,
+        "host_kernel": None,
+        "host_verification_findings": [],
+    }
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> Mapping[str, Any]:
