@@ -20,7 +20,6 @@ class HostAdapter(Protocol):
         self,
         snapshot: HostSnapshot,
         target_user: str,
-        memory_gib: int | None,
         phase: HostPlanPhase,
     ) -> PreparePlan: ...
 

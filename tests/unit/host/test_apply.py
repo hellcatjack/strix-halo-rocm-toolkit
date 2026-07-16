@@ -5,14 +5,11 @@ from pathlib import Path
 import pytest
 
 from amd_ai.host.apply import (
-    AMD_DEBUG_TOOLS_SHA256,
     ApplyError,
     ApplyRefused,
     backup_host_state,
     execute_plan,
     parse_gpg_fingerprints,
-    ttm_input_text,
-    verify_file_sha256,
 )
 from amd_ai.host.models import HostPlanPhase, PlannedAction, PreparePlan
 from amd_ai.runner import CommandResult
@@ -90,19 +87,6 @@ def test_execute_requires_root_and_confirmation():
             effective_uid=0,
             confirmed=False,
         )
-
-
-def test_ai_max_accepts_memory_warning_but_declines_reboot():
-    assert ttm_input_text(nominal_gib=128, mem_total_kib=131015488) == "y\nn\n"
-    assert ttm_input_text(nominal_gib=100, mem_total_kib=131015488) == "n\n"
-
-
-def test_sha256_verification_stops_mismatched_wheel(tmp_path):
-    wheel = tmp_path / "amd_debug_tools.whl"
-    wheel.write_bytes(b"not the pinned wheel")
-
-    with pytest.raises(ApplyError, match="SHA-256"):
-        verify_file_sha256(wheel, AMD_DEBUG_TOOLS_SHA256)
 
 
 def test_gpg_parser_requires_the_full_docker_fingerprint():
@@ -261,81 +245,6 @@ def test_buildx_repair_reprobes_runtime_and_plugin(tmp_path, code, install):
     assert buildx in runner.calls
 
 
-def test_ttm_memory_rounding_failure_uses_scoped_modprobe_fallback(tmp_path):
-    root = tmp_path / "root"
-    (root / "sys/module/ttm").mkdir(parents=True)
-    ttm_args = ("/usr/local/bin/amd-ttm", "--set", "128")
-    runner = FakeRunner.backup_only()
-    runner.responses[ttm_args] = CommandResult(
-        ttm_args,
-        1,
-        "",
-        "requested memory exceeds available system memory",
-    )
-    initramfs_args = ("update-initramfs", "-u")
-    runner.responses[initramfs_args] = CommandResult(
-        initramfs_args,
-        0,
-        "",
-        "",
-    )
-    action = PlannedAction(
-        code="TTM.SET_AI_MAX",
-        summary="set TTM",
-        argv=ttm_args,
-        privileged=True,
-    )
-
-    execute_plan(
-        action_plan(backup_action(), action),
-        runner,
-        effective_uid=0,
-        confirmed=True,
-        snapshot=healthy_snapshot(),
-        root=root,
-        backup_destination=tmp_path / "backups",
-    )
-
-    config = root / "etc/modprobe.d/ttm.conf"
-    assert config.read_text(encoding="utf-8") == (
-        "options ttm pages_limit=33554432\n"
-    )
-    assert "amdgpu.gttsize" not in config.read_text(encoding="utf-8")
-    assert initramfs_args in runner.calls
-
-
-def test_ttm_unrelated_failure_never_writes_fallback(tmp_path):
-    root = tmp_path / "root"
-    (root / "sys/module/ttm").mkdir(parents=True)
-    ttm_args = ("/usr/local/bin/amd-ttm", "--set", "128")
-    runner = FakeRunner.backup_only()
-    runner.responses[ttm_args] = CommandResult(
-        ttm_args,
-        1,
-        "",
-        "permission denied",
-    )
-    action = PlannedAction(
-        code="TTM.SET_AI_MAX",
-        summary="set TTM",
-        argv=ttm_args,
-        privileged=True,
-    )
-
-    with pytest.raises(ApplyError, match="amd-ttm failed"):
-        execute_plan(
-            action_plan(backup_action(), action),
-            runner,
-            effective_uid=0,
-            confirmed=True,
-            snapshot=healthy_snapshot(),
-            root=root,
-            backup_destination=tmp_path / "backups",
-        )
-
-    assert not (root / "etc/modprobe.d/ttm.conf").exists()
-
-
 def test_unknown_internal_action_is_blocked_after_backup(tmp_path):
     unknown = PlannedAction(
         code="UNKNOWN.INTERNAL",
@@ -347,6 +256,30 @@ def test_unknown_internal_action_is_blocked_after_backup(tmp_path):
     with pytest.raises(ApplyError, match="unknown internal action"):
         execute_plan(
             action_plan(backup_action(), unknown),
+            FakeRunner.backup_only(),
+            effective_uid=0,
+            confirmed=True,
+            snapshot=healthy_snapshot(),
+            root=tmp_path / "root",
+            backup_destination=tmp_path / "backups",
+        )
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["TTM.SET_AI_MAX", "TTM.INSTALL_AMD_DEBUG_TOOLS"],
+)
+def test_removed_ttm_actions_are_never_dispatchable(tmp_path, code):
+    action = PlannedAction(
+        code=code,
+        summary="removed",
+        argv=(),
+        privileged=True,
+    )
+
+    with pytest.raises(ApplyError, match="unknown internal action"):
+        execute_plan(
+            action_plan(backup_action(), action),
             FakeRunner.backup_only(),
             effective_uid=0,
             confirmed=True,

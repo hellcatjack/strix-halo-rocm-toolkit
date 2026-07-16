@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -16,14 +15,7 @@ from amd_ai.host.prepare import old_rocm_source_paths
 from amd_ai.runner import CommandError, CommandResult, Runner
 
 
-AMD_DEBUG_TOOLS_VERSION = "0.2.19"
-AMD_DEBUG_TOOLS_WHEEL = "amd_debug_tools-0.2.19-py3-none-any.whl"
-AMD_DEBUG_TOOLS_SHA256 = (
-    "7c77875c2fa71c8f10d151bbd24583fd8f16f3fa31dca7cd38026f1e1768bb2f"
-)
 DOCKER_GPG_FINGERPRINT = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
-GIB = 1024**3
-KIB_PER_GIB = 1024**2
 
 
 class ApplyRefused(RuntimeError):
@@ -186,12 +178,6 @@ def execute_plan(
             _install_docker_buildx_plugin(runner, root)
         elif action.code == "DOCKER.INSTALL_UBUNTU_BUILDX":
             _install_ubuntu_buildx(runner)
-        elif action.code == "TTM.INSTALL_AMD_DEBUG_TOOLS":
-            _install_amd_debug_tools(runner, root)
-        elif action.code == "TTM.SET_AI_MAX":
-            if snapshot is None:
-                raise ApplyError("a host snapshot is required to configure TTM")
-            _set_ttm(action, runner, root, snapshot)
         elif action.argv:
             _run_required(runner, action.argv, input_text=action.input_text)
         else:
@@ -201,23 +187,6 @@ def execute_plan(
     if backup_path is None:
         raise ApplyError("the plan completed without a successful backup")
     return ApplyResult(backup_path, tuple(executed), tuple(skipped))
-
-
-def ttm_input_text(*, nominal_gib: int, mem_total_kib: int) -> str:
-    exceeds_ninety_percent = nominal_gib * KIB_PER_GIB * 10 > mem_total_kib * 9
-    return "y\nn\n" if exceeds_ninety_percent else "n\n"
-
-
-def verify_file_sha256(path: Path, expected: str) -> None:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    actual = digest.hexdigest()
-    if actual.lower() != expected.lower():
-        raise ApplyError(
-            f"SHA-256 mismatch for {path}: expected {expected}, got {actual}"
-        )
 
 
 def parse_gpg_fingerprints(colon_listing: str) -> tuple[str, ...]:
@@ -262,44 +231,6 @@ def _disable_old_sources(action: PlannedAction, root: Path) -> None:
         if old_rocm_source_paths((record,)) != (raw_path,):
             raise ApplyError(f"APT source no longer contains a ROCm 6.4 URL: {source}")
         source.rename(disabled)
-
-
-def _install_amd_debug_tools(runner: Runner, root: Path) -> None:
-    cache = _rooted(root, "/var/cache/amd-ai")
-    cache.mkdir(parents=True, exist_ok=True)
-    wheel = cache / AMD_DEBUG_TOOLS_WHEEL
-    _run_required(
-        runner,
-        (
-            "python3",
-            "-m",
-            "pip",
-            "download",
-            "--no-deps",
-            "--only-binary=:all:",
-            "--dest",
-            str(cache),
-            f"amd-debug-tools=={AMD_DEBUG_TOOLS_VERSION}",
-        ),
-    )
-    if not wheel.is_file():
-        raise ApplyError(f"pinned amd-debug-tools wheel was not downloaded: {wheel}")
-    verify_file_sha256(wheel, AMD_DEBUG_TOOLS_SHA256)
-
-    pipx_home = _rooted(root, "/opt/amd-ai/pipx")
-    pipx_bin = _rooted(root, "/usr/local/bin")
-    _run_required(
-        runner,
-        (
-            "env",
-            f"PIPX_HOME={pipx_home}",
-            f"PIPX_BIN_DIR={pipx_bin}",
-            "pipx",
-            "install",
-            "--force",
-            str(wheel),
-        ),
-    )
 
 
 def _install_oem_617(runner: Runner) -> None:
@@ -413,89 +344,6 @@ def _verify_docker_runtime_and_buildx(runner: Runner) -> None:
             continue
         evidence = (result.stderr or result.stdout).strip() or "no command output"
         raise ApplyError(f"{label} verification failed after Buildx repair: {evidence}")
-
-
-def _set_ttm(
-    action: PlannedAction,
-    runner: Runner,
-    root: Path,
-    snapshot: HostSnapshot,
-) -> None:
-    if (
-        len(action.argv) != 3
-        or action.argv[:2] != ("/usr/local/bin/amd-ttm", "--set")
-        or not action.argv[2].isdigit()
-    ):
-        raise ApplyError("invalid TTM action argv")
-    nominal_gib = int(action.argv[2])
-    expected_pages = nominal_gib * GIB // snapshot.page_size
-    result = runner.run(
-        list(action.argv),
-        check=False,
-        input_text=ttm_input_text(
-            nominal_gib=nominal_gib,
-            mem_total_kib=snapshot.mem_total_kib,
-        ),
-    )
-    if result.returncode != 0:
-        if _eligible_ttm_memory_fallback(result, nominal_gib, snapshot.mem_total_kib):
-            _write_ttm_fallback(root, expected_pages)
-            _run_required(runner, ("update-initramfs", "-u"))
-            return
-        evidence = (result.stderr or result.stdout).strip() or "no command output"
-        raise ApplyError(f"amd-ttm failed: {evidence}")
-
-    configured = _read_ttm_pages(_rooted(root, "/etc/modprobe.d/ttm.conf"))
-    if configured != expected_pages:
-        raise ApplyError(
-            f"amd-ttm did not persist expected pages_limit={expected_pages}"
-        )
-
-
-def _eligible_ttm_memory_fallback(
-    result: CommandResult,
-    nominal_gib: int,
-    mem_total_kib: int,
-) -> bool:
-    evidence = f"{result.stdout}\n{result.stderr}".lower()
-    recognized_error = "memory" in evidence and any(
-        phrase in evidence
-        for phrase in ("exceeds available", "greater than available", "not enough")
-    )
-    difference_kib = nominal_gib * KIB_PER_GIB - mem_total_kib
-    return recognized_error and 0 <= difference_kib <= 8 * KIB_PER_GIB
-
-
-def _write_ttm_fallback(root: Path, expected_pages: int) -> None:
-    if _rooted(root, "/sys/module/ttm").is_dir():
-        module = "ttm"
-    elif _rooted(root, "/sys/module/amdttm").is_dir():
-        module = "amdttm"
-    else:
-        raise ApplyError("no loaded ttm or amdttm module exists for fallback")
-
-    path = _rooted(root, "/etc/modprobe.d/ttm.conf")
-    existing = path.read_text(encoding="utf-8") if path.is_file() else ""
-    retained = [
-        line
-        for line in existing.splitlines()
-        if not re.match(r"^\s*options\s+(?:ttm|amdttm)\b", line)
-    ]
-    retained.append(f"options {module} pages_limit={expected_pages}")
-    _write_text_atomic(path, "\n".join(retained).rstrip() + "\n", mode=0o644)
-    if _read_ttm_pages(path) != expected_pages:
-        raise ApplyError("failed to persist the fallback TTM page limit")
-
-
-def _read_ttm_pages(path: Path) -> int | None:
-    if not path.is_file():
-        return None
-    matches = re.findall(
-        r"^\s*options\s+(?:ttm|amdttm)\b[^\n#]*\bpages_limit=(\d+)\b",
-        path.read_text(encoding="utf-8"),
-        re.MULTILINE,
-    )
-    return int(matches[-1]) if matches else None
 
 
 def _run_required(

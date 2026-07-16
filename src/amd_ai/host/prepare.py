@@ -16,7 +16,6 @@ from amd_ai.host.models import (
     PlannedAction,
     PreparePlan,
 )
-from amd_ai.host.ttm import compute_ttm_plan
 from amd_ai.host.policy import evaluate_preflight
 
 
@@ -73,7 +72,6 @@ def create_prepare_plan(
     snapshot: HostSnapshot,
     *,
     target_user: str,
-    memory_gib: int | None = None,
     phase: HostPlanPhase | None = None,
 ) -> PreparePlan:
     adapter = select_adapter(snapshot)
@@ -100,7 +98,6 @@ def create_prepare_plan(
     return adapter.create_prepare_plan(
         snapshot,
         target_user,
-        memory_gib,
         selected_phase,
     )
 
@@ -144,12 +141,11 @@ def with_docker_group_action(plan: PreparePlan) -> PreparePlan:
 def create_ubuntu_prepare_plan(
     snapshot: HostSnapshot,
     target_user: str,
-    memory_gib: int | None,
     phase: HostPlanPhase = HostPlanPhase.TUNING,
 ) -> PreparePlan:
     if phase is HostPlanPhase.KERNEL:
         return create_kernel_prepare_plan(snapshot, target_user)
-    return create_tuning_prepare_plan(snapshot, target_user, memory_gib)
+    return create_tuning_prepare_plan(snapshot, target_user)
 
 
 def create_kernel_prepare_plan(
@@ -214,14 +210,7 @@ def create_kernel_prepare_plan(
 def create_tuning_prepare_plan(
     snapshot: HostSnapshot,
     target_user: str,
-    memory_gib: int | None,
 ) -> PreparePlan:
-    ttm = compute_ttm_plan(
-        mem_total_kib=snapshot.mem_total_kib,
-        page_size=snapshot.page_size,
-        dmi_memory_bytes=snapshot.dmi_memory_bytes,
-        explicit_gib=memory_gib,
-    )
     actions: list[PlannedAction] = [
         _internal_action("BACKUP.SNAPSHOT", "Back up the current host state")
     ]
@@ -238,8 +227,6 @@ def create_tuning_prepare_plan(
                 "curl",
                 "gnupg",
                 "pciutils",
-                "python3-pip",
-                "pipx",
             ),
             privileged=True,
         )
@@ -291,44 +278,11 @@ def create_tuning_prepare_plan(
             )
         )
 
-    actions.append(
-        _internal_action(
-            "TTM.INSTALL_AMD_DEBUG_TOOLS",
-            "Install the pinned amd-debug-tools package after hash verification",
-        )
-    )
-    if snapshot.ttm_pages_limit != ttm.pages_limit:
-        actions.append(
-            PlannedAction(
-                code="TTM.SET_AI_MAX",
-                summary=(
-                    f"Set the AI Max TTM limit to {ttm.nominal_gib} GiB "
-                    f"({ttm.pages_limit} pages)"
-                ),
-                argv=(
-                    "/usr/local/bin/amd-ttm",
-                    "--set",
-                    str(ttm.nominal_gib),
-                ),
-                privileged=True,
-            )
-        )
-
-    reboot_required = snapshot.ttm_pages_limit != ttm.pages_limit
-    if reboot_required:
-        actions.append(
-            PlannedAction(
-                code="HOST.REBOOT",
-                summary="Reboot to activate the TTM changes",
-                argv=("systemctl", "reboot"),
-                privileged=True,
-            )
-        )
     return PreparePlan(
         supported=True,
         target_user=target_user,
         actions=tuple(actions),
-        reboot_required=reboot_required,
+        reboot_required=False,
         phase=HostPlanPhase.TUNING,
     )
 

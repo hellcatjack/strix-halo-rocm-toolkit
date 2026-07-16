@@ -26,7 +26,6 @@ class Ubuntu2404Adapter:
         self,
         snapshot: HostSnapshot,
         target_user: str,
-        memory_gib: int | None,
         phase: HostPlanPhase,
     ):
         from amd_ai.host.prepare import create_ubuntu_prepare_plan
@@ -34,6 +33,5 @@ class Ubuntu2404Adapter:
         return create_ubuntu_prepare_plan(
             snapshot,
             target_user,
-            memory_gib,
             phase,
         )

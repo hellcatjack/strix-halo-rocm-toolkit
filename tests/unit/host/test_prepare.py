@@ -50,6 +50,22 @@ def test_tuning_plan_never_installs_a_kernel():
     assert "APT.INSTALL_OEM_617" not in action_codes(plan)
 
 
+def test_platform_plan_is_read_only_for_gtt_and_never_reboots():
+    plan = create_prepare_plan(
+        healthy_snapshot(ttm_pages_limit=1),
+        target_user="customer",
+        phase=HostPlanPhase.TUNING,
+    )
+
+    codes = action_codes(plan)
+    assert not any(code.startswith("TTM.") for code in codes)
+    assert "HOST.REBOOT" not in codes
+    assert plan.reboot_required is False
+    assert "amd-ttm" not in " ".join(
+        argument for action in plan.actions for argument in action.argv
+    )
+
+
 @pytest.mark.parametrize(
     ("docker_version", "buildx_version", "distribution", "expected"),
     [
@@ -226,7 +242,7 @@ def test_mixed_apt_source_file_is_never_disabled_wholesale():
         )
 
 
-def test_tuning_plan_uses_exact_host_tools_and_ttm_commands():
+def test_platform_plan_uses_only_docker_and_pci_host_tools():
     snapshot = healthy_snapshot(
         docker_version=None,
         ttm_pages_limit=1,
@@ -247,15 +263,9 @@ def test_tuning_plan_uses_exact_host_tools_and_ttm_commands():
         "curl",
         "gnupg",
         "pciutils",
-        "python3-pip",
-        "pipx",
     )
     assert actions["DOCKER.INSTALL_IF_MISSING"].argv == ()
-    assert actions["TTM.SET_AI_MAX"].argv == (
-        "/usr/local/bin/amd-ttm",
-        "--set",
-        "128",
-    )
+    assert not any(code.startswith("TTM.") for code in actions)
 
 
 def test_missing_device_groups_are_derived_by_gid(monkeypatch):
