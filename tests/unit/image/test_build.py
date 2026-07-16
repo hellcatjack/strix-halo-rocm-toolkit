@@ -1,5 +1,6 @@
 import io
 import json
+import subprocess
 import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -23,6 +24,32 @@ from amd_ai.image.build import (
 from amd_ai.image.profile import load_profile
 from amd_ai.installer.progress import InstallerProgress, ProgressMode
 from amd_ai.runner import CommandResult, CommandStream
+
+
+def test_docker_detection_does_not_probe_buildx(monkeypatch):
+    calls: list[tuple[str, ...]] = []
+
+    def fake_completed(args, *, check=True):
+        del check
+        command = tuple(args)
+        calls.append(command)
+        assert command == (
+            "docker",
+            "info",
+            "--format",
+            "{{.ServerVersion}}",
+        )
+        return subprocess.CompletedProcess(command, 0, "29.1.3\n", "")
+
+    monkeypatch.setattr(build, "_completed", fake_completed)
+
+    docker = build.Docker.detect()
+
+    assert docker.prefix == ("docker",)
+    assert docker.server_version == "29.1.3"
+    assert calls == [
+        ("docker", "info", "--format", "{{.ServerVersion}}")
+    ]
 
 
 def test_build_argv_uses_content_addressed_local_parent_and_named_context():

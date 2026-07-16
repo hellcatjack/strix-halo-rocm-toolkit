@@ -55,21 +55,27 @@ class LocalImage:
 
 
 class Docker:
-    def __init__(self, prefix: Sequence[str]) -> None:
+    def __init__(self, prefix: Sequence[str], server_version: str) -> None:
         self.prefix = tuple(prefix)
+        self.server_version = server_version
 
     @classmethod
     def detect(cls) -> Docker:
+        evidence: list[str] = []
         for prefix in (("docker",), ("sudo", "-n", "docker")):
             result = _completed(
                 (*prefix, "info", "--format", "{{.ServerVersion}}"),
                 check=False,
             )
-            if result.returncode == 0:
-                docker = cls(prefix)
-                docker.capture(("buildx", "version"))
-                return docker
-        raise BuildError("Docker is unavailable to the current user and sudo -n")
+            version = result.stdout.strip()
+            if result.returncode == 0 and version:
+                return cls(prefix, version)
+            detail = result.stderr.strip() or version
+            evidence.append(f"{' '.join(prefix)}: {detail or result.returncode}")
+        raise BuildError(
+            "Docker runtime is unavailable to the current user and sudo -n; "
+            + "; ".join(evidence)
+        )
 
     def capture(
         self,
