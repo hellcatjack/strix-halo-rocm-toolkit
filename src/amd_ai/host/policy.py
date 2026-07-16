@@ -11,7 +11,8 @@ from amd_ai.report import Finding, Report, Severity, Status
 
 
 TARGET_PCI_ID = "1002:1586"
-MINIMUM_OEM_KERNEL = (6, 14, 0, 1018)
+TARGET_OEM_BRANCH = (6, 17)
+TARGET_OEM_PACKAGE = "linux-oem-6.17"
 
 
 @dataclass(frozen=True)
@@ -63,15 +64,29 @@ def evaluate_preflight(
         )
 
     kernel_version = _parse_oem_kernel(snapshot.kernel)
-    if kernel_version is None or kernel_version < MINIMUM_OEM_KERNEL:
+    kernel_branch = None if kernel_version is None else kernel_version[:2]
+    kernel_upgrade_required = (
+        kernel_branch is None or kernel_branch < TARGET_OEM_BRANCH
+    )
+    if kernel_upgrade_required:
         add(
-            "HOST.OEM_KERNEL",
-            Severity.ERROR,
-            Status.BLOCKED,
-            "A supported Ubuntu OEM kernel is not running",
+            "HOST.OEM_617_REQUIRED",
+            Severity.WARNING,
+            Status.CHANGE_REQUIRED,
+            "The Ubuntu OEM 6.17 kernel branch is required",
             f"running kernel: {snapshot.kernel or '<unknown>'}",
-            "Install linux-oem-24.04 and boot kernel 6.14.0-1018-oem or newer.",
+            f"Install {TARGET_OEM_PACKAGE}, retain the recovery kernel, and reboot.",
         )
+        candidate = snapshot.kernel_oem_617_candidate
+        if candidate is None or not candidate.startswith("6.17."):
+            add(
+                "HOST.OEM_617_CANDIDATE",
+                Severity.ERROR,
+                Status.BLOCKED,
+                "No valid Ubuntu OEM 6.17 package candidate is available",
+                f"linux-oem-6.17 candidate: {candidate or '<none>'}",
+                "Run sudo apt update and verify the Ubuntu Noble update repositories.",
+            )
 
     if snapshot.gpu.pci_id != TARGET_PCI_ID:
         add(
@@ -152,7 +167,7 @@ def evaluate_preflight(
             "In firmware setup, set the UMA frame buffer to 512 MiB; this cannot be changed by the host tool.",
         )
 
-    if kernel_version is not None and kernel_version >= MINIMUM_OEM_KERNEL:
+    if kernel_branch is not None and kernel_branch >= TARGET_OEM_BRANCH:
         tested_kernels = _load_tested_kernels(tested_kernels_path)
         if snapshot.kernel not in tested_kernels:
             add(

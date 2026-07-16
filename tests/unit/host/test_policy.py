@@ -1,10 +1,13 @@
+import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from amd_ai.host.adapters.base import select_adapter
 from amd_ai.host.parsers import GpuPciInfo
 from amd_ai.host.policy import evaluate_preflight
+from amd_ai.report import Status
 from tests.unit.host.fakes import healthy_snapshot
 
 
@@ -27,10 +30,24 @@ def test_report_exposes_docker_kernel_candidate_and_display_facts():
     }
 
 
-def test_healthy_gfx1151_oem_host_passes():
-    report = evaluate_preflight(healthy_snapshot(kernel="6.14.0-1018-oem"))
+def _tested_kernel_file(tmp_path: Path) -> Path:
+    path = tmp_path / "tested-kernels.json"
+    path.write_text(
+        json.dumps(
+            {"schema_version": 1, "kernels": ["6.17.0-1028-oem"]}
+        ),
+        encoding="utf-8",
+    )
+    return path
 
-    assert report.status.value == "pass"
+
+def test_healthy_gfx1151_oem_617_host_passes(tmp_path):
+    report = evaluate_preflight(
+        healthy_snapshot(kernel="6.17.0-1028-oem"),
+        tested_kernels_path=_tested_kernel_file(tmp_path),
+    )
+
+    assert report.status is Status.PASS
     assert not [
         finding for finding in report.findings if finding.severity.value == "error"
     ]
@@ -54,12 +71,38 @@ def test_unknown_distribution_is_blocked_and_has_no_write_adapter():
     assert select_adapter(snapshot) is None
 
 
-@pytest.mark.parametrize("kernel", ["6.13.0-1000-oem", "6.17.0-generic"])
-def test_old_or_non_oem_kernel_is_blocked(kernel):
+@pytest.mark.parametrize(
+    "kernel",
+    ["6.8.0-31-generic", "6.14.0-1020-oem", "6.17.0-generic"],
+)
+def test_old_or_non_oem_kernel_requires_oem_617(kernel):
     report = evaluate_preflight(healthy_snapshot(kernel=kernel))
 
-    assert report.status.value == "blocked"
-    assert "HOST.OEM_KERNEL" in finding_codes(report)
+    assert report.status is Status.CHANGE_REQUIRED
+    assert "HOST.OEM_617_REQUIRED" in finding_codes(report)
+
+
+@pytest.mark.parametrize("kernel", ["6.17.0-1029-oem", "6.19.0-1001-oem"])
+def test_unlisted_or_future_oem_kernel_is_unverified(kernel, tmp_path):
+    report = evaluate_preflight(
+        healthy_snapshot(kernel=kernel),
+        tested_kernels_path=_tested_kernel_file(tmp_path),
+    )
+
+    assert report.status is Status.UNVERIFIED
+    assert "HOST.UPSTREAM_UNVERIFIED" in finding_codes(report)
+
+
+def test_old_kernel_without_oem_617_candidate_is_blocked():
+    report = evaluate_preflight(
+        healthy_snapshot(
+            kernel="6.14.0-1020-oem",
+            kernel_oem_617_candidate=None,
+        )
+    )
+
+    assert report.status is Status.BLOCKED
+    assert "HOST.OEM_617_CANDIDATE" in finding_codes(report)
 
 
 def test_non_amd64_host_is_blocked():
@@ -80,7 +123,7 @@ def test_non_amd64_host_is_blocked():
 )
 def test_repairable_gpu_host_issues_require_change(snapshot_changes, expected_code):
     report = evaluate_preflight(
-        healthy_snapshot(kernel="6.14.0-1018-oem", **snapshot_changes)
+        healthy_snapshot(kernel="6.17.0-1025-oem", **snapshot_changes)
     )
 
     assert report.status.value == "change-required"

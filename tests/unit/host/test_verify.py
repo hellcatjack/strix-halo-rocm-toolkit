@@ -89,13 +89,13 @@ def test_verify_uses_configured_docker_prefix_for_all_probe_commands():
     runner = probe_runner(docker_prefix=docker_prefix)
 
     report = verify_host(
-        healthy_snapshot(kernel="6.14.0-1018-oem"),
+        healthy_snapshot(kernel="6.17.0-1025-oem"),
         image=PROBE_IMAGE,
         runner=runner,
         docker_prefix=docker_prefix,
     )
 
-    assert report.status == Status.PASS
+    assert report.status == Status.UNVERIFIED
     assert runner.calls
     assert all(call[:3] == docker_prefix for call in runner.calls)
 
@@ -135,14 +135,14 @@ def test_live_ttm_must_match_the_computed_128_gib_target():
     assert "HOST.TTM_MISMATCH" in finding_codes(report)
 
 
-def test_verified_kernel_and_successful_gfx1151_probe_pass():
+def test_unlisted_oem_617_and_successful_gfx1151_probe_is_unverified():
     report = verify_host(
-        healthy_snapshot(kernel="6.14.0-1018-oem"),
+        healthy_snapshot(kernel="6.17.0-1025-oem"),
         image=PROBE_IMAGE,
         runner=probe_runner(),
     )
 
-    assert report.status == Status.PASS
+    assert report.status == Status.UNVERIFIED
     assert report.facts["probe"]["image_id"] == "sha256:probe"
 
 
