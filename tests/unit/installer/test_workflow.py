@@ -579,7 +579,7 @@ def test_full_progress_uses_selected_workflow_positions(
     output = stdout.getvalue()
     assert "共 17 个阶段" in output
     assert "[2/17] 检查宿主" in output
-    assert "[11/17] 验证重启后的宿主" in output
+    assert "[11/17] 验证宿主平台" in output
     assert "[17/17] 完成安装" in output
 
 
