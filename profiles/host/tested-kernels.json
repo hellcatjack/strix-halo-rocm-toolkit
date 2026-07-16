@@ -1,8 +1,7 @@
 {
   "kernels": [
-    "6.14.0-1018-oem"
+    "6.17.0-1028-oem"
   ],
   "schema_version": 1,
-  "source": "https://rocm.docs.amd.com/projects/radeon-ryzen/en/docs-7.2.1/docs/compatibility/compatibilityryz/native_linux/native_linux_compatibility.html"
+  "source": "local hardware qualification report sha256:856aac21f2667aa27563fe272c0d9c0857d7d45d7739382ad66f7b96134a7bc4"
 }
-

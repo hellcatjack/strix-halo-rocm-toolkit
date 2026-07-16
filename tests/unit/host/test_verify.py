@@ -85,7 +85,7 @@ def test_probe_uses_devices_and_actual_gids():
     ]
 
 
-def test_kernel_checkpoint_ignores_ttm_until_tuning():
+def test_kernel_checkpoint_treats_ttm_as_diagnostic_only():
     report = evaluate_kernel_reboot(
         healthy_snapshot(kernel="6.17.0-1028-oem", ttm_pages_limit=1),
         display_manager_was_active=True,
@@ -208,7 +208,7 @@ def test_final_verification_treats_ttm_limit_as_diagnostic_only(live_limit):
         )
     )
 
-    assert report.status is Status.UNVERIFIED
+    assert report.status is Status.PASS
     assert report.facts["ttm_pages_limit"] == live_limit
     assert "HOST.TTM_MISMATCH" not in finding_codes(report)
     assert "HOST.MEMORY_CONFLICT" not in finding_codes(report)

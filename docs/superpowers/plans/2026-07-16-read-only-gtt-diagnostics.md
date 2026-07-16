@@ -494,9 +494,9 @@ Expected: shell parsing and whitespace checks pass; only intended files are chan
 
 ```bash
 sudo -v
-uv run strix-halo-rocm host-preflight --json reports/host-preflight-6.17.json
-uv run strix-halo-rocm host-verify --json reports/host-verify-6.17.json
-sudo -n ./bin/container-check \
+./bin/host-preflight --json reports/host-preflight-6.17.json
+./bin/host-verify --json reports/host-verify-6.17.json
+./bin/container-check \
   --suite stable \
   --profile profiles/qualification/stable.toml \
   --json reports/qualification-6.17.json
