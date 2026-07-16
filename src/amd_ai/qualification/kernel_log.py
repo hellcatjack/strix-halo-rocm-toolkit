@@ -9,6 +9,14 @@ from amd_ai.report import Finding, Severity
 
 FAILURE_PATTERNS = (
     (
+        re.compile(
+            r"(?:Fatal error during GPU init|amdgpu:\s*probe of .* failed with error)",
+            re.IGNORECASE,
+        ),
+        "GPU.INIT_FATAL",
+        "AMD GPU initialization failed",
+    ),
+    (
         re.compile(r"\bMES\b.*(?:timeout|failed to respond)", re.IGNORECASE),
         "GPU.MES_TIMEOUT",
         "AMD GPU MES timeout or response failure",

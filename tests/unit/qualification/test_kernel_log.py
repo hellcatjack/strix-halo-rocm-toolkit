@@ -17,6 +17,7 @@ def test_known_gpu_failures_are_blocking():
             "amdgpu: page fault (src_id:0 ring:24 vmid:3)",
             "amdgpu: ring gfx_0.0.0 timeout",
             "amdgpu: failed to load firmware file",
+            "amdgpu: probe of 0000:c5:00.0 failed with error -22",
         ]
     )
 
@@ -26,6 +27,7 @@ def test_known_gpu_failures_are_blocking():
         "GPU.PAGE_FAULT",
         "GPU.RING_TIMEOUT",
         "GPU.FIRMWARE",
+        "GPU.INIT_FATAL",
     }
 
 

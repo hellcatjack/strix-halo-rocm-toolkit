@@ -13,6 +13,14 @@ from amd_ai.runner import CommandResult, Runner
 
 GPU_ERROR_PATTERNS = (
     (
+        "GPU.INIT_FATAL",
+        re.compile(
+            r"(?:Fatal error during GPU init|amdgpu:\s*probe of .* failed with error)",
+            re.IGNORECASE,
+        ),
+        "The kernel log contains a fatal amdgpu initialization failure",
+    ),
+    (
         "GPU.MES_TIMEOUT",
         re.compile(r"MES.*(?:timeout|failed to respond)", re.IGNORECASE),
         "The kernel log contains a MES timeout or response failure",
@@ -38,6 +46,18 @@ GPU_ERROR_PATTERNS = (
         "The kernel log contains a GPU ring timeout",
     ),
 )
+KERNEL_REQUIRED_PREFLIGHT_CODES = frozenset(
+    {
+        "HOST.UNSUPPORTED_OS",
+        "HOST.UNSUPPORTED_ARCH",
+        "HOST.OEM_617_REQUIRED",
+        "HOST.OEM_617_CANDIDATE",
+        "GPU.NOT_FOUND",
+        "GPU.WRONG_DRIVER",
+        "GPU.KFD_MISSING",
+        "GPU.RENDER_MISSING",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -47,6 +67,57 @@ class ProbeOutcome:
     returncode: int | None
     output: str
     findings: tuple[Finding, ...]
+
+
+def evaluate_kernel_reboot(
+    snapshot: HostSnapshot,
+    *,
+    display_manager_was_active: bool,
+) -> Report:
+    preflight = evaluate_preflight(snapshot)
+    findings = list(preflight.findings)
+    facts = dict(preflight.facts)
+    blocked = any(
+        finding.code in KERNEL_REQUIRED_PREFLIGHT_CODES
+        for finding in preflight.findings
+    )
+
+    log_findings = _current_boot_gpu_findings(snapshot)
+    findings.extend(log_findings)
+    blocked = blocked or bool(log_findings)
+
+    facts["kernel_checkpoint"] = {
+        "display_manager_was_active": display_manager_was_active,
+        "display_manager_loaded": snapshot.display_manager_loaded,
+        "display_manager_active": snapshot.display_manager_active,
+    }
+    if display_manager_was_active and not (
+        snapshot.display_manager_loaded and snapshot.display_manager_active
+    ):
+        findings.append(
+            Finding(
+                code="HOST.DISPLAY_MANAGER_INACTIVE",
+                severity=Severity.ERROR,
+                summary="The display manager did not recover after the kernel reboot",
+                evidence=(
+                    f"loaded={snapshot.display_manager_loaded}, "
+                    f"active={snapshot.display_manager_active}"
+                ),
+                remediation=(
+                    "Reboot, select the retained recovery kernel under Advanced "
+                    "options for Ubuntu, and inspect the amdgpu current-boot log."
+                ),
+            )
+        )
+        blocked = True
+
+    return Report(
+        command="host-kernel-verify",
+        status=Status.BLOCKED if blocked else Status.PASS,
+        generated_at=preflight.generated_at,
+        facts=facts,
+        findings=tuple(findings),
+    )
 
 
 def evaluate_post_reboot(snapshot: HostSnapshot) -> Report:
@@ -90,32 +161,10 @@ def evaluate_post_reboot(snapshot: HostSnapshot) -> Report:
             )
             statuses.append(Status.REBOOT_REQUIRED)
 
-    if not snapshot.dmesg_available:
-        findings.append(
-            Finding(
-                code="HOST.DMESG_UNAVAILABLE",
-                severity=Severity.ERROR,
-                summary="The current-boot kernel log could not be read",
-                evidence=snapshot.dmesg or "dmesg returned no evidence",
-                remediation="Grant reviewed dmesg access and rerun host-verify.",
-            )
-        )
+    log_findings = _current_boot_gpu_findings(snapshot)
+    findings.extend(log_findings)
+    if log_findings:
         statuses.append(Status.BLOCKED)
-    else:
-        for code, pattern, summary in GPU_ERROR_PATTERNS:
-            evidence = _first_matching_line(snapshot.dmesg, pattern)
-            if evidence is None:
-                continue
-            findings.append(
-                Finding(
-                    code=code,
-                    severity=Severity.ERROR,
-                    summary=summary,
-                    evidence=evidence,
-                    remediation="Inspect the current-boot amdgpu log before running sustained GPU workloads.",
-                )
-            )
-            statuses.append(Status.BLOCKED)
 
     return Report(
         command="host-verify",
@@ -303,6 +352,38 @@ def _run_optional(runner: Runner, argv: tuple[str, ...]) -> CommandResult:
         return runner.run(list(argv), check=False)
     except OSError as error:
         return CommandResult(argv, 127, "", str(error))
+
+
+def _current_boot_gpu_findings(snapshot: HostSnapshot) -> tuple[Finding, ...]:
+    if not snapshot.dmesg_available:
+        return (
+            Finding(
+                code="HOST.DMESG_UNAVAILABLE",
+                severity=Severity.ERROR,
+                summary="The current-boot kernel log could not be read",
+                evidence=snapshot.dmesg or "dmesg returned no evidence",
+                remediation="Grant reviewed dmesg access and rerun host verification.",
+            ),
+        )
+
+    findings: list[Finding] = []
+    for code, pattern, summary in GPU_ERROR_PATTERNS:
+        evidence = _first_matching_line(snapshot.dmesg, pattern)
+        if evidence is None:
+            continue
+        findings.append(
+            Finding(
+                code=code,
+                severity=Severity.ERROR,
+                summary=summary,
+                evidence=evidence,
+                remediation=(
+                    "Inspect the current-boot amdgpu log before running sustained "
+                    "GPU workloads."
+                ),
+            )
+        )
+    return tuple(findings)
 
 
 def _first_matching_line(text: str, pattern: re.Pattern[str]) -> str | None:

@@ -2,6 +2,7 @@ import pytest
 
 from amd_ai.host.verify import (
     build_probe_argv,
+    evaluate_kernel_reboot,
     evaluate_post_reboot,
     verify_host,
 )
@@ -82,6 +83,78 @@ def test_probe_uses_devices_and_actual_gids():
         "--json",
         "-",
     ]
+
+
+def test_kernel_checkpoint_ignores_ttm_until_tuning():
+    report = evaluate_kernel_reboot(
+        healthy_snapshot(kernel="6.17.0-1028-oem", ttm_pages_limit=1),
+        display_manager_was_active=True,
+    )
+
+    assert report.status is Status.PASS
+    assert "HOST.TTM_MISMATCH" not in finding_codes(report)
+
+
+def test_kernel_checkpoint_blocks_display_regression():
+    report = evaluate_kernel_reboot(
+        healthy_snapshot(display_manager_active=False),
+        display_manager_was_active=True,
+    )
+
+    assert report.status is Status.BLOCKED
+    assert "HOST.DISPLAY_MANAGER_INACTIVE" in finding_codes(report)
+
+
+def test_kernel_checkpoint_leaves_headless_display_state_unchanged():
+    report = evaluate_kernel_reboot(
+        healthy_snapshot(
+            kernel="6.17.0-1028-oem",
+            display_manager_loaded=False,
+            display_manager_active=False,
+        ),
+        display_manager_was_active=False,
+    )
+
+    assert report.status is Status.PASS
+    assert "HOST.DISPLAY_MANAGER_INACTIVE" not in finding_codes(report)
+
+
+@pytest.mark.parametrize(
+    ("changes", "code"),
+    [
+        ({"kernel": "6.14.0-1020-oem"}, "HOST.OEM_617_REQUIRED"),
+        (
+            {"device_gids": {"/dev/dri/renderD128": 110}},
+            "GPU.KFD_MISSING",
+        ),
+        ({"device_gids": {"/dev/kfd": 109}}, "GPU.RENDER_MISSING"),
+    ],
+)
+def test_kernel_checkpoint_promotes_required_kernel_facts_to_blocked(changes, code):
+    report = evaluate_kernel_reboot(
+        healthy_snapshot(**changes),
+        display_manager_was_active=False,
+    )
+
+    assert report.status is Status.BLOCKED
+    assert code in finding_codes(report)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "amdgpu 0000:c5:00.0: amdgpu: Fatal error during GPU init",
+        "amdgpu: probe of 0000:c5:00.0 failed with error -22",
+    ],
+)
+def test_kernel_checkpoint_blocks_fatal_gpu_init(line):
+    report = evaluate_kernel_reboot(
+        healthy_snapshot(dmesg=line),
+        display_manager_was_active=False,
+    )
+
+    assert report.status is Status.BLOCKED
+    assert "GPU.INIT_FATAL" in finding_codes(report)
 
 
 def test_verify_uses_configured_docker_prefix_for_all_probe_commands():
