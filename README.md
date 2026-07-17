@@ -2,10 +2,10 @@
 
 面向 **AMD Ryzen AI Max+ 395 / Radeon 8060S (`gfx1151`)** 的可恢复 ROCm 容器开发平台。它提供 Ubuntu 宿主机准备、公开且内容寻址的 ROCm/PyTorch 镜像、独立项目容器、受保护的 `pip` 工作流，以及可审计的 GPU 验证和精确修复。
 
-> - 当前工具包版本：`v0.3.2`
+> - 当前工具包版本：`v0.3.3`
 > - 正式软件基线：ROCm 7.2.1、Python 3.12、PyTorch 2.9.1
 > - 正式宿主适配器：Ubuntu 24.04.x AMD64
-> - Stable 镜像 release ID：`0.2.0`（`v0.3.2` 不重建镜像）
+> - Stable 镜像 release ID：`0.2.0`（`v0.3.3` 不重建镜像）
 
 ## 快速开始
 
@@ -14,7 +14,8 @@
 ### 1. 开始前确认
 
 - BIOS/UEFI 的 UMA Frame Buffer 使用主板允许的最小值，建议 512 MiB；
-- 当前用户具有 `sudo` 权限，网络可访问 GitHub 和 GHCR；
+- 当前用户具有 `sudo` 权限，网络可访问 GitHub；镜像网络默认访问华为云
+  SWR，获取失败时回退 GHCR；
 - Docker 数据目录建议至少有 40 GiB 可用空间；
 - 宿主具有 `git` 和 `python3.12`。
 
@@ -38,7 +39,7 @@ TOOLKIT="$HOME/src/strix-halo-rocm-toolkit"
 PROJECT="$HOME/ai-projects/video-lab"
 
 mkdir -p "$(dirname "$TOOLKIT")"
-git clone --branch v0.3.2 --depth 1 \
+git clone --branch v0.3.3 --depth 1 \
   https://github.com/hellcatjack/strix-halo-rocm-toolkit.git \
   "$TOOLKIT"
 cd "$TOOLKIT"
@@ -57,7 +58,12 @@ cd "$TOOLKIT"
   --image-source pull
 ```
 
-完整模式将内核计划和平台计划分开审批。内核变更要求精确输入 `INSTALL-KERNEL`，重启并通过桌面/GPU 检查后，平台准备要求精确输入 `APPLY`；Docker 组授权会单独询问。安装器从公开 GHCR 匿名拉取固定 digest，并实时显示阶段、下载进度和私有日志路径。
+完整模式将内核计划和平台计划分开审批。内核变更要求精确输入
+`INSTALL-KERNEL`，重启并通过桌面/GPU 检查后，平台准备要求精确输入
+`APPLY`；Docker 组授权会单独询问。省略 `--registry` 等价于
+`--registry auto`：安装器先从公开华为云 SWR 匿名拉取固定 digest，仅在
+获取失败时回退 GHCR，并实时显示当前仓库、阶段、下载进度和私有日志路径。
+用户拉取这两个公开仓库都不需要 registry 凭据。
 
 偏好菜单操作时可改用 `./install.sh`，选择“完整工作站安装”；显式命令更适合重启后原样恢复。
 
@@ -197,7 +203,8 @@ Strix Halo 使用统一物理内存，宿主内核驱动、容器设备权限和
 - 项目不创建第二份包含 Torch 的 venv；Docker 内容寻址存储只保存一份相同父层。
 - 运行中的项目容器允许直接 `pip install` 普通依赖，但不能替换受保护的 Torch 组合。
 - 依赖试装写入项目私有、可事务切换的 overlay；失败不会破坏上一个可用 generation。
-- Stable 镜像按公开 GHCR 的 exact digest 拉取并校验，不依赖维护者登录状态。
+- Stable 镜像默认按公开华为云 SWR 的 exact digest 拉取并校验，只有获取
+  失败才回退 canonical GHCR，不依赖维护者登录状态。
 - 项目不预装 ComfyUI，也不默认共享模型、Hugging Face、输入、输出或编译缓存。
 
 镜像关系如下：
@@ -264,7 +271,7 @@ sudo apt install -y git python3.12
 在任何写入前先执行只读检查：
 
 ```bash
-git clone --branch v0.3.2 --depth 1 \
+git clone --branch v0.3.3 --depth 1 \
   https://github.com/hellcatjack/strix-halo-rocm-toolkit.git
 cd strix-halo-rocm-toolkit
 mkdir -p reports
@@ -295,7 +302,10 @@ mkdir -p reports
 2. **仅容器平台**：不修改内核、APT、固件、用户组或 Docker，只校验现有宿主并部署镜像与项目。
 3. **Doctor/Repair**：检查现有平台或项目，并在明确确认后执行精确修复。
 
-Stable 默认从公开 GHCR 匿名拉取固定 digest。只有网络获取失败或镜像不存在时，交互模式才会询问是否从当前干净 checkout 本地构建。digest、config ID、OCI 标签或内嵌锁不一致时直接阻断，不会静默回退。
+Stable 默认以 `--registry auto` 从公开华为云 SWR 匿名拉取固定 digest；
+SWR 获取失败时自动尝试 GHCR。两个 registry 都获取失败后，交互模式才会
+询问是否从当前干净 checkout 本地构建。digest、config ID、OCI 标签或
+内嵌锁不一致属于身份失败，会立即阻断，不会切换 registry 或本地构建。
 
 ### launcher 与安装运行时
 
@@ -382,7 +392,7 @@ sudo reboot
   --image-source pull
 ```
 
-省略 `--state-path` 时安装器根据规范化后的项目绝对路径自动选择独立状态文件。`v0.3.2` 在 `PLAN` 中显示 `状态=<路径>（per-project）`；不同项目不会误用第一个项目的 `full` 状态。
+省略 `--state-path` 时安装器根据规范化后的项目绝对路径自动选择独立状态文件。`v0.3.3` 在 `PLAN` 中显示 `状态=<路径>（per-project）`；不同项目不会误用第一个项目的 `full` 状态。
 
 该模式仍要求以下条件全部通过：
 
@@ -474,6 +484,9 @@ HOST_PLAN_DIGEST="$(
 | `--project-name NAME` | 第一个项目名称 |
 | `--image-source pull` | 只接受 stable exact digest 拉取 |
 | `--image-source build` | 从当前干净 checkout 本地构建 |
+| `--registry auto` | 默认：华为 SWR 优先，仅在获取失败时回退 GHCR |
+| `--registry swr` | 只使用华为 SWR，不跨 registry 回退 |
+| `--registry ghcr` | 只使用 canonical GHCR，不跨 registry 回退 |
 | `--target-user USER` | 完整模式的目标用户和项目所有者 |
 | `--accept-kernel-plan-digest HEX` | 无交互模式审批当前内核计划 |
 | `--accept-host-plan-digest HEX` | 无交互模式审批当前平台计划 |
@@ -491,7 +504,7 @@ HOST_PLAN_DIGEST="$(
 
 ## 安装进度与私有日志
 
-`v0.3.2` 的安装输出是确定的逐行事件，不使用 spinner，也不会依赖 TTY 原地刷新。默认顺序为 `PLAN`、`LOG`，然后每个选定阶段显示 `SKIP` 或 `START`；长步骤可显示 `DETAIL`、子命令原始进度和每 15 秒一次的 `WAIT`，检查点安全写入后才显示 `PASS`，最后显示 `SUMMARY` 和同一条 `LOG` 路径。
+`v0.3.3` 的安装输出是确定的逐行事件，不使用 spinner，也不会依赖 TTY 原地刷新。默认顺序为 `PLAN`、`LOG`，然后每个选定阶段显示 `SKIP` 或 `START`；长步骤可显示 `DETAIL`、子命令原始进度和每 15 秒一次的 `WAIT`，检查点安全写入后才显示 `PASS`，最后显示 `SUMMARY` 和同一条 `LOG` 路径。
 
 | 事件 | 含义 |
 | --- | --- |
@@ -532,7 +545,7 @@ HOST_PLAN_DIGEST="$(
   install-<UTC>-<pid>.log
 ```
 
-控制目录权限为 `0700`，日志文件为 `0600`。`v0.3.2` 不自动轮转或删除日志；确认不再需要审计证据后，由该用户自行清理。日志包含 Docker pull、BuildKit `plain` 输出、uv/pip、锁定 wheel 下载进度和 sudo helper 的 stderr；JSON 协议 stdout、检查命令和摘要读取仍保持捕获模式。
+控制目录权限为 `0700`，日志文件为 `0600`。`v0.3.3` 不自动轮转或删除日志；确认不再需要审计证据后，由该用户自行清理。日志包含 Docker pull、BuildKit `plain` 输出、uv/pip、锁定 wheel 下载进度和 sudo helper 的 stderr；JSON 协议 stdout、检查命令和摘要读取仍保持捕获模式。
 
 安装器会清除终端控制序列，并脱敏 URL userinfo、Authorization、凭据参数以及名称包含 token/password/secret/key 等标记的环境值。项目路径、镜像名称、包名和其他非密钥业务信息仍可能出现；把日志发给第三方前必须人工复核。
 
@@ -577,14 +590,37 @@ strix-halo-rocm release verify \
   --manifest profiles/releases/stable.json
 ```
 
-当前 stable exact references：
+`release verify` 校验 stable manifest 中的 canonical GHCR 发布链。安装器、
+doctor 和 repair 还接受 digest 完全相同的公开 SWR 副本。
+
+当前 stable 的华为云 SWR exact references：
+
+```text
+swr.cn-east-3.myhuaweicloud.com/hellcat-home/strix-halo-rocm-python@sha256:e9991f97f578156c8620fbb587d2d34504eb632f165cc5597deaadaa3e692a12
+swr.cn-east-3.myhuaweicloud.com/hellcat-home/strix-halo-rocm-pytorch@sha256:dc0bb217474cfd4f602423bd3bf4fe8714b03e900cf3c6b4417b99e622ebcf8b
+```
+
+Canonical GHCR exact references：
 
 ```text
 ghcr.io/hellcatjack/strix-halo-rocm-python@sha256:e9991f97f578156c8620fbb587d2d34504eb632f165cc5597deaadaa3e692a12
 ghcr.io/hellcatjack/strix-halo-rocm-pytorch@sha256:dc0bb217474cfd4f602423bd3bf4fe8714b03e900cf3c6b4417b99e622ebcf8b
 ```
 
-验证命令使用临时空 Docker 配置进行匿名检查，不会借用本机 GHCR 登录凭据。
+安装、doctor 和 repair 都支持同一选择：
+
+```bash
+# 默认：中国镜像优先
+./install.sh --mode container --project-dir "$PROJECT" --registry auto
+
+# 强制只使用一个 registry
+./install.sh --mode container --project-dir "$PROJECT" --registry swr
+./install.sh --mode container --project-dir "$PROJECT" --registry ghcr
+```
+
+用户不需要登录 SWR 或 GHCR。`auto` 只会在 manifest 查询或拉取等获取失败时
+从 SWR 回退 GHCR；任何 digest、label、RepoDigest 或内嵌锁不一致都会立即
+阻断。`doctor` 与 `repair` 可同样使用 `--registry auto|swr|ghcr`。
 
 ## 创建和运行项目
 
@@ -847,7 +883,7 @@ Repair 不运行 `docker system prune`，不使用通配镜像删除，不 force
 每次升级使用明确的发布标签：
 
 ```bash
-RELEASE_TAG="v0.3.2"
+RELEASE_TAG="v0.3.3"
 
 git fetch origin --tags
 git switch --detach "$RELEASE_TAG"
@@ -856,15 +892,23 @@ git switch --detach "$RELEASE_TAG"
 
 安装器为每个版本创建独立运行时，再原子切换 `current`。不要从含有未提交修改的 checkout 执行正式本地构建。
 
-从旧版升级时切换到 v0.3.2：
+从旧版升级时切换到 v0.3.3：
 
 ```bash
 git fetch origin --tags
-git switch --detach v0.3.2
+git switch --detach v0.3.3
 ./install.sh
 ```
 
-再次选择相同模式和项目目录。v0.3.2 使用状态 schema 3 和 17 阶段 full 流程。`v0.3.1` full 状态从 `HOST_VERIFY` 起可原地接管，当前停在 `IMAGE_PULL_OR_BUILD` 的状态会复用已下载镜像层并继续验证；`v0.3.0` full 状态从 `KERNEL_VERIFY` 起也可接管。可重建旧 `BOOTSTRAP` 摘要的 `0.2.x` container 状态仍可接管。更早的旧 full 状态从 `BOOTSTRAP` 重新评估，但保留不可变镜像身份，且绝不复用旧宿主审批。摘要损坏或输入漂移时必须按失败输出修复；不要删除状态文件绕过检查。
+再次选择相同模式和项目目录。`v0.3.3` 使用状态 schema 3 和 17 阶段
+full 流程。已经完成的 `v0.3.2` GHCR 镜像检查点不会重新拉取；新镜像获取
+默认使用 SWR，并记录实际验证成功的 exact reference。`v0.3.1` full 状态从
+`HOST_VERIFY` 起可原地接管，当前停在 `IMAGE_PULL_OR_BUILD` 的状态会复用
+已下载镜像层并继续验证；`v0.3.0` full 状态从 `KERNEL_VERIFY` 起也可接管。
+可重建旧 `BOOTSTRAP` 摘要的 `0.2.x` container 状态仍可接管。更早的旧
+full 状态从 `BOOTSTRAP` 重新评估，但保留不可变镜像身份，且绝不复用旧
+宿主审批。摘要损坏或输入漂移时必须按失败输出修复；不要删除状态文件绕过
+检查。
 
 ### 查看共享层占用
 
@@ -917,8 +961,8 @@ rm -rf "$HOME/.local/state/strix-halo-rocm-toolkit"
 | `python3.12 is required` | 在宿主安装 Python 3.12；ROCm 和 Torch 不需要装到宿主 Python |
 | `interactive install requires a terminal` | 在真实交互终端运行，或提供完整 `--non-interactive` 参数 |
 | 安装器显示 `KERNEL_REBOOT_PENDING` | 执行 `sudo reboot`，随后重新运行完全相同的安装命令；平台阶段不会要求第二次重启 |
-| `host-verify returned change-required` | 这表示宿主策略尚未满足，不是 Docker/Buildx 安装失败。`v0.3.2` 的同一行 `CAUSE` 会列出 finding code 和 `action`；按提示修复后重新执行原安装命令，不要删除状态 |
-| `release base config digest does not match` 且显示 manifest digest | `v0.3.1` 将 containerd image store 的 manifest ID 误当作 config ID；升级到 `v0.3.2` 后重新执行原安装命令。已下载层会复用，不要删除安装状态、镜像或 `/var/lib/docker` |
+| `host-verify returned change-required` | 这表示宿主策略尚未满足，不是 Docker/Buildx 安装失败。`v0.3.3` 的同一行 `CAUSE` 会列出 finding code 和 `action`；按提示修复后重新执行原安装命令，不要删除状态 |
+| `release base config digest does not match` 且显示 manifest digest | `v0.3.1` 将 containerd image store 的 manifest ID 误当作 config ID；升级到 `v0.3.2` 或更新版本后重新执行原安装命令。已下载层会复用，不要删除安装状态、镜像或 `/var/lib/docker` |
 | `GPU.BIOS_VRAM_HIGH` | 在 BIOS/UEFI 将 UMA Frame Buffer 设为主板允许的最小值，建议 512 MiB；工具不会修改 GTT/TTM 或代替固件设置 |
 | Docker permission denied | 重新登录以刷新组成员关系，或运行 `sudo -v` 后让工具使用 `sudo docker` |
 | 找不到 `/dev/kfd` | 直接在宿主运行 `host-preflight`；不要用未映射设备的普通容器报告判断宿主 |
