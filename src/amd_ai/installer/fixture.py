@@ -23,7 +23,11 @@ from amd_ai.installer.models import (
     StageResult,
     StableRelease,
 )
-from amd_ai.installer.release import load_stable_release
+from amd_ai.installer.release import (
+    VerifiedImageIdentity,
+    VerifiedReleaseImages,
+    load_stable_release,
+)
 from amd_ai.installer.state import read_boot_id, stage_input_digest
 from amd_ai.project.config import load_project_config
 from amd_ai.report import Report, Status
@@ -157,14 +161,26 @@ class FixtureInstallerActions:
             raise FixtureBackendError(blocked.message)
         return load_stable_release(manifest_path)
 
-    def pull_release(self, release: StableRelease) -> object:
-        del release
+    def pull_release(self, release: StableRelease) -> VerifiedReleaseImages:
         blocked = self._result(
             InstallStage.IMAGE_PULL_OR_BUILD, "pull_release"
         )
         if blocked.blocked:
             raise FixtureBackendError(blocked.message)
-        return object()
+        return VerifiedReleaseImages(
+            base=VerifiedImageIdentity(
+                reference=release.base.reference,
+                config_digest=release.base.config_digest,
+                repo_digests=(release.base.reference,),
+                labels={},
+            ),
+            torch=VerifiedImageIdentity(
+                reference=release.torch.reference,
+                config_digest=release.torch.config_digest,
+                repo_digests=(release.torch.reference,),
+                labels={},
+            ),
+        )
 
     def build_local_images(self, **kwargs: object) -> LocalBuildResult:
         del kwargs

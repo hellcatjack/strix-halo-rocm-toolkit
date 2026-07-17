@@ -22,7 +22,11 @@ from amd_ai.installer.models import (
     StageResult,
     StableRelease,
 )
-from amd_ai.installer.release import load_stable_release
+from amd_ai.installer.release import (
+    VerifiedImageIdentity,
+    VerifiedReleaseImages,
+    load_stable_release,
+)
 from amd_ai.installer.state import stage_input_digest
 from amd_ai.report import Report, Status
 from tests.unit.host.fakes import healthy_snapshot
@@ -133,6 +137,7 @@ class FakeInstallerActions:
             reboot_required=False,
         )
         self.pull_error: BaseException | None = None
+        self.pull_errors: dict[str, BaseException] = {}
         self.project_init_kwargs: dict[str, object] = {}
 
     @classmethod
@@ -242,15 +247,29 @@ class FakeInstallerActions:
         self.calls.append("resolve_release")
         return self.release
 
-    def pull_release(self, release: StableRelease) -> object:
+    def pull_release(self, release: StableRelease) -> VerifiedReleaseImages:
         self._raise_if_needed(InstallStage.IMAGE_PULL_OR_BUILD)
         self.calls.append("pull_release")
-        if self.pull_error is not None:
-            raise self.pull_error
         self.image_calls.extend(
             (("pull", release.base.reference), ("pull", release.torch.reference))
         )
-        return object()
+        error = self.pull_errors.get(release.base.image) or self.pull_error
+        if error is not None:
+            raise error
+        return VerifiedReleaseImages(
+            base=VerifiedImageIdentity(
+                reference=release.base.reference,
+                config_digest=release.base.config_digest,
+                repo_digests=(release.base.reference,),
+                labels={},
+            ),
+            torch=VerifiedImageIdentity(
+                reference=release.torch.reference,
+                config_digest=release.torch.config_digest,
+                repo_digests=(release.torch.reference,),
+                labels={},
+            ),
+        )
 
     def build_local_images(self, **kwargs: object) -> LocalBuildResult:
         del kwargs

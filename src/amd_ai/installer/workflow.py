@@ -41,9 +41,11 @@ from amd_ai.installer.progress import (
     SessionPlan,
     StagePosition,
 )
+from amd_ai.installer.registry import registry_candidates
 from amd_ai.installer.release import (
     ReleaseAcquisitionError,
     ReleaseIdentityError,
+    VerifiedReleaseImages,
     load_stable_release,
 )
 from amd_ai.installer.state import (
@@ -591,7 +593,7 @@ class InstallerWorkflow:
             source = self.options.image_source or "pull"
             if source == "pull":
                 try:
-                    return self.actions.pull_release(release)
+                    return self._pull_release_candidates(release)
                 except ReleaseIdentityError as error:
                     raise WorkflowError(
                         "release image identity verification failed; "
@@ -656,6 +658,42 @@ class InstallerWorkflow:
         if stage is InstallStage.COMPLETE:
             return StageResult()
         raise WorkflowError(f"stage is not implemented: {stage.value}")
+
+    def _pull_release_candidates(
+        self,
+        release: StableRelease,
+    ) -> VerifiedReleaseImages:
+        failures: list[str] = []
+        candidates = registry_candidates(release, self.options.registry)
+        for index, candidate in enumerate(candidates):
+            self.progress.detail(
+                f"当前仓库={candidate.label}，来源=公开匿名镜像"
+            )
+            try:
+                verified = self.actions.pull_release(candidate.release)
+            except ReleaseAcquisitionError as error:
+                failures.append(f"{candidate.label}: {error}")
+                if index + 1 < len(candidates):
+                    next_candidate = candidates[index + 1]
+                    self._status(
+                        "WARN",
+                        f"{candidate.label} 获取失败，正在回退 "
+                        f"{next_candidate.label}：{error}",
+                    )
+                continue
+            if not isinstance(verified, VerifiedReleaseImages):
+                raise WorkflowError(
+                    "release pull returned invalid verified identities"
+                )
+            self.progress.detail(
+                f"已采用仓库={candidate.label}，"
+                f"base={verified.base.reference}，"
+                f"torch={verified.torch.reference}"
+            )
+            return verified
+        raise ReleaseAcquisitionError(
+            "all configured registries failed: " + "; ".join(failures)
+        )
 
     def _stage_inputs(
         self, stage: InstallStage, state: InstallState
@@ -784,16 +822,17 @@ class InstallerWorkflow:
                 }
             )
         elif stage is InstallStage.IMAGE_PULL_OR_BUILD:
+            release = load_stable_release(self.options.manifest_path)
             values.update(
                 {
-                    "release_id": state.release_id,
-                    "source_revision": state.source_revision,
-                    "base_reference": state.base_image_reference,
-                    "base_manifest_digest": state.base_manifest_digest,
-                    "base_config_digest": state.base_config_digest,
-                    "torch_reference": state.torch_image_reference,
-                    "torch_manifest_digest": state.torch_manifest_digest,
-                    "torch_config_digest": state.torch_config_digest,
+                    "release_id": release.release_id,
+                    "source_revision": release.source_revision,
+                    "base_reference": release.base.reference,
+                    "base_manifest_digest": release.base.manifest_digest,
+                    "base_config_digest": release.base.config_digest,
+                    "torch_reference": release.torch.reference,
+                    "torch_manifest_digest": release.torch.manifest_digest,
+                    "torch_config_digest": release.torch.config_digest,
                     "image_source": self.options.image_source or "pull",
                 }
             )
@@ -991,6 +1030,23 @@ class InstallerWorkflow:
                     "base_config_digest": output.base.config_digest,
                     "torch_image_reference": output.torch.reference,
                     "torch_manifest_digest": output.torch.manifest_digest,
+                    "torch_config_digest": output.torch.config_digest,
+                }
+            )
+        elif stage is InstallStage.IMAGE_PULL_OR_BUILD and isinstance(
+            output, VerifiedReleaseImages
+        ):
+            changes.update(
+                {
+                    "base_image_reference": output.base.reference,
+                    "base_manifest_digest": _reference_digest(
+                        output.base.reference
+                    ),
+                    "base_config_digest": output.base.config_digest,
+                    "torch_image_reference": output.torch.reference,
+                    "torch_manifest_digest": _reference_digest(
+                        output.torch.reference
+                    ),
                     "torch_config_digest": output.torch.config_digest,
                 }
             )
@@ -1418,6 +1474,15 @@ def _report_kernel(report: Report, label: str) -> str:
     ) is None:
         raise WorkflowError(f"{label} report has no valid kernel identity")
     return kernel
+
+
+def _reference_digest(reference: str) -> str:
+    _, separator, digest = reference.rpartition("@")
+    if separator != "@" or not digest:
+        raise WorkflowError(
+            f"verified image reference has no manifest digest: {reference}"
+        )
+    return digest
 
 
 def _report_finding_message(report: Report) -> str:

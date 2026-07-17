@@ -21,6 +21,7 @@ from amd_ai.installer.progress import (
     ProgressError,
     ProgressMode,
 )
+from amd_ai.installer.registry import registry_candidates
 from amd_ai.installer.release import (
     ReleaseAcquisitionError,
     ReleaseIdentityError,
@@ -1601,6 +1602,44 @@ def test_compatible_patch_installer_adopts_container_state(
     assert changed == {InstallStage.BOOTSTRAP.value}
 
 
+def test_v033_auto_adopts_completed_v032_ghcr_state_without_repull(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+    first = installer_workflow(
+        tmp_path,
+        actions=actions,
+        options=replace(workflow_options(tmp_path), registry="ghcr"),
+        installer_version="0.3.2",
+        installer_source_revision="d" * 40,
+    ).run()
+    assert first.exit_code == 0
+    assert first.state is not None
+    assert first.state.base_image_reference == actions.release.base.reference
+    assert first.state.torch_image_reference == actions.release.torch.reference
+    resumed_actions = FakeInstallerActions.healthy()
+
+    resumed = installer_workflow(
+        tmp_path,
+        actions=resumed_actions,
+        options=workflow_options(tmp_path),
+        installer_version="0.3.3",
+        installer_source_revision="e" * 40,
+    ).run()
+
+    assert resumed.exit_code == 0
+    assert "pull_release" not in resumed_actions.calls
+    assert resumed.state is not None
+    assert (
+        resumed.state.base_image_reference
+        == actions.release.base.reference
+    )
+    assert (
+        resumed.state.torch_image_reference
+        == actions.release.torch.reference
+    )
+
+
 def test_schema_two_container_state_adopts_across_v02_to_v03(
     tmp_path: Path,
 ) -> None:
@@ -1807,6 +1846,99 @@ def test_interactive_pull_failure_requires_explicit_build_choice(
     assert result.state.release_id == "local"
 
 
+def test_auto_registry_falls_back_from_swr_acquisition_to_ghcr(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+    swr_release = registry_candidates(actions.release, "swr")[0].release
+    actions.pull_errors[swr_release.base.image] = ReleaseAcquisitionError(
+        "SWR timeout"
+    )
+
+    result = installer_workflow(tmp_path, actions=actions).run()
+
+    assert result.exit_code == 0
+    assert actions.image_calls == [
+        ("pull", swr_release.base.reference),
+        ("pull", swr_release.torch.reference),
+        ("pull", actions.release.base.reference),
+        ("pull", actions.release.torch.reference),
+    ]
+    assert result.state is not None
+    assert result.state.base_image_reference == actions.release.base.reference
+    assert result.state.torch_image_reference == actions.release.torch.reference
+
+
+def test_successful_swr_pull_persists_verified_swr_references(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+    swr_release = registry_candidates(actions.release, "swr")[0].release
+
+    result = installer_workflow(tmp_path, actions=actions).run()
+
+    assert result.exit_code == 0
+    assert actions.image_calls == [
+        ("pull", swr_release.base.reference),
+        ("pull", swr_release.torch.reference),
+    ]
+    assert result.state is not None
+    assert result.state.base_image_reference == swr_release.base.reference
+    assert result.state.base_manifest_digest == swr_release.base.manifest_digest
+    assert result.state.torch_image_reference == swr_release.torch.reference
+    assert result.state.torch_manifest_digest == swr_release.torch.manifest_digest
+
+
+def test_swr_identity_failure_blocks_without_ghcr_or_build(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+    swr_release = registry_candidates(actions.release, "swr")[0].release
+    actions.pull_errors[swr_release.base.image] = ReleaseIdentityError(
+        "config digest changed"
+    )
+
+    result = installer_workflow(
+        tmp_path,
+        actions=actions,
+        prompts=FakePrompts(image_fallback="build"),
+    ).run()
+
+    assert result.exit_code == 2
+    assert actions.image_calls == [
+        ("pull", swr_release.base.reference),
+        ("pull", swr_release.torch.reference),
+    ]
+    assert "build_local_images" not in actions.calls
+
+
+@pytest.mark.parametrize("registry", ("swr", "ghcr"))
+def test_explicit_registry_never_cross_falls_back(
+    tmp_path: Path,
+    registry: str,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+    selected = registry_candidates(actions.release, registry)[0].release
+    actions.pull_errors[selected.base.image] = ReleaseAcquisitionError(
+        "selected registry unavailable"
+    )
+    options = replace(workflow_options(tmp_path), registry=registry)
+
+    result = installer_workflow(
+        tmp_path,
+        actions=actions,
+        options=options,
+        prompts=FakePrompts(image_fallback="cancel"),
+    ).run()
+
+    assert result.exit_code == 2
+    assert actions.image_calls == [
+        ("pull", selected.base.reference),
+        ("pull", selected.torch.reference),
+    ]
+    assert "build_local_images" not in actions.calls
+
+
 def test_noninteractive_pull_failure_never_implicitly_builds(
     tmp_path: Path,
 ) -> None:
@@ -1910,12 +2042,13 @@ def test_project_initialization_receives_selected_exact_parent_identity(
     tmp_path: Path,
 ) -> None:
     actions = FakeInstallerActions.healthy()
+    swr_release = registry_candidates(actions.release, "swr")[0].release
 
     result = installer_workflow(tmp_path, actions=actions).run()
 
     assert result.exit_code == 0
     assert actions.project_init_kwargs["base_image_reference"] == (
-        actions.release.torch.reference
+        swr_release.torch.reference
     )
     assert actions.project_init_kwargs["base_config_digest"] == (
         actions.release.torch.config_digest
