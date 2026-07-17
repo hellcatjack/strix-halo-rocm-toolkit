@@ -967,6 +967,7 @@ rm -rf "$HOME/.local/state/strix-halo-rocm-toolkit"
 | 安装器显示 `KERNEL_REBOOT_PENDING` | 执行 `sudo reboot`，随后重新运行完全相同的安装命令；平台阶段不会要求第二次重启 |
 | `host-verify returned change-required` | 这表示宿主策略尚未满足，不是 Docker/Buildx 安装失败。`v0.3.3` 的同一行 `CAUSE` 会列出 finding code 和 `action`；按提示修复后重新执行原安装命令，不要删除状态 |
 | `release base config digest does not match` 且显示 manifest digest | `v0.3.1` 将 containerd image store 的 manifest ID 误当作 config ID；升级到 `v0.3.2` 或更新版本后重新执行原安装命令。已下载层会复用，不要删除安装状态、镜像或 `/var/lib/docker` |
+| `failed to resolve source metadata for docker.io/docker/dockerfile:1.7` | 旧项目模板会从 Docker Hub 获取外部 Dockerfile frontend，在中国网络可能超时。更新到包含 `8ab9edc` 或更新提交的版本，并重新执行完全相同的安装命令；安装器从 `PROJECT_INIT` 恢复，不会重新下载已验证的 SWR 镜像 |
 | `GPU.BIOS_VRAM_HIGH` | 在 BIOS/UEFI 将 UMA Frame Buffer 设为主板允许的最小值，建议 512 MiB；工具不会修改 GTT/TTM 或代替固件设置 |
 | Docker permission denied | 重新登录以刷新组成员关系，或运行 `sudo -v` 后让工具使用 `sudo docker` |
 | 找不到 `/dev/kfd` | 直接在宿主运行 `host-preflight`；不要用未映射设备的普通容器报告判断宿主 |
