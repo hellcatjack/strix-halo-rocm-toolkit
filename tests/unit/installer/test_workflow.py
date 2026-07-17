@@ -339,6 +339,30 @@ def test_new_session_reports_pending_then_resolved_release_identity(
     assert "sha256:" + "7" * 64 in output
 
 
+def test_image_disk_estimate_receives_selected_registry(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+    progress, stdout, _ = workflow_progress(tmp_path)
+
+    result = installer_workflow(
+        tmp_path,
+        actions=actions,
+        options=replace(workflow_options(tmp_path), registry="swr"),
+        progress=progress,
+    ).run()
+
+    assert result.exit_code == 0
+    assert actions.image_estimate_kwargs == [
+        {
+            "release": actions.release,
+            "image_source": "pull",
+            "registry": "swr",
+        }
+    ]
+    assert "来源=公开镜像（仅华为 SWR）" in stdout.getvalue()
+
+
 def test_disk_shortage_reports_start_detail_then_failure(
     tmp_path: Path,
 ) -> None:

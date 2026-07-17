@@ -19,7 +19,10 @@ from amd_ai.installer.actions import (
     prepare_plan_payload,
     validate_local_build_source,
 )
-from amd_ai.installer.release import load_stable_release
+from amd_ai.installer.release import (
+    ReleaseAcquisitionError,
+    load_stable_release,
+)
 from amd_ai.installer.state import stage_input_digest
 from amd_ai.runner import CommandResult, CommandStream
 from tests.unit.host.fakes import healthy_snapshot
@@ -334,6 +337,67 @@ def test_image_disk_estimate_uses_missing_remote_layer_bytes(
     assert estimate.available_bytes == 100 * 1024**3
 
 
+def test_image_disk_estimate_falls_back_from_swr_manifest_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = load_stable_release(RELEASE_FIXTURE)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        actions,
+        "_docker_root_and_available",
+        lambda runner, prefix: (Path("/var/lib/docker"), 100 * 1024**3),
+    )
+
+    def missing(candidate, runner, prefix):
+        del runner, prefix
+        calls.append(candidate.base.image)
+        if "myhuaweicloud.com" in candidate.base.image:
+            raise ReleaseAcquisitionError("SWR manifest timeout")
+        return 12 * 1024**3
+
+    monkeypatch.setattr(actions, "_missing_release_layer_bytes", missing)
+
+    estimate = ProductionInstallerActions().image_disk_estimate(
+        release=release,
+        image_source="pull",
+        registry="auto",
+    )
+
+    assert estimate.payload_bytes == 12 * 1024**3
+    assert calls == [
+        (
+            "swr.cn-east-3.myhuaweicloud.com/hellcat-home/"
+            "strix-halo-rocm-python"
+        ),
+        "ghcr.io/hellcatjack/strix-halo-rocm-python",
+    ]
+
+
+def test_image_disk_estimate_does_not_hide_invalid_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = load_stable_release(RELEASE_FIXTURE)
+    monkeypatch.setattr(
+        actions,
+        "_docker_root_and_available",
+        lambda runner, prefix: (Path("/var/lib/docker"), 100 * 1024**3),
+    )
+    monkeypatch.setattr(
+        actions,
+        "_missing_release_layer_bytes",
+        lambda release, runner, prefix: (_ for _ in ()).throw(
+            ActionError("remote layer identity is invalid")
+        ),
+    )
+
+    with pytest.raises(ActionError, match="identity"):
+        ProductionInstallerActions().image_disk_estimate(
+            release=release,
+            image_source="pull",
+            registry="auto",
+        )
+
+
 def test_missing_layer_estimate_reuses_containerd_manifest_images() -> None:
     release = load_stable_release(RELEASE_FIXTURE)
 
@@ -362,6 +426,27 @@ def test_missing_layer_estimate_reuses_containerd_manifest_images() -> None:
 
     assert missing == 0
     assert len(runner.calls) == 2
+
+
+def test_missing_layer_estimate_classifies_manifest_lookup_failure() -> None:
+    release = load_stable_release(RELEASE_FIXTURE)
+
+    class Runner:
+        def run(self, args, *, check=True, input_text=None):
+            del check, input_text
+            call = tuple(args)
+            if call[1:3] == ("image", "inspect"):
+                return CommandResult(call, 1, "", "No such image")
+            if call[1:3] == ("manifest", "inspect"):
+                return CommandResult(call, 1, "", "registry timeout")
+            raise AssertionError(f"unexpected command: {call}")
+
+    with pytest.raises(ReleaseAcquisitionError, match="registry timeout"):
+        actions._missing_release_layer_bytes(
+            release,
+            Runner(),
+            ("docker",),
+        )
 
 
 def test_missing_layer_parser_accepts_oci_verbose_record() -> None:

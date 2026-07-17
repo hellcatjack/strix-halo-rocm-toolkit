@@ -126,6 +126,7 @@ class FakeInstallerActions:
             payload_bytes=1024**3,
             available_bytes=100 * 1024**3,
         )
+        self.image_estimate_kwargs: list[dict[str, object]] = []
         self.snapshot = healthy_snapshot()
         self.host_apply_include_docker_group: bool | None = None
         self.kernel_plan_result = self._make_host_plan(
@@ -302,6 +303,7 @@ class FakeInstallerActions:
         return self._record(InstallStage.PROJECT_VERIFY, "verify_project")
 
     def image_disk_estimate(self, **kwargs: object) -> DiskSpaceEstimate:
+        self.image_estimate_kwargs.append(dict(kwargs))
         source = kwargs.get("image_source")
         return (
             self.build_image_estimate

@@ -1269,7 +1269,11 @@ class InstallerWorkflow:
         hook = getattr(self.actions, "image_disk_estimate", None)
         if hook is None:
             raise WorkflowError("image disk estimate is unavailable")
-        estimate = hook(release=release, image_source=image_source)
+        estimate = hook(
+            release=release,
+            image_source=image_source,
+            registry=self.options.registry,
+        )
         operation = (
             "image build" if image_source == "build" else "image acquisition"
         )
@@ -1277,7 +1281,13 @@ class InstallerWorkflow:
         return DiskRequirement(
             operation=operation,
             source=(
-                "本地源码构建" if image_source == "build" else "公开 GHCR"
+                "本地源码构建"
+                if image_source == "build"
+                else {
+                    "auto": "公开镜像（华为 SWR 优先，GHCR 回退）",
+                    "swr": "公开镜像（仅华为 SWR）",
+                    "ghcr": "公开镜像（仅 GHCR）",
+                }[self.options.registry]
             ),
             payload_label=("构建估算" if image_source == "build" else "缺失层"),
             estimate=estimate,

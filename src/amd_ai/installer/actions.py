@@ -46,7 +46,9 @@ from amd_ai.installer.progress import (
     StderrCommandObserver,
     sanitize_output,
 )
+from amd_ai.installer.registry import registry_candidates
 from amd_ai.installer.release import (
+    ReleaseAcquisitionError,
     ReleaseDocker,
     VerifiedReleaseImages,
     load_stable_release,
@@ -653,15 +655,32 @@ class ProductionInstallerActions:
         )
 
     def image_disk_estimate(
-        self, *, release: StableRelease, image_source: str
+        self,
+        *,
+        release: StableRelease,
+        image_source: str,
+        registry: str = "auto",
     ) -> DiskSpaceEstimate:
         location, available = _docker_root_and_available(
             self.runner, self.docker_prefix
         )
         if image_source == "pull":
-            payload = _missing_release_layer_bytes(
-                release, self.runner, self.docker_prefix
-            )
+            failures: list[str] = []
+            for candidate in registry_candidates(release, registry):
+                try:
+                    payload = _missing_release_layer_bytes(
+                        candidate.release,
+                        self.runner,
+                        self.docker_prefix,
+                    )
+                    break
+                except ReleaseAcquisitionError as error:
+                    failures.append(f"{candidate.label}: {error}")
+            else:
+                raise ActionError(
+                    "cannot estimate any configured registry: "
+                    + "; ".join(failures)
+                )
         elif image_source == "build":
             payload = LOCAL_BUILD_ESTIMATE_BYTES
         else:
@@ -1290,8 +1309,9 @@ def _missing_release_layer_bytes(
                 or manifest.stdout.strip()
                 or "no output"
             )
-            raise ActionError(
-                f"cannot estimate remote image layers for {image.reference}: {evidence}"
+            raise ReleaseAcquisitionError(
+                "cannot estimate remote image layers for "
+                f"{image.reference}: {evidence}"
             )
         try:
             payload = json.loads(manifest.stdout)
