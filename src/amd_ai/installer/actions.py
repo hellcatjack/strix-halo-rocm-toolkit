@@ -59,7 +59,10 @@ from amd_ai.overlay.models import OverlayPaths
 from amd_ai.overlay.transaction import initialize_overlay
 from amd_ai.project.build import ProjectBuildResult, build_or_reuse_project
 from amd_ai.project.config import ProjectConfig, load_project_config
-from amd_ai.project.init import initialize_project as create_project
+from amd_ai.project.init import (
+    initialize_project as create_project,
+    migrate_legacy_project_dockerfile,
+)
 from amd_ai.project.run import (
     build_run_argv,
     ensure_project_home,
@@ -762,6 +765,7 @@ class ProductionInstallerActions:
                 reference=base_image_reference,
                 config_digest=base_config_digest,
             )
+            migrate_legacy_project_dockerfile(project_dir)
         else:
             base_manifest_digest = base_image_reference.rpartition("@")[2]
             if DIGEST_PATTERN.fullmatch(base_manifest_digest) is None:

@@ -250,6 +250,134 @@ def test_runtime_image_check_receives_command_observer(
     assert captured["image"] == "torch:stable"
 
 
+def test_existing_project_migrates_after_parent_validation_before_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path / "video-lab"
+    project_dir.mkdir()
+    config_path = project_dir / "amd-ai-project.toml"
+    config_path.write_text("# existing project\n", encoding="utf-8")
+    config = SimpleNamespace(path=config_path)
+    build = object()
+    calls: list[object] = []
+
+    monkeypatch.setattr(
+        actions,
+        "bind_selected_parent",
+        lambda **kwargs: calls.append("bind"),
+    )
+    monkeypatch.setattr(
+        actions,
+        "load_project_config",
+        lambda path: calls.append("load") or config,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_validate_selected_parent_config",
+        lambda config, **kwargs: calls.append("validate"),
+    )
+    monkeypatch.setattr(
+        actions,
+        "migrate_legacy_project_dockerfile",
+        lambda path: calls.append(("migrate", path)) or True,
+    )
+    monkeypatch.setattr(
+        actions,
+        "build_or_reuse_project",
+        lambda **kwargs: calls.append("build") or build,
+    )
+    monkeypatch.setattr(
+        actions,
+        "inspect_project_image",
+        lambda *args, **kwargs: SimpleNamespace(profile_status="verified"),
+    )
+    monkeypatch.setattr(actions, "ensure_project_home", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        actions,
+        "load_project_protected_profile",
+        lambda **kwargs: object(),
+    )
+    monkeypatch.setattr(actions, "initialize_overlay", lambda *args, **kwargs: None)
+
+    result = ProductionInstallerActions().initialize_project(
+        project_dir=project_dir,
+        project_name="video-lab",
+        base_image_reference="torch@sha256:" + "a" * 64,
+        base_config_digest="sha256:" + "b" * 64,
+        owner_uid=1000,
+        owner_gid=1000,
+    )
+
+    assert result.config is config
+    assert result.build is build
+    assert calls[:5] == [
+        "bind",
+        "load",
+        "validate",
+        ("migrate", project_dir),
+        "build",
+    ]
+
+
+def test_new_project_does_not_run_legacy_template_migration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path / "video-lab"
+    config_path = project_dir / "amd-ai-project.toml"
+    config = SimpleNamespace(path=config_path)
+    calls: list[str] = []
+
+    monkeypatch.setattr(actions, "bind_selected_parent", lambda **kwargs: None)
+
+    def create_project(**kwargs):
+        calls.append("create")
+        project_dir.mkdir()
+        config_path.write_text("# new project\n", encoding="utf-8")
+
+    monkeypatch.setattr(actions, "create_project", create_project)
+    monkeypatch.setattr(actions, "load_project_config", lambda path: config)
+    monkeypatch.setattr(
+        actions,
+        "_validate_selected_parent_config",
+        lambda config, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        actions,
+        "migrate_legacy_project_dockerfile",
+        lambda path: calls.append("migrate") or True,
+    )
+    monkeypatch.setattr(
+        actions,
+        "build_or_reuse_project",
+        lambda **kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        actions,
+        "inspect_project_image",
+        lambda *args, **kwargs: SimpleNamespace(profile_status="verified"),
+    )
+    monkeypatch.setattr(actions, "ensure_project_home", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        actions,
+        "load_project_protected_profile",
+        lambda **kwargs: object(),
+    )
+    monkeypatch.setattr(actions, "initialize_overlay", lambda *args, **kwargs: None)
+
+    ProductionInstallerActions().initialize_project(
+        project_dir=project_dir,
+        project_name="video-lab",
+        base_image_reference="torch@sha256:" + "a" * 64,
+        base_config_digest="sha256:" + "b" * 64,
+        owner_uid=1000,
+        owner_gid=1000,
+    )
+
+    assert calls == ["create"]
+
+
 def test_container_host_check_blocks_missing_docker_and_gpu_permissions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
