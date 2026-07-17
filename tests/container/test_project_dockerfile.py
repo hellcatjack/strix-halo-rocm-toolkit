@@ -6,11 +6,18 @@ def test_project_install_cannot_sync_or_replace_parent():
 
     assert "uv pip install" in text
     assert "--constraint /opt/amd-ai/project-locks/torch-constraints.txt" in text
+    assert "--require-hashes" in text
     assert "torch-manifest.py verify" in text
     assert "AMD_AI_PROFILE_STATUS" in text
     assert "uv pip sync" not in text
     assert "pip uninstall" not in text
-    assert "--mount=type=cache,target=/root/.cache/uv,sharing=locked" in text
+    assert not text.startswith("# syntax=")
+    assert "docker.io/docker/dockerfile" not in text
+    assert "--mount=" not in text
+    assert (
+        "RUN if [ -s /opt/amd-ai/project-locks/requirements.lock ]; then"
+        in text
+    )
 
 
 def test_project_entrypoint_checks_and_marks_overlay_under_startup_lock():

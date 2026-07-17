@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
@@ -10,8 +9,7 @@ ENV AMD_AI_PROFILE_ID="${PROFILE_ID}" \
 USER root
 WORKDIR /workspace
 COPY torch-constraints.txt requirements.lock /opt/amd-ai/project-locks/
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    if [ -s /opt/amd-ai/project-locks/requirements.lock ]; then \
+RUN if [ -s /opt/amd-ai/project-locks/requirements.lock ]; then \
       uv pip install \
         --python /opt/venv/bin/python \
         --constraint /opt/amd-ai/project-locks/torch-constraints.txt \
