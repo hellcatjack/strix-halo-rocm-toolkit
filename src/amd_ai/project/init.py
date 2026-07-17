@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
+import stat
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -25,10 +28,91 @@ from amd_ai.runner import Runner
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 TEMPLATE_ROOT = REPOSITORY_ROOT / "templates/project"
 STABLE_IMAGE = "rocm-pytorch:7.2.1-py3.12-torch2.9.1"
+LEGACY_PROJECT_DOCKERFILE_DIGESTS = frozenset(
+    {
+        "9a347d016b40564cc950dc3aa76a798ab"
+        "9792ba33c8aa82a40697b6660227373"
+    }
+)
 
 
 class ProjectInitError(RuntimeError):
     pass
+
+
+def migrate_legacy_project_dockerfile(
+    destination: Path,
+    *,
+    template_root: Path = TEMPLATE_ROOT,
+) -> bool:
+    destination = Path(destination).resolve()
+    target = destination / "Dockerfile"
+    template = Path(template_root) / "Dockerfile"
+    if target.is_symlink():
+        raise ProjectInitError("project Dockerfile must not be a symlink")
+    if not target.exists():
+        return False
+    if template.is_symlink():
+        raise ProjectInitError("project Dockerfile template must not be a symlink")
+    if not target.is_file() or not template.is_file():
+        raise ProjectInitError("project Dockerfile and template must be regular files")
+    try:
+        current = target.read_bytes()
+        replacement = template.read_bytes()
+    except OSError as error:
+        raise ProjectInitError(
+            f"cannot inspect project Dockerfile migration: {error}"
+        ) from error
+    if current == replacement:
+        return False
+    if (
+        hashlib.sha256(current).hexdigest()
+        not in LEGACY_PROJECT_DOCKERFILE_DIGESTS
+    ):
+        return False
+
+    descriptor = -1
+    temporary: Path | None = None
+    try:
+        metadata = target.stat()
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".Dockerfile.migrate-",
+            dir=destination,
+        )
+        temporary = Path(temporary_name)
+        temporary_metadata = os.fstat(descriptor)
+        if (
+            temporary_metadata.st_uid != metadata.st_uid
+            or temporary_metadata.st_gid != metadata.st_gid
+        ):
+            os.fchown(descriptor, metadata.st_uid, metadata.st_gid)
+        os.fchmod(descriptor, stat.S_IMODE(metadata.st_mode))
+        stream_descriptor = descriptor
+        descriptor = -1
+        with os.fdopen(stream_descriptor, "wb") as stream:
+            stream.write(replacement)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+        temporary = None
+        directory_descriptor = os.open(
+            destination,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except OSError as error:
+        raise ProjectInitError(
+            f"cannot migrate project Dockerfile: {error}"
+        ) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return True
 
 
 def initialize_project(

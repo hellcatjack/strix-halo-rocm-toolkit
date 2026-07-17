@@ -1,9 +1,72 @@
 import os
+from pathlib import Path
 
 import pytest
 
-from amd_ai.project.init import ProjectInitError, initialize_project
+from amd_ai.project.init import (
+    ProjectInitError,
+    initialize_project,
+    migrate_legacy_project_dockerfile,
+)
 from tests.unit.host.fakes import FakeRunner
+
+
+LEGACY_DOCKERFILE = Path(
+    "tests/fixtures/project/legacy-Dockerfile-0.3.2"
+)
+CURRENT_DOCKERFILE = Path("templates/project/Dockerfile")
+
+
+def test_untouched_legacy_dockerfile_is_atomically_migrated(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "Dockerfile"
+    target.write_bytes(LEGACY_DOCKERFILE.read_bytes())
+    target.chmod(0o640)
+
+    changed = migrate_legacy_project_dockerfile(project)
+
+    assert changed is True
+    assert target.read_bytes() == CURRENT_DOCKERFILE.read_bytes()
+    assert target.stat().st_mode & 0o777 == 0o640
+    rendered = target.read_text(encoding="utf-8")
+    assert "# syntax=" not in rendered
+    assert "--mount=" not in rendered
+
+
+def test_current_project_dockerfile_is_unchanged(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "Dockerfile"
+    expected = CURRENT_DOCKERFILE.read_bytes()
+    target.write_bytes(expected)
+
+    assert migrate_legacy_project_dockerfile(project) is False
+    assert target.read_bytes() == expected
+
+
+def test_modified_legacy_project_dockerfile_is_preserved(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "Dockerfile"
+    expected = LEGACY_DOCKERFILE.read_bytes() + b"\n# user change\n"
+    target.write_bytes(expected)
+
+    assert migrate_legacy_project_dockerfile(project) is False
+    assert target.read_bytes() == expected
+
+
+def test_symlinked_project_dockerfile_is_rejected(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_bytes(LEGACY_DOCKERFILE.read_bytes())
+    (project / "Dockerfile").symlink_to(outside)
+
+    with pytest.raises(ProjectInitError, match="symlink"):
+        migrate_legacy_project_dockerfile(project)
+
+    assert outside.read_bytes() == LEGACY_DOCKERFILE.read_bytes()
 
 
 def test_scaffold_is_pinned_and_has_no_implicit_shared_storage(tmp_path):
