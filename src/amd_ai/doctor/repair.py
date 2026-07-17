@@ -11,10 +11,16 @@ from amd_ai.doctor.models import (
     DoctorReport,
     RepairAction,
 )
-from amd_ai.installer.models import StableRelease
 from amd_ai.installer.actions import AnonymousReleaseRegistry
+from amd_ai.installer.models import StableRelease
+from amd_ai.installer.registry import (
+    registry_candidates,
+    trusted_image_references,
+)
 from amd_ai.installer.release import (
+    ReleaseAcquisitionError,
     ReleaseError,
+    VerifiedReleaseImages,
     load_stable_release,
     pull_and_verify_release,
 )
@@ -29,9 +35,6 @@ from amd_ai.runner import SubprocessRunner
 
 
 IMAGE_ID_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
-EXACT_REFERENCE_PATTERN = re.compile(
-    r"ghcr\.io/[a-z0-9._-]+/[a-z0-9._-]+@sha256:[0-9a-f]{64}"
-)
 
 
 class RepairPlanningError(ValueError):
@@ -60,9 +63,15 @@ class RepairExecutor(Protocol):
 
 
 class SystemRepairExecutor:
-    def __init__(self, *, manifest_path: Path) -> None:
+    def __init__(
+        self,
+        *,
+        manifest_path: Path,
+        registry: str = "auto",
+    ) -> None:
         self.manifest_path = manifest_path
         self.release = load_stable_release(manifest_path)
+        self.registry_choice = registry
         self.docker = Docker.detect()
         self.registry = AnonymousReleaseRegistry(self.docker.prefix)
         self.runner = SubprocessRunner()
@@ -70,9 +79,35 @@ class SystemRepairExecutor:
     def pull_and_verify(self, release: StableRelease) -> None:
         if release != self.release:
             raise RepairExecutionError("repair release differs from executor manifest")
-        pull_and_verify_release(release, docker=self.registry)
-        self.registry.tag_reference(release.base.reference, ROCM_PYTHON_TAG)
-        self.registry.tag_reference(release.torch.reference, STABLE_TORCH_TAG)
+        failures: list[str] = []
+        for candidate in registry_candidates(
+            release,
+            self.registry_choice,
+        ):
+            try:
+                verified = pull_and_verify_release(
+                    candidate.release,
+                    docker=self.registry,
+                )
+            except ReleaseAcquisitionError as error:
+                failures.append(f"{candidate.label}: {error}")
+                continue
+            if not isinstance(verified, VerifiedReleaseImages):
+                raise RepairExecutionError(
+                    "repair pull returned invalid verified identities"
+                )
+            self.registry.tag_reference(
+                verified.base.reference,
+                ROCM_PYTHON_TAG,
+            )
+            self.registry.tag_reference(
+                verified.torch.reference,
+                STABLE_TORCH_TAG,
+            )
+            return
+        raise ReleaseAcquisitionError(
+            "all configured registries failed: " + "; ".join(failures)
+        )
 
     def remove_image_id(self, image_id: str) -> None:
         remove_exact_project_image(
@@ -137,7 +172,11 @@ class SystemRepairExecutor:
     def doctor(self, project_path: Path) -> DoctorReport:
         from amd_ai.doctor.checks import run_doctor
 
-        return run_doctor(project_path, self.manifest_path)
+        return run_doctor(
+            project_path,
+            self.manifest_path,
+            registry=self.registry_choice,
+        )
 
 
 @dataclass(frozen=True)
@@ -196,10 +235,15 @@ def plan_repair(report: DoctorReport) -> RepairPlan:
     )
     if parent_reason is not None:
         reference = _fact_string(facts, "torch_reference")
-        if EXACT_REFERENCE_PATTERN.fullmatch(reference) is None:
-            raise RepairPlanningError("parent repair reference is not immutable")
-        if release is not None and reference != release.torch.reference:
-            raise RepairPlanningError("parent repair reference differs from release")
+        if release is None:
+            raise RepairPlanningError(
+                "parent repair requires a verified release"
+            )
+        allowed = trusted_image_references(release, kind="torch")
+        if reference not in allowed:
+            raise RepairPlanningError(
+                "parent repair reference is not a trusted release replica"
+            )
         actions.append(
             RepairAction("pull-parent", reference, parent_reason)
         )
@@ -296,9 +340,12 @@ def execute_repair(
     try:
         parent = actions.get("pull-parent")
         if parent is not None:
-            if parent.exact_target != plan.release.torch.reference:
+            if parent.exact_target not in trusted_image_references(
+                plan.release,
+                kind="torch",
+            ):
                 raise RepairExecutionError(
-                    "parent pull action differs from verified release"
+                    "parent pull action is not a trusted release replica"
                 )
             executor.pull_and_verify(plan.release)
 

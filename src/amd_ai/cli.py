@@ -276,6 +276,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("profiles/releases/stable.json"),
     )
+    doctor.add_argument(
+        "--registry",
+        choices=("auto", "swr", "ghcr"),
+        default="auto",
+    )
     doctor.add_argument("--json", dest="json_path", type=Path)
 
     repair = subparsers.add_parser("repair")
@@ -284,6 +289,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--manifest",
         type=Path,
         default=Path("profiles/releases/stable.json"),
+    )
+    repair.add_argument(
+        "--registry",
+        choices=("auto", "swr", "ghcr"),
+        default="auto",
     )
     repair.add_argument("--yes", action="store_true")
     repair.add_argument("--json", dest="json_path", type=Path)
@@ -364,7 +374,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _gpu_release(args)
     if args.command == "doctor":
         try:
-            report = run_doctor(args.project, args.manifest)
+            report = run_doctor(
+                args.project,
+                args.manifest,
+                registry=args.registry,
+            )
         except (
             BuildError,
             ConfigError,
@@ -549,7 +563,11 @@ def _interactive_doctor(
 ) -> int:
     source_root = args.source_root or Path(__file__).resolve().parents[2]
     manifest = args.manifest or source_root / "profiles/releases/stable.json"
-    report = run_doctor(args.project_dir, manifest)
+    report = run_doctor(
+        args.project_dir,
+        manifest,
+        registry=args.registry,
+    )
     for diagnostic in report.diagnostics:
         if diagnostic.disposition != DiagnosticDisposition.PASS:
             print(
@@ -565,6 +583,7 @@ def _interactive_doctor(
             argparse.Namespace(
                 project=args.project_dir,
                 manifest=manifest,
+                registry=args.registry,
                 yes=True,
                 json_path=None,
             )
@@ -611,7 +630,11 @@ def _installer_source_revision(source_root: Path) -> str:
 
 
 def _repair_command(args: argparse.Namespace) -> int:
-    report = run_doctor(args.project, args.manifest)
+    report = run_doctor(
+        args.project,
+        args.manifest,
+        registry=args.registry,
+    )
     if args.json_path is not None:
         pre_path, _ = _repair_report_paths(args.json_path)
         _write_doctor_json(pre_path, report.to_dict())
@@ -633,7 +656,10 @@ def _repair_command(args: argparse.Namespace) -> int:
         if confirmation != "REPAIR":
             print("repair cancelled", file=sys.stderr)
             return 2
-    executor = SystemRepairExecutor(manifest_path=args.manifest)
+    executor = SystemRepairExecutor(
+        manifest_path=args.manifest,
+        registry=args.registry,
+    )
     post_report = execute_repair(plan, executor=executor)
     if args.json_path is not None:
         _, post_path = _repair_report_paths(args.json_path)

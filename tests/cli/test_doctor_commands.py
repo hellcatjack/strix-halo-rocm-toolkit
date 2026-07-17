@@ -16,8 +16,12 @@ from amd_ai.doctor.models import (
 def test_doctor_without_project_checks_platform(monkeypatch, capsys) -> None:
     captured = {}
 
-    def fake_doctor(project, manifest):
-        captured.update(project=project, manifest=manifest)
+    def fake_doctor(project, manifest, *, registry):
+        captured.update(
+            project=project,
+            manifest=manifest,
+            registry=registry,
+        )
         return repairable_report()
 
     monkeypatch.setattr(cli, "run_doctor", fake_doctor, raising=False)
@@ -30,6 +34,7 @@ def test_doctor_without_project_checks_platform(monkeypatch, capsys) -> None:
     assert "TORCH.SHADOWED" in capsys.readouterr().out
     assert captured["project"] is None
     assert captured["manifest"] == Path("tests/fixtures/releases/stable.json")
+    assert captured["registry"] == "auto"
 
 
 def test_doctor_json_writes_report(monkeypatch, tmp_path: Path) -> None:
@@ -37,7 +42,7 @@ def test_doctor_json_writes_report(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         cli,
         "run_doctor",
-        lambda project, manifest: passing_report(),
+        lambda project, manifest, *, registry: passing_report(),
         raising=False,
     )
 
@@ -49,7 +54,7 @@ def test_doctor_blocked_report_returns_two(monkeypatch) -> None:
     monkeypatch.setattr(
         cli,
         "run_doctor",
-        lambda project, manifest: DoctorReport.create(
+        lambda project, manifest, *, registry: DoctorReport.create(
             project=None,
             diagnostics=(
                 Diagnostic(
@@ -74,7 +79,7 @@ def test_repair_prints_exact_actions_and_requires_repair_word(
     monkeypatch.setattr(
         cli,
         "run_doctor",
-        lambda project, manifest: repairable_report(),
+        lambda project, manifest, *, registry: repairable_report(),
     )
     monkeypatch.setattr("builtins.input", lambda prompt: "no")
 
@@ -86,6 +91,57 @@ def test_repair_prints_exact_actions_and_requires_repair_word(
     assert (
         "ghcr.io/hellcatjack/strix-halo-rocm-pytorch@sha256:" in output
     )
+
+
+def test_doctor_forwards_explicit_registry(monkeypatch) -> None:
+    captured = {}
+
+    def fake_doctor(project, manifest, *, registry):
+        captured.update(
+            project=project,
+            manifest=manifest,
+            registry=registry,
+        )
+        return passing_report()
+
+    monkeypatch.setattr(cli, "run_doctor", fake_doctor)
+
+    code = cli.main(["doctor", "--registry", "ghcr"])
+
+    assert code == 0
+    assert captured["registry"] == "ghcr"
+
+
+def test_repair_forwards_registry_to_doctor_and_executor(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    def fake_doctor(project, manifest, *, registry):
+        captured["doctor_registry"] = registry
+        return repairable_report()
+
+    class FakeExecutor:
+        def __init__(self, *, manifest_path, registry):
+            captured["executor_registry"] = registry
+
+    monkeypatch.setattr(cli, "run_doctor", fake_doctor)
+    monkeypatch.setattr(cli, "SystemRepairExecutor", FakeExecutor)
+    monkeypatch.setattr(
+        cli,
+        "execute_repair",
+        lambda plan, *, executor: passing_report(),
+    )
+
+    code = cli.main(
+        ["repair", "/srv/demo", "--yes", "--registry", "swr"]
+    )
+
+    assert code == 0
+    assert captured == {
+        "doctor_registry": "swr",
+        "executor_registry": "swr",
+    }
 
 
 def test_noninteractive_repair_requires_yes() -> None:

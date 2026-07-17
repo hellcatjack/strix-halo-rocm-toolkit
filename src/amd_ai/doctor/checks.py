@@ -18,6 +18,7 @@ from amd_ai.doctor.models import (
 from amd_ai.image.build import Docker
 from amd_ai.image.publish import AnonymousDockerRegistry, PublishError
 from amd_ai.installer.models import ReleaseImage, StableRelease
+from amd_ai.installer.registry import registry_candidates
 from amd_ai.installer.release import (
     ReleaseError,
     load_stable_release,
@@ -88,7 +89,10 @@ class DoctorBackend(Protocol):
 
 
 def doctor_platform(
-    *, manifest_path: Path, backend: DoctorBackend
+    *,
+    manifest_path: Path,
+    backend: DoctorBackend,
+    registry: str = "auto",
 ) -> DoctorReport:
     diagnostics: list[Diagnostic] = []
     facts: dict[str, object] = {"manifest": str(manifest_path)}
@@ -111,25 +115,32 @@ def doctor_platform(
             environment=os.environ,
         )
 
-    facts.update(
-        {
-            "release_id": release.release_id,
-            "base_reference": release.base.reference,
-            "base_config_digest": release.base.config_digest,
-            "torch_reference": release.torch.reference,
-            "torch_config_digest": release.torch.config_digest,
-        }
-    )
+    facts["release_id"] = release.release_id
+    candidates = registry_candidates(release, registry)
+    selected_images: dict[str, tuple[StableRelease, ReleaseImage]] = {}
     torch_static_valid = True
-    for kind, image in (("base", release.base), ("torch", release.torch)):
-        inspection = backend.inspect_image(image.reference)
+    for kind in ("base", "torch"):
+        selected_release = candidates[0].release
+        selected_image = getattr(selected_release, kind)
+        inspection = None
+        for candidate in candidates:
+            candidate_image = getattr(candidate.release, kind)
+            observed = backend.inspect_image(candidate_image.reference)
+            if observed is not None:
+                selected_release = candidate.release
+                selected_image = candidate_image
+                inspection = observed
+                break
+        selected_images[kind] = (selected_release, selected_image)
+        facts[f"{kind}_reference"] = selected_image.reference
+        facts[f"{kind}_config_digest"] = selected_image.config_digest
         if inspection is None:
             diagnostics.append(
                 _diagnostic(
                     "IMAGE.PARENT_MISSING",
                     DiagnosticDisposition.REPAIRABLE,
                     f"Exact {kind} parent image is missing",
-                    image.reference,
+                    selected_image.reference,
                     "Pull and verify the exact release digest.",
                 )
             )
@@ -138,21 +149,29 @@ def doctor_platform(
             continue
         if (
             inspection.config_digest
-            not in {image.config_digest, image.manifest_digest}
-            or image.reference not in inspection.repo_digests
+            not in {
+                selected_image.config_digest,
+                selected_image.manifest_digest,
+            }
+            or selected_image.reference not in inspection.repo_digests
         ):
             diagnostics.append(
                 _diagnostic(
                     "IMAGE.DIGEST_DRIFT",
                     DiagnosticDisposition.REPAIRABLE,
                     f"Exact {kind} image identity drifted",
-                    f"expected={image.config_digest}, actual={inspection.config_digest}",
+                    f"expected={selected_image.config_digest}, "
+                    f"actual={inspection.config_digest}",
                     "Restore the friendly tag only after exact digest verification.",
                 )
             )
             if kind == "torch":
                 torch_static_valid = False
-        verification_error = backend.verify_image(release, image, kind)
+        verification_error = backend.verify_image(
+            selected_release,
+            selected_image,
+            kind,
+        )
         if verification_error:
             code = "TORCH.BASE_CHANGED" if kind == "torch" else "IMAGE.DIGEST_DRIFT"
             diagnostics.append(
@@ -168,8 +187,8 @@ def doctor_platform(
                 torch_static_valid = False
 
     for tag, image in (
-        (BASE_FRIENDLY_TAG, release.base),
-        (TORCH_FRIENDLY_TAG, release.torch),
+        (BASE_FRIENDLY_TAG, selected_images["base"][1]),
+        (TORCH_FRIENDLY_TAG, selected_images["torch"][1]),
     ):
         friendly_id = backend.inspect_friendly(tag)
         if friendly_id is not None and friendly_id not in {
@@ -198,7 +217,9 @@ def doctor_platform(
             )
         )
     if torch_static_valid:
-        gpu_error = backend.gpu_runtime(release.torch.reference)
+        gpu_error = backend.gpu_runtime(
+            selected_images["torch"][1].reference
+        )
         if gpu_error:
             diagnostics.append(
                 _diagnostic(
@@ -218,9 +239,17 @@ def doctor_platform(
 
 
 def doctor_project(
-    *, config_path: Path, manifest_path: Path, backend: DoctorBackend
+    *,
+    config_path: Path,
+    manifest_path: Path,
+    backend: DoctorBackend,
+    registry: str = "auto",
 ) -> DoctorReport:
-    platform = doctor_platform(manifest_path=manifest_path, backend=backend)
+    platform = doctor_platform(
+        manifest_path=manifest_path,
+        backend=backend,
+        registry=registry,
+    )
     diagnostics = list(platform.diagnostics)
     facts = dict(platform.facts)
     try:
@@ -324,15 +353,21 @@ def run_doctor(
     manifest: Path,
     *,
     backend: DoctorBackend | None = None,
+    registry: str = "auto",
 ) -> DoctorReport:
     selected = backend or SubprocessDoctorBackend.detect()
     if project is None:
-        return doctor_platform(manifest_path=manifest, backend=selected)
+        return doctor_platform(
+            manifest_path=manifest,
+            backend=selected,
+            registry=registry,
+        )
     config_path = project if project.name == "amd-ai-project.toml" else project / "amd-ai-project.toml"
     return doctor_project(
         config_path=config_path,
         manifest_path=manifest,
         backend=selected,
+        registry=registry,
     )
 
 

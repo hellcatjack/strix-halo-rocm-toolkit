@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 from amd_ai.doctor import repair
 from amd_ai.doctor.models import (
@@ -18,6 +19,14 @@ from amd_ai.doctor.repair import (
     SystemRepairExecutor,
     execute_repair,
     plan_repair,
+)
+from amd_ai.installer.registry import registry_candidates
+from amd_ai.installer.release import (
+    ReleaseAcquisitionError,
+    ReleaseIdentityError,
+    VerifiedImageIdentity,
+    VerifiedReleaseImages,
+    load_stable_release,
 )
 
 
@@ -66,6 +75,48 @@ def test_repair_plan_uses_exact_generation_image_id_and_registry_digest() -> Non
     )
     assert not plan.blocked
     assert not any("*" in action.exact_target for action in plan.actions)
+
+
+def test_repair_plan_accepts_trusted_swr_exact_parent() -> None:
+    report = repairable_project_report()
+    release = load_stable_release(RELEASE_FIXTURE)
+    swr = registry_candidates(release, "swr")[0].release
+    report = replace(
+        report,
+        facts=MappingProxyType(
+            {**report.facts, "torch_reference": swr.torch.reference}
+        ),
+    )
+
+    plan = plan_repair(report)
+
+    assert plan.actions[0] == RepairAction(
+        "pull-parent",
+        swr.torch.reference,
+        "IMAGE.PARENT_MISSING",
+    )
+
+
+def test_repair_plan_rejects_untrusted_swr_like_parent() -> None:
+    report = repairable_project_report()
+    report = replace(
+        report,
+        facts=MappingProxyType(
+            {
+                **report.facts,
+                "torch_reference": (
+                    "swr.cn-east-3.myhuaweicloud.com/hellcat-home/"
+                    "untrusted@sha256:" + "7" * 64
+                ),
+            }
+        ),
+    )
+
+    with pytest.raises(
+        repair.RepairPlanningError,
+        match="trusted release replica",
+    ):
+        plan_repair(report)
 
 
 def test_blocked_report_produces_no_destructive_actions() -> None:
@@ -142,7 +193,10 @@ def test_system_executor_parent_pull_uses_anonymous_registry(
         "detect",
         lambda: SimpleNamespace(prefix=("sudo", "-n", "docker")),
     )
-    executor = SystemRepairExecutor(manifest_path=RELEASE_FIXTURE)
+    executor = SystemRepairExecutor(
+        manifest_path=RELEASE_FIXTURE,
+        registry="ghcr",
+    )
     authless_calls: list[str] = []
     monkeypatch.setattr(
         executor.registry,
@@ -154,13 +208,29 @@ def test_system_executor_parent_pull_uses_anonymous_registry(
         "_completed",
         lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""),
     )
+
+    def verified_pull(release, *, docker):
+        docker.pull(release.base.reference)
+        docker.pull(release.torch.reference)
+        return VerifiedReleaseImages(
+            base=VerifiedImageIdentity(
+                reference=release.base.reference,
+                config_digest=release.base.config_digest,
+                repo_digests=(release.base.reference,),
+                labels={},
+            ),
+            torch=VerifiedImageIdentity(
+                reference=release.torch.reference,
+                config_digest=release.torch.config_digest,
+                repo_digests=(release.torch.reference,),
+                labels={},
+            ),
+        )
+
     monkeypatch.setattr(
         repair,
         "pull_and_verify_release",
-        lambda release, *, docker: (
-            docker.pull(release.base.reference),
-            docker.pull(release.torch.reference),
-        ),
+        verified_pull,
     )
     tag_calls: list[tuple[str, str]] = []
     monkeypatch.setattr(
@@ -179,6 +249,127 @@ def test_system_executor_parent_pull_uses_anonymous_registry(
         (executor.release.base.reference, repair.ROCM_PYTHON_TAG),
         (executor.release.torch.reference, repair.STABLE_TORCH_TAG),
     ]
+
+
+def test_system_executor_falls_back_to_ghcr_on_swr_acquisition_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        repair.Docker,
+        "detect",
+        lambda: SimpleNamespace(prefix=("sudo", "-n", "docker")),
+    )
+    executor = SystemRepairExecutor(
+        manifest_path=RELEASE_FIXTURE,
+        registry="auto",
+    )
+    swr = registry_candidates(executor.release, "swr")[0].release
+    calls: list[str] = []
+
+    def pull(candidate, *, docker):
+        del docker
+        calls.append(candidate.base.image)
+        if candidate.base.image == swr.base.image:
+            raise ReleaseAcquisitionError("SWR unavailable")
+        return VerifiedReleaseImages(
+            base=VerifiedImageIdentity(
+                reference=candidate.base.reference,
+                config_digest=candidate.base.config_digest,
+                repo_digests=(candidate.base.reference,),
+                labels={},
+            ),
+            torch=VerifiedImageIdentity(
+                reference=candidate.torch.reference,
+                config_digest=candidate.torch.config_digest,
+                repo_digests=(candidate.torch.reference,),
+                labels={},
+            ),
+        )
+
+    monkeypatch.setattr(repair, "pull_and_verify_release", pull)
+    monkeypatch.setattr(
+        executor.registry,
+        "tag_reference",
+        lambda source, target: None,
+    )
+
+    executor.pull_and_verify(executor.release)
+
+    assert calls == [swr.base.image, executor.release.base.image]
+
+
+def test_system_executor_tags_verified_swr_references(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        repair.Docker,
+        "detect",
+        lambda: SimpleNamespace(prefix=("sudo", "-n", "docker")),
+    )
+    executor = SystemRepairExecutor(
+        manifest_path=RELEASE_FIXTURE,
+        registry="auto",
+    )
+    swr = registry_candidates(executor.release, "swr")[0].release
+    monkeypatch.setattr(
+        repair,
+        "pull_and_verify_release",
+        lambda candidate, *, docker: VerifiedReleaseImages(
+            base=VerifiedImageIdentity(
+                reference=candidate.base.reference,
+                config_digest=candidate.base.config_digest,
+                repo_digests=(candidate.base.reference,),
+                labels={},
+            ),
+            torch=VerifiedImageIdentity(
+                reference=candidate.torch.reference,
+                config_digest=candidate.torch.config_digest,
+                repo_digests=(candidate.torch.reference,),
+                labels={},
+            ),
+        ),
+    )
+    tags: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        executor.registry,
+        "tag_reference",
+        lambda source, target: tags.append((source, target)),
+    )
+
+    executor.pull_and_verify(executor.release)
+
+    assert tags == [
+        (swr.base.reference, repair.ROCM_PYTHON_TAG),
+        (swr.torch.reference, repair.STABLE_TORCH_TAG),
+    ]
+
+
+def test_system_executor_does_not_hide_swr_identity_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        repair.Docker,
+        "detect",
+        lambda: SimpleNamespace(prefix=("sudo", "-n", "docker")),
+    )
+    executor = SystemRepairExecutor(
+        manifest_path=RELEASE_FIXTURE,
+        registry="auto",
+    )
+    calls: list[str] = []
+
+    def pull(candidate, *, docker):
+        del docker
+        calls.append(candidate.base.image)
+        raise ReleaseIdentityError("config digest changed")
+
+    monkeypatch.setattr(repair, "pull_and_verify_release", pull)
+
+    with pytest.raises(ReleaseIdentityError, match="config digest"):
+        executor.pull_and_verify(executor.release)
+
+    assert len(calls) == 1
+    assert "myhuaweicloud.com" in calls[0]
 
 
 def test_execute_repair_rebuilds_before_removing_exact_project_id() -> None:

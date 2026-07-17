@@ -12,6 +12,7 @@ from amd_ai.doctor.checks import (
     doctor_platform,
     doctor_project,
 )
+from amd_ai.installer.registry import registry_candidates
 from amd_ai.installer.release import load_stable_release
 from amd_ai.overlay.models import (
     OverlayPaths,
@@ -84,6 +85,36 @@ def test_platform_accepts_containerd_manifest_ids_after_release_verification() -
     assert "IMAGE.DIGEST_DRIFT" not in {
         item.code for item in report.diagnostics
     }
+
+
+def test_platform_accepts_verified_swr_parent_images() -> None:
+    release = load_stable_release(FIXTURE)
+    swr = registry_candidates(release, "swr")[0].release
+    backend = FakeDoctorBackend(swr)
+
+    report = doctor_platform(
+        manifest_path=FIXTURE,
+        backend=backend,
+        registry="auto",
+    )
+
+    assert report.status == "pass"
+    assert report.facts["base_reference"] == swr.base.reference
+    assert report.facts["torch_reference"] == swr.torch.reference
+
+
+def test_platform_uses_canonical_parent_when_swr_is_absent() -> None:
+    release = load_stable_release(FIXTURE)
+    backend = FakeDoctorBackend(release)
+
+    report = doctor_platform(
+        manifest_path=FIXTURE,
+        backend=backend,
+        registry="auto",
+    )
+
+    assert report.status == "pass"
+    assert report.facts["torch_reference"] == release.torch.reference
 
 
 def test_doctor_release_descriptor_lookup_uses_anonymous_registry(
