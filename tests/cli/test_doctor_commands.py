@@ -11,6 +11,7 @@ from amd_ai.doctor.models import (
     DiagnosticDisposition,
     DoctorReport,
 )
+from amd_ai.installer.registry import RegistryPolicyError
 
 
 def test_doctor_without_project_checks_platform(monkeypatch, capsys) -> None:
@@ -112,6 +113,29 @@ def test_doctor_forwards_explicit_registry(monkeypatch) -> None:
     assert captured["registry"] == "ghcr"
 
 
+def test_doctor_forwards_explicit_state_path(monkeypatch, tmp_path) -> None:
+    captured = {}
+    state_path = tmp_path / "custom-state.json"
+
+    def fake_doctor(project, manifest, *, registry, state_path):
+        captured["state_path"] = state_path
+        return passing_report()
+
+    monkeypatch.setattr(cli, "run_doctor", fake_doctor)
+
+    code = cli.main(
+        [
+            "doctor",
+            "/srv/demo",
+            "--state-path",
+            str(state_path),
+        ]
+    )
+
+    assert code == 0
+    assert captured["state_path"] == state_path
+
+
 def test_repair_forwards_registry_to_doctor_and_executor(
     monkeypatch,
 ) -> None:
@@ -142,6 +166,48 @@ def test_repair_forwards_registry_to_doctor_and_executor(
         "doctor_registry": "swr",
         "executor_registry": "swr",
     }
+
+
+def test_doctor_registry_policy_error_returns_two(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "run_doctor",
+        lambda project, manifest, *, registry: (_ for _ in ()).throw(
+            RegistryPolicyError("custom release has no SWR mapping")
+        ),
+    )
+
+    code = cli.main(["doctor", "--registry", "swr"])
+
+    assert code == 2
+    assert "no SWR mapping" in capsys.readouterr().err
+
+
+def test_repair_registry_error_is_sanitized_and_bounded(
+    monkeypatch,
+    capsys,
+) -> None:
+    secret = "private-token-value"
+    monkeypatch.setattr(
+        cli,
+        "run_doctor",
+        lambda project, manifest, *, registry: (_ for _ in ()).throw(
+            RegistryPolicyError(
+                f"Authorization: Bearer {secret}\n" + "x" * 10_000
+            )
+        ),
+    )
+
+    code = cli.main(["repair", "/srv/demo"])
+
+    error = capsys.readouterr().err
+    assert code == 2
+    assert secret not in error
+    assert "Authorization: Bearer <redacted>" in error
+    assert len(error.encode("utf-8")) <= 4200
 
 
 def test_noninteractive_repair_requires_yes() -> None:

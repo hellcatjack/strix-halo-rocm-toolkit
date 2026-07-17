@@ -74,7 +74,9 @@ from amd_ai.installer.prompts import (
 from amd_ai.installer.progress import (
     InstallerProgress,
     ProgressMode,
+    safe_error_message,
 )
+from amd_ai.installer.registry import RegistryPolicyError
 from amd_ai.installer.release import (
     ReleaseError,
     load_stable_release,
@@ -281,6 +283,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "swr", "ghcr"),
         default="auto",
     )
+    doctor.add_argument("--state-path", type=Path)
     doctor.add_argument("--json", dest="json_path", type=Path)
 
     repair = subparsers.add_parser("repair")
@@ -295,6 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "swr", "ghcr"),
         default="auto",
     )
+    repair.add_argument("--state-path", type=Path)
     repair.add_argument("--yes", action="store_true")
     repair.add_argument("--json", dest="json_path", type=Path)
     return parser
@@ -374,10 +378,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _gpu_release(args)
     if args.command == "doctor":
         try:
+            doctor_kwargs: dict[str, object] = {
+                "registry": args.registry,
+            }
+            if args.state_path is not None:
+                doctor_kwargs["state_path"] = args.state_path
             report = run_doctor(
                 args.project,
                 args.manifest,
-                registry=args.registry,
+                **doctor_kwargs,
             )
         except (
             BuildError,
@@ -385,11 +394,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             DoctorModelError,
             OSError,
             PublishError,
+            RegistryPolicyError,
             ReleaseError,
             RuntimePolicyError,
             TransactionError,
         ) as error:
-            print(f"doctor: {error}", file=sys.stderr)
+            print(f"doctor: {_safe_cli_error(error)}", file=sys.stderr)
             return 2
         for diagnostic in report.diagnostics:
             if diagnostic.disposition != DiagnosticDisposition.PASS:
@@ -418,10 +428,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             ReleaseError,
             RepairExecutionError,
             RepairPlanningError,
+            RegistryPolicyError,
             RuntimePolicyError,
             TransactionError,
         ) as error:
-            print(f"repair: {error}", file=sys.stderr)
+            print(f"repair: {_safe_cli_error(error)}", file=sys.stderr)
             return 2
     if args.command == "release":
         try:
@@ -630,10 +641,15 @@ def _installer_source_revision(source_root: Path) -> str:
 
 
 def _repair_command(args: argparse.Namespace) -> int:
+    doctor_kwargs: dict[str, object] = {
+        "registry": args.registry,
+    }
+    if args.state_path is not None:
+        doctor_kwargs["state_path"] = args.state_path
     report = run_doctor(
         args.project,
         args.manifest,
-        registry=args.registry,
+        **doctor_kwargs,
     )
     if args.json_path is not None:
         pre_path, _ = _repair_report_paths(args.json_path)
@@ -674,6 +690,10 @@ def _repair_report_paths(path: Path) -> tuple[Path, Path]:
         path.with_name(f"{stem}.pre{suffix}"),
         path.with_name(f"{stem}.post{suffix}"),
     )
+
+
+def _safe_cli_error(error: BaseException) -> str:
+    return safe_error_message(error)
 
 
 def _write_doctor_json(path: Path, payload: dict[str, object]) -> None:

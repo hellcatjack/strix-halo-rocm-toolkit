@@ -353,14 +353,104 @@ def test_image_disk_estimate_receives_selected_registry(
     ).run()
 
     assert result.exit_code == 0
-    assert actions.image_estimate_kwargs == [
-        {
-            "release": actions.release,
-            "image_source": "pull",
-            "registry": "swr",
-        }
-    ]
+    assert len(actions.image_estimate_kwargs) == 1
+    estimate_kwargs = actions.image_estimate_kwargs[0]
+    assert estimate_kwargs["release"] == actions.release
+    assert estimate_kwargs["image_source"] == "pull"
+    assert estimate_kwargs["registry"] == "swr"
+    assert estimate_kwargs["registry_policy"].default_order == ("swr", "ghcr")
     assert "来源=公开镜像（仅华为 SWR）" in stdout.getvalue()
+
+
+def test_registry_policy_is_loaded_from_source_root(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "toolkit"
+    policy_path = source_root / "profiles/releases/registries.json"
+    policy_path.parent.mkdir(parents=True)
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "default_order": ["swr", "ghcr"],
+                "sources": [
+                    {
+                        "id": "swr",
+                        "label": "中国测试镜像",
+                        "repositories": {
+                            "base": "mirror.example.cn/team/rocm-python",
+                            "torch": "mirror.example.cn/team/rocm-pytorch",
+                        },
+                    },
+                    {
+                        "id": "ghcr",
+                        "label": "GHCR",
+                        "repositories": {
+                            "base": (
+                                "ghcr.io/hellcatjack/"
+                                "strix-halo-rocm-python"
+                            ),
+                            "torch": (
+                                "ghcr.io/hellcatjack/"
+                                "strix-halo-rocm-pytorch"
+                            ),
+                        },
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    actions = FakeInstallerActions.healthy()
+    progress, stdout, _ = workflow_progress(tmp_path)
+    options = replace(
+        workflow_options(tmp_path),
+        source_root=source_root,
+    )
+
+    result = installer_workflow(
+        tmp_path,
+        actions=actions,
+        options=options,
+        progress=progress,
+    ).run()
+
+    assert result.exit_code == 0
+    assert actions.image_calls[:2] == [
+            (
+                "pull",
+                "mirror.example.cn/team/rocm-python@sha256:" + "d" * 64,
+            ),
+        (
+            "pull",
+            "mirror.example.cn/team/rocm-pytorch@sha256:" + "7" * 64,
+        ),
+    ]
+    policy = actions.image_estimate_kwargs[0]["registry_policy"]
+    assert policy.sources["swr"].label == "中国测试镜像"
+    assert "镜像仓库=auto（中国测试镜像 优先，GHCR 回退）" in stdout.getvalue()
+
+
+def test_image_disk_report_uses_actual_estimate_source(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+    actions.image_estimate = replace(
+        actions.image_estimate,
+        source_label="GHCR",
+    )
+    progress, stdout, _ = workflow_progress(tmp_path)
+
+    result = installer_workflow(
+        tmp_path,
+        actions=actions,
+        options=replace(workflow_options(tmp_path), registry="auto"),
+        progress=progress,
+    ).run()
+
+    assert result.exit_code == 0
+    assert "来源=公开镜像（GHCR）" in stdout.getvalue()
+    assert "来源=公开镜像（华为 SWR 优先，GHCR 回退）" not in stdout.getvalue()
 
 
 def test_disk_shortage_reports_start_detail_then_failure(
@@ -1014,6 +1104,31 @@ def test_image_disk_shortage_blocks_before_pull(tmp_path: Path) -> None:
     assert result.exit_code == 2
     assert "required_bytes=" in result.message
     assert "pull_release" not in actions.calls
+
+
+def test_uncertain_image_disk_estimate_does_not_block_pull(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+    progress, _, stderr = workflow_progress(tmp_path)
+    actions.image_estimate = replace(
+        actions.image_estimate,
+        payload_bytes=32 * 1024**3,
+        available_bytes=36 * 1024**3,
+        source_label="镜像清单不可用，保守估算",
+        blocking=False,
+    )
+
+    result = installer_workflow(
+        tmp_path,
+        actions=actions,
+        progress=progress,
+    ).run()
+
+    assert result.exit_code == 0
+    assert "pull_release" in actions.calls
+    assert "WARN" in stderr.getvalue()
+    assert "不作为硬门禁" in stderr.getvalue()
 
 
 def test_project_disk_shortage_blocks_before_project_mutation(
@@ -1979,6 +2094,32 @@ def test_noninteractive_pull_failure_never_implicitly_builds(
 
     assert result.exit_code == 2
     assert "build_local_images" not in actions.calls
+
+
+def test_noninteractive_registry_failure_is_sanitized_and_bounded(
+    tmp_path: Path,
+) -> None:
+    actions = FakeInstallerActions.healthy()
+    secret = "private-token-value"
+    actions.pull_error = ReleaseAcquisitionError(
+        f"Authorization: Bearer {secret}\n" + "x" * 10_000
+    )
+
+    result = installer_workflow(
+        tmp_path,
+        actions=actions,
+        options=noninteractive_container_options(
+            tmp_path,
+            image_source="pull",
+        ),
+    ).run()
+
+    assert result.exit_code == 2
+    assert secret not in result.message
+    assert "<redacted>" in result.message
+    assert "swr:" in result.message
+    assert "ghcr:" in result.message
+    assert len(result.message.encode("utf-8")) <= 4200
 
 
 def test_pulled_identity_mismatch_never_offers_local_build(

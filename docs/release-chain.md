@@ -27,7 +27,8 @@ swr.cn-east-3.myhuaweicloud.com/hellcat-home/strix-halo-rocm-pytorch@sha256:dc0b
 
 默认 `--registry auto` 先匿名访问 SWR，仅在获取失败时回退 GHCR。
 `--registry swr` 和 `--registry ghcr` 可以强制单一来源。用户不需要任何
-registry 凭据。manifest 查询、连接或仓库不可用属于 acquisition failure，
+registry 凭据；这里的匿名访问即 Docker registry 的 `anonymous` pull。
+manifest 查询、连接或仓库不可用属于 acquisition failure，
 允许按策略回退；digest、config ID、RepoDigest、label 或内嵌锁不一致属于
 identity failure，必须立即阻断，不能切换副本掩盖问题。
 

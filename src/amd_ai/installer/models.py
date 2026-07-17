@@ -172,6 +172,10 @@ class InstallOptions:
             raise InstallerModelError(
                 "registry must be auto, swr, or ghcr"
             )
+        if self.image_source == "build" and self.registry != "auto":
+            raise InstallerModelError(
+                "local image build does not use a registry"
+            )
         if self.target_user is not None and (
             USER_PATTERN.fullmatch(self.target_user) is None
         ):
@@ -395,6 +399,8 @@ class DiskSpaceEstimate:
     location: Path
     payload_bytes: int
     available_bytes: int
+    source_label: str | None = None
+    blocking: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "location", _absolute_path(self.location))
@@ -404,6 +410,18 @@ class DiskSpaceEstimate:
                 raise InstallerModelError(
                     f"disk estimate {name} must be a nonnegative integer"
                 )
+        if self.source_label is not None and (
+            not isinstance(self.source_label, str)
+            or not self.source_label.strip()
+            or not self.source_label.isprintable()
+        ):
+            raise InstallerModelError(
+                "disk estimate source_label must be printable text"
+            )
+        if type(self.blocking) is not bool:
+            raise InstallerModelError(
+                "disk estimate blocking must be a boolean"
+            )
 
 
 def _absolute_path(path: Path) -> Path:

@@ -38,10 +38,16 @@ from amd_ai.installer.progress import (
     ProgressOutcome,
     ProgressReporter,
     PromptProgressAdapter,
+    safe_error_message,
     SessionPlan,
     StagePosition,
 )
-from amd_ai.installer.registry import registry_candidates
+from amd_ai.installer.registry import (
+    RegistryPolicy,
+    load_registry_policy,
+    registry_candidates,
+    registry_plan_label,
+)
 from amd_ai.installer.release import (
     ReleaseAcquisitionError,
     ReleaseIdentityError,
@@ -132,6 +138,7 @@ class InstallerWorkflow:
             )
         )
         self._release: StableRelease | None = None
+        self._registry_policy: RegistryPolicy | None = None
         self._kernel_plan: HostPlanResult | None = None
         self._host_plan: HostPlanResult | None = None
         self._boot_id_reader = boot_id_reader
@@ -145,6 +152,13 @@ class InstallerWorkflow:
             assert self.options.project_dir is not None
             self.progress.open_session(self.options.project_dir)
             self.options.validate()
+            assert self.options.source_root is not None
+            self._registry_policy = load_registry_policy(
+                self.options.source_root
+                / "profiles"
+                / "releases"
+                / "registries.json"
+            )
             if REVISION_PATTERN.fullmatch(
                 self.installer_source_revision
             ) is None:
@@ -287,6 +301,10 @@ class InstallerWorkflow:
                 release_id=state.release_id,
                 stages=order,
                 first_incomplete=first_incomplete,
+                registry_label=registry_plan_label(
+                    self.options.registry,
+                    policy=self._resolved_registry_policy(),
+                ),
             )
         )
 
@@ -664,7 +682,11 @@ class InstallerWorkflow:
         release: StableRelease,
     ) -> VerifiedReleaseImages:
         failures: list[str] = []
-        candidates = registry_candidates(release, self.options.registry)
+        candidates = registry_candidates(
+            release,
+            self.options.registry,
+            policy=self._resolved_registry_policy(),
+        )
         for index, candidate in enumerate(candidates):
             self.progress.detail(
                 f"当前仓库={candidate.label}，来源=公开匿名镜像"
@@ -672,13 +694,14 @@ class InstallerWorkflow:
             try:
                 verified = self.actions.pull_release(candidate.release)
             except ReleaseAcquisitionError as error:
-                failures.append(f"{candidate.label}: {error}")
+                safe_error = safe_error_message(error, max_bytes=1024)
+                failures.append(f"{candidate.name}: {safe_error}")
                 if index + 1 < len(candidates):
                     next_candidate = candidates[index + 1]
                     self._status(
                         "WARN",
                         f"{candidate.label} 获取失败，正在回退 "
-                        f"{next_candidate.label}：{error}",
+                        f"{next_candidate.label}：{safe_error}",
                     )
                 continue
             if not isinstance(verified, VerifiedReleaseImages):
@@ -692,7 +715,9 @@ class InstallerWorkflow:
             )
             return verified
         raise ReleaseAcquisitionError(
-            "all configured registries failed: " + "; ".join(failures)
+            safe_error_message(
+                "all configured registries failed: " + "; ".join(failures)
+            )
         )
 
     def _stage_inputs(
@@ -1273,6 +1298,7 @@ class InstallerWorkflow:
             release=release,
             image_source=image_source,
             registry=self.options.registry,
+            registry_policy=self._resolved_registry_policy(),
         )
         operation = (
             "image build" if image_source == "build" else "image acquisition"
@@ -1283,6 +1309,8 @@ class InstallerWorkflow:
             source=(
                 "本地源码构建"
                 if image_source == "build"
+                else f"公开镜像（{estimate.source_label}）"
+                if estimate.source_label is not None
                 else {
                     "auto": "公开镜像（华为 SWR 优先，GHCR 回退）",
                     "swr": "公开镜像（仅华为 SWR）",
@@ -1312,6 +1340,12 @@ class InstallerWorkflow:
             f"available_bytes={estimate.available_bytes} "
             f"location={estimate.location} source={requirement.source}"
         )
+        if not estimate.blocking:
+            self._status(
+                "WARN",
+                "远端镜像清单空间估算不可确认；当前数值仅供参考，"
+                "不作为硬门禁，将继续由 Docker 尝试获取",
+            )
 
     def _report_release_identity(self, output: object) -> None:
         if not isinstance(output, StableRelease):
@@ -1469,6 +1503,11 @@ class InstallerWorkflow:
     def _status(self, prefix: str, message: str) -> None:
         self.progress.status(prefix, message)
 
+    def _resolved_registry_policy(self) -> RegistryPolicy:
+        if self._registry_policy is None:
+            raise WorkflowError("registry policy is unavailable")
+        return self._registry_policy
+
 
 def _validate_disk_estimate(
     estimate: object, operation: str
@@ -1506,6 +1545,8 @@ def _report_finding_message(report: Report) -> str:
 
 def _require_disk_space(requirement: DiskRequirement) -> str | None:
     estimate = requirement.estimate
+    if not estimate.blocking:
+        return None
     if estimate.available_bytes > requirement.required_bytes:
         return None
     return (

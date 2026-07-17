@@ -849,6 +849,10 @@ strix-halo-rocm doctor "$HOME/ai-projects/video-lab" \
 strix-halo-rocm repair "$HOME/ai-projects/video-lab"
 ```
 
+若安装时使用了显式 `--state-path "$STATE"`，项目级 `doctor` 和 `repair`
+也应提供同一个参数，以便在父镜像丢失时优先恢复项目原先验证成功的 SWR
+或 GHCR exact reference。默认 per-project 状态无需额外参数。
+
 命令先显示只包含 exact image ID、exact registry digest 和单个项目 generation 的计划。交互模式要求精确输入 `REPAIR`；自动化必须显式使用：
 
 ```bash

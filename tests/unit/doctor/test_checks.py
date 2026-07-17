@@ -12,8 +12,16 @@ from amd_ai.doctor.checks import (
     doctor_platform,
     doctor_project,
 )
+from amd_ai.doctor.repair import plan_repair
+from amd_ai.installer.models import (
+    InstallMode,
+    InstallStage,
+    InstallState,
+    STATE_SCHEMA_VERSION,
+)
 from amd_ai.installer.registry import registry_candidates
 from amd_ai.installer.release import load_stable_release
+from amd_ai.installer.state import project_state_path, save_state
 from amd_ai.overlay.models import (
     OverlayPaths,
     ProtectedComponent,
@@ -115,6 +123,78 @@ def test_platform_uses_canonical_parent_when_swr_is_absent() -> None:
 
     assert report.status == "pass"
     assert report.facts["torch_reference"] == release.torch.reference
+
+
+@pytest.mark.parametrize("explicit_state", (False, True))
+def test_project_repair_prefers_recorded_ghcr_reference_when_parents_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit_state: bool,
+) -> None:
+    release = load_stable_release(FIXTURE)
+    project = (tmp_path / "demo").resolve()
+    project.mkdir()
+    backend = FakeDoctorBackend(release)
+    del backend.images[release.base.reference]
+    del backend.images[release.torch.reference]
+    config = replace(
+        project_config(project),
+        base_image=release.torch.config_digest,
+        base_manifest_digest=release.torch.manifest_digest,
+        base_digest=release.torch.config_digest,
+    )
+    monkeypatch.setattr(checks, "load_project_config", lambda path: config)
+    paths = OverlayPaths.for_project(project)
+    initialize_overlay(
+        paths,
+        profile=_profile(release.torch.config_digest),
+        transaction_id="20260710T120000Z-a1b2c3d4",
+    )
+    legacy_state = tmp_path / "state-root/install-state.json"
+    monkeypatch.setattr(checks, "default_state_path", lambda: legacy_state)
+    selected_state = (
+        tmp_path / "custom-state.json"
+        if explicit_state
+        else project_state_path(project, legacy_state)
+    )
+    save_state(
+        selected_state,
+        InstallState(
+            schema_version=STATE_SCHEMA_VERSION,
+            installer_version="0.3.2",
+            mode=InstallMode.CONTAINER,
+            target_user="developer",
+            release_id=release.release_id,
+            source_revision=release.source_revision,
+            base_image_reference=release.base.reference,
+            base_manifest_digest=release.base.manifest_digest,
+            torch_image_reference=release.torch.reference,
+            torch_manifest_digest=release.torch.manifest_digest,
+            project_path=str(project),
+            current_stage=InstallStage.COMPLETE,
+            completed_stage_input_digests={},
+            reboot_boot_id=None,
+            created_at="2026-07-16T12:00:00Z",
+            updated_at="2026-07-16T12:01:00Z",
+            installer_source_revision="d" * 40,
+            source_root=str(tmp_path.resolve()),
+            base_config_digest=release.base.config_digest,
+            torch_config_digest=release.torch.config_digest,
+        ),
+    )
+
+    doctor_kwargs = {
+        "backend": backend,
+        "registry": "auto",
+    }
+    if explicit_state:
+        doctor_kwargs["state_path"] = selected_state
+    report = checks.run_doctor(project, FIXTURE, **doctor_kwargs)
+    plan = plan_repair(report)
+
+    assert report.facts["torch_reference"] == release.torch.reference
+    assert plan.actions[0].kind == "pull-parent"
+    assert plan.actions[0].exact_target == release.torch.reference
 
 
 def test_doctor_release_descriptor_lookup_uses_anonymous_registry(

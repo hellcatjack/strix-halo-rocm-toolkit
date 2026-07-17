@@ -335,6 +335,7 @@ def test_image_disk_estimate_uses_missing_remote_layer_bytes(
     assert estimate.location == Path("/var/lib/docker")
     assert estimate.payload_bytes == 12 * 1024**3
     assert estimate.available_bytes == 100 * 1024**3
+    assert estimate.source_label == "华为 SWR"
 
 
 def test_image_disk_estimate_falls_back_from_swr_manifest_lookup(
@@ -364,6 +365,7 @@ def test_image_disk_estimate_falls_back_from_swr_manifest_lookup(
     )
 
     assert estimate.payload_bytes == 12 * 1024**3
+    assert estimate.source_label == "GHCR"
     assert calls == [
         (
             "swr.cn-east-3.myhuaweicloud.com/hellcat-home/"
@@ -371,6 +373,34 @@ def test_image_disk_estimate_falls_back_from_swr_manifest_lookup(
         ),
         "ghcr.io/hellcatjack/strix-halo-rocm-python",
     ]
+
+
+def test_image_disk_estimate_uses_conservative_size_when_all_manifests_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = load_stable_release(RELEASE_FIXTURE)
+    monkeypatch.setattr(
+        actions,
+        "_docker_root_and_available",
+        lambda runner, prefix: (Path("/var/lib/docker"), 100 * 1024**3),
+    )
+    monkeypatch.setattr(
+        actions,
+        "_missing_release_layer_bytes",
+        lambda release, runner, prefix: (_ for _ in ()).throw(
+            ReleaseAcquisitionError("Authorization: Bearer private-token")
+        ),
+    )
+
+    estimate = ProductionInstallerActions().image_disk_estimate(
+        release=release,
+        image_source="pull",
+        registry="auto",
+    )
+
+    assert estimate.payload_bytes == actions.LOCAL_BUILD_ESTIMATE_BYTES
+    assert estimate.source_label == "镜像清单不可用，保守估算"
+    assert estimate.blocking is False
 
 
 def test_image_disk_estimate_does_not_hide_invalid_manifest(

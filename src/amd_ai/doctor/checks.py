@@ -17,12 +17,24 @@ from amd_ai.doctor.models import (
 )
 from amd_ai.image.build import Docker
 from amd_ai.image.publish import AnonymousDockerRegistry, PublishError
-from amd_ai.installer.models import ReleaseImage, StableRelease
-from amd_ai.installer.registry import registry_candidates
+from amd_ai.installer.models import (
+    ReleaseImage,
+    StableRelease,
+    default_state_path,
+)
+from amd_ai.installer.registry import (
+    RegistryCandidate,
+    registry_candidates,
+)
 from amd_ai.installer.release import (
     ReleaseError,
     load_stable_release,
     verify_release_image,
+)
+from amd_ai.installer.state import (
+    InstallerStateError,
+    load_state_readonly,
+    project_state_path,
 )
 from amd_ai.overlay.lock import lock_digest, parse_lock, validate_lock_artifacts
 from amd_ai.overlay.models import OverlayPaths
@@ -93,6 +105,7 @@ def doctor_platform(
     manifest_path: Path,
     backend: DoctorBackend,
     registry: str = "auto",
+    preferred_references: Mapping[str, str] | None = None,
 ) -> DoctorReport:
     diagnostics: list[Diagnostic] = []
     facts: dict[str, object] = {"manifest": str(manifest_path)}
@@ -120,10 +133,19 @@ def doctor_platform(
     selected_images: dict[str, tuple[StableRelease, ReleaseImage]] = {}
     torch_static_valid = True
     for kind in ("base", "torch"):
-        selected_release = candidates[0].release
+        kind_candidates = _prefer_registry_reference(
+            candidates,
+            kind=kind,
+            preferred_reference=(
+                None
+                if preferred_references is None
+                else preferred_references.get(kind)
+            ),
+        )
+        selected_release = kind_candidates[0].release
         selected_image = getattr(selected_release, kind)
         inspection = None
-        for candidate in candidates:
+        for candidate in kind_candidates:
             candidate_image = getattr(candidate.release, kind)
             observed = backend.inspect_image(candidate_image.reference)
             if observed is not None:
@@ -244,11 +266,13 @@ def doctor_project(
     manifest_path: Path,
     backend: DoctorBackend,
     registry: str = "auto",
+    preferred_references: Mapping[str, str] | None = None,
 ) -> DoctorReport:
     platform = doctor_platform(
         manifest_path=manifest_path,
         backend=backend,
         registry=registry,
+        preferred_references=preferred_references,
     )
     diagnostics = list(platform.diagnostics)
     facts = dict(platform.facts)
@@ -354,6 +378,7 @@ def run_doctor(
     *,
     backend: DoctorBackend | None = None,
     registry: str = "auto",
+    state_path: Path | None = None,
 ) -> DoctorReport:
     selected = backend or SubprocessDoctorBackend.detect()
     if project is None:
@@ -363,12 +388,88 @@ def run_doctor(
             registry=registry,
         )
     config_path = project if project.name == "amd-ai-project.toml" else project / "amd-ai-project.toml"
+    preferred_references = _recorded_project_references(
+        config_path.parent,
+        manifest,
+        state_path=state_path,
+    )
     return doctor_project(
         config_path=config_path,
         manifest_path=manifest,
         backend=selected,
         registry=registry,
+        preferred_references=preferred_references,
     )
+
+
+def _prefer_registry_reference(
+    candidates: tuple[RegistryCandidate, ...],
+    *,
+    kind: str,
+    preferred_reference: str | None,
+) -> tuple[RegistryCandidate, ...]:
+    if preferred_reference is None:
+        return candidates
+    preferred = tuple(
+        candidate
+        for candidate in candidates
+        if getattr(candidate.release, kind).reference == preferred_reference
+    )
+    if not preferred:
+        return candidates
+    return preferred + tuple(
+        candidate
+        for candidate in candidates
+        if getattr(candidate.release, kind).reference != preferred_reference
+    )
+
+
+def _recorded_project_references(
+    project: Path,
+    manifest: Path,
+    *,
+    state_path: Path | None = None,
+) -> Mapping[str, str]:
+    try:
+        release = load_stable_release(manifest)
+    except (OSError, ReleaseError):
+        return MappingProxyType({})
+    legacy = default_state_path()
+    paths = (
+        (Path(state_path).resolve(strict=False),)
+        if state_path is not None
+        else (project_state_path(project, legacy), legacy)
+    )
+    for path in paths:
+        try:
+            state = load_state_readonly(path)
+        except InstallerStateError:
+            continue
+        if (
+            state is None
+            or state.project_path != str(project.resolve())
+            or state.release_id != release.release_id
+            or state.source_revision != release.source_revision
+            or state.base_manifest_digest != release.base.manifest_digest
+            or state.base_config_digest != release.base.config_digest
+            or state.torch_manifest_digest != release.torch.manifest_digest
+            or state.torch_config_digest != release.torch.config_digest
+        ):
+            continue
+        for candidate in registry_candidates(release):
+            if (
+                state.base_image_reference
+                == candidate.release.base.reference
+                and state.torch_image_reference
+                == candidate.release.torch.reference
+            ):
+                return MappingProxyType(
+                    {
+                        "base": candidate.release.base.reference,
+                        "torch": candidate.release.torch.reference,
+                    }
+                )
+    return MappingProxyType({})
 
 
 def _check_overlay(

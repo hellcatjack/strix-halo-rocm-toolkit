@@ -17,11 +17,13 @@ from amd_ai.installer.models import (
 from amd_ai.installer.state import (
     CorruptInstallState,
     InstallAlreadyRunning,
+    InstallerStateError,
     ResumeInputChanged,
     boot_id_changed,
     installer_coordination_lock,
     install_lock,
     load_state,
+    load_state_readonly,
     project_identity_key,
     project_state_path,
     read_boot_id,
@@ -466,6 +468,19 @@ def test_corrupt_state_is_preserved_before_replanning(tmp_path: Path) -> None:
 
     assert error.value.preserved_path.read_text(encoding="utf-8") == "not-json"
     assert not path.exists()
+
+
+def test_readonly_state_load_does_not_rename_corrupt_state(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.json"
+    path.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(InstallerStateError, match="invalid install state"):
+        load_state_readonly(path)
+
+    assert path.read_text(encoding="utf-8") == "{not-json"
+    assert list(tmp_path.glob("state.corrupt.*.json")) == []
 
 
 def test_unknown_or_sensitive_state_key_is_preserved_as_corrupt(

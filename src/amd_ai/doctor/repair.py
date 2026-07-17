@@ -13,6 +13,7 @@ from amd_ai.doctor.models import (
 )
 from amd_ai.installer.actions import AnonymousReleaseRegistry
 from amd_ai.installer.models import StableRelease
+from amd_ai.installer.progress import safe_error_message
 from amd_ai.installer.registry import (
     registry_candidates,
     trusted_image_references,
@@ -46,7 +47,11 @@ class RepairExecutionError(RuntimeError):
 
 
 class RepairExecutor(Protocol):
-    def pull_and_verify(self, release: StableRelease) -> None:
+    def pull_and_verify(
+        self,
+        release: StableRelease,
+        preferred_reference: str,
+    ) -> None:
         pass
 
     def remove_image_id(self, image_id: str) -> None:
@@ -76,21 +81,45 @@ class SystemRepairExecutor:
         self.registry = AnonymousReleaseRegistry(self.docker.prefix)
         self.runner = SubprocessRunner()
 
-    def pull_and_verify(self, release: StableRelease) -> None:
+    def pull_and_verify(
+        self,
+        release: StableRelease,
+        preferred_reference: str,
+    ) -> None:
         if release != self.release:
             raise RepairExecutionError("repair release differs from executor manifest")
+        candidates = list(
+            registry_candidates(
+                release,
+                self.registry_choice,
+            )
+        )
+        preferred = [
+            candidate
+            for candidate in candidates
+            if candidate.release.torch.reference == preferred_reference
+        ]
+        if not preferred:
+            raise RepairExecutionError(
+                "preferred parent is unavailable under the selected registry policy"
+            )
+        candidates = preferred + [
+            candidate
+            for candidate in candidates
+            if candidate.release.torch.reference != preferred_reference
+        ]
         failures: list[str] = []
-        for candidate in registry_candidates(
-            release,
-            self.registry_choice,
-        ):
+        for candidate in candidates:
             try:
                 verified = pull_and_verify_release(
                     candidate.release,
                     docker=self.registry,
                 )
             except ReleaseAcquisitionError as error:
-                failures.append(f"{candidate.label}: {error}")
+                failures.append(
+                    f"{candidate.name}: "
+                    f"{safe_error_message(error, max_bytes=1024)}"
+                )
                 continue
             if not isinstance(verified, VerifiedReleaseImages):
                 raise RepairExecutionError(
@@ -106,7 +135,9 @@ class SystemRepairExecutor:
             )
             return
         raise ReleaseAcquisitionError(
-            "all configured registries failed: " + "; ".join(failures)
+            safe_error_message(
+                "all configured registries failed: " + "; ".join(failures)
+            )
         )
 
     def remove_image_id(self, image_id: str) -> None:
@@ -347,7 +378,7 @@ def execute_repair(
                 raise RepairExecutionError(
                     "parent pull action is not a trusted release replica"
                 )
-            executor.pull_and_verify(plan.release)
+            executor.pull_and_verify(plan.release, parent.exact_target)
 
         removal = actions.get("remove-project-image")
         build = actions.get("build-project-image")

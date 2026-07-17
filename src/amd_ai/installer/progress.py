@@ -149,6 +149,7 @@ class SessionPlan:
     release_id: str | None
     stages: tuple[InstallStage, ...]
     first_incomplete: InstallStage | None
+    registry_label: str | None = None
 
 
 @dataclass
@@ -245,6 +246,25 @@ def sanitize_output(
         r"\g<label><redacted>", rendered
     )
     return CREDENTIAL_FLAG_PATTERN.sub(r"\g<flag><redacted>", rendered)
+
+
+def safe_error_message(
+    error: object,
+    *,
+    max_bytes: int = 4096,
+) -> str:
+    rendered = " ".join(sanitize_output(str(error)).splitlines())
+    encoded = rendered.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return rendered
+    suffix = b"..."
+    return (
+        encoded[: max_bytes - len(suffix)].decode(
+            "utf-8",
+            errors="ignore",
+        )
+        + suffix.decode("ascii")
+    )
 
 
 class SessionLog:
@@ -416,7 +436,7 @@ class InstallerProgress:
         self._emit(
             "PLAN",
             f"镜像来源={plan.image_source}，"
-            f"镜像仓库={registry_plan_label(plan.registry)}，"
+            f"镜像仓库={plan.registry_label or registry_plan_label(plan.registry)}，"
             f"stable release={release_id}",
         )
         if plan.first_incomplete is None:

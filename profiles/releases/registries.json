@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "default_order": [
+    "swr",
+    "ghcr"
+  ],
+  "sources": [
+    {
+      "id": "swr",
+      "label": "华为 SWR",
+      "repositories": {
+        "base": "swr.cn-east-3.myhuaweicloud.com/hellcat-home/strix-halo-rocm-python",
+        "torch": "swr.cn-east-3.myhuaweicloud.com/hellcat-home/strix-halo-rocm-pytorch"
+      }
+    },
+    {
+      "id": "ghcr",
+      "label": "GHCR",
+      "repositories": {
+        "base": "ghcr.io/hellcatjack/strix-halo-rocm-python",
+        "torch": "ghcr.io/hellcatjack/strix-halo-rocm-pytorch"
+      }
+    }
+  ]
+}

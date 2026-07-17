@@ -7,6 +7,15 @@ strix-halo-rocm repair PROJECT
 
 Doctor 是只读检查。Repair 先生成只含精确目标的计划；交互模式要求输入 `REPAIR`，自动化必须显式使用 `--yes`。
 
+默认项目状态会按项目路径自动发现。若安装时使用了显式
+`--state-path PATH`，诊断和修复时必须原样提供该路径，才能优先恢复项目
+此前验证成功的 SWR 或 GHCR exact reference：
+
+```bash
+strix-halo-rocm doctor "$PROJECT" --state-path "$STATE"
+strix-halo-rocm repair "$PROJECT" --state-path "$STATE"
+```
+
 ## 稳定诊断码
 
 | 代码 | 典型处置 |

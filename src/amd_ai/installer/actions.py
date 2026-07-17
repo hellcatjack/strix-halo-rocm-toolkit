@@ -46,7 +46,7 @@ from amd_ai.installer.progress import (
     StderrCommandObserver,
     sanitize_output,
 )
-from amd_ai.installer.registry import registry_candidates
+from amd_ai.installer.registry import RegistryPolicy, registry_candidates
 from amd_ai.installer.release import (
     ReleaseAcquisitionError,
     ReleaseDocker,
@@ -660,35 +660,45 @@ class ProductionInstallerActions:
         release: StableRelease,
         image_source: str,
         registry: str = "auto",
+        registry_policy: RegistryPolicy | None = None,
     ) -> DiskSpaceEstimate:
         location, available = _docker_root_and_available(
             self.runner, self.docker_prefix
         )
         if image_source == "pull":
-            failures: list[str] = []
-            for candidate in registry_candidates(release, registry):
+            source_label: str | None = None
+            blocking = True
+            for candidate in registry_candidates(
+                release,
+                registry,
+                policy=registry_policy,
+            ):
                 try:
                     payload = _missing_release_layer_bytes(
                         candidate.release,
                         self.runner,
                         self.docker_prefix,
                     )
+                    source_label = candidate.label
                     break
-                except ReleaseAcquisitionError as error:
-                    failures.append(f"{candidate.label}: {error}")
+                except ReleaseAcquisitionError:
+                    continue
             else:
-                raise ActionError(
-                    "cannot estimate any configured registry: "
-                    + "; ".join(failures)
-                )
+                payload = LOCAL_BUILD_ESTIMATE_BYTES
+                source_label = "镜像清单不可用，保守估算"
+                blocking = False
         elif image_source == "build":
             payload = LOCAL_BUILD_ESTIMATE_BYTES
+            source_label = "本地源码构建"
+            blocking = True
         else:
             raise ActionError("image source must be pull or build")
         return DiskSpaceEstimate(
             location=location,
             payload_bytes=payload,
             available_bytes=available,
+            source_label=source_label,
+            blocking=blocking,
         )
 
     def project_disk_estimate(

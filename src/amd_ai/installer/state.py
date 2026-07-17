@@ -177,6 +177,24 @@ def load_state(path: Path) -> InstallState | None:
         _raise_corrupt(path, f"invalid install state: {error}")
 
 
+def load_state_readonly(path: Path) -> InstallState | None:
+    path = Path(path)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError) as error:
+        raise InstallerStateError(
+            f"cannot read install state: {error}"
+        ) from error
+    try:
+        return _decode_state(raw)
+    except (KeyError, TypeError, ValueError, InstallerModelError) as error:
+        raise InstallerStateError(
+            f"invalid install state: {error}"
+        ) from error
+
+
 def project_state_path(project_dir: Path, legacy_path: Path) -> Path:
     legacy = Path(legacy_path).resolve(strict=False)
     return (

@@ -88,6 +88,20 @@ def test_unknown_registry_choice_is_rejected(tmp_path: Path) -> None:
         ).validate()
 
 
+@pytest.mark.parametrize("registry", ("swr", "ghcr"))
+def test_local_build_rejects_explicit_registry(
+    tmp_path: Path,
+    registry: str,
+) -> None:
+    with pytest.raises(InstallerModelError, match="does not use a registry"):
+        InstallOptions(
+            mode=InstallMode.CONTAINER,
+            project_dir=tmp_path / "project",
+            image_source="build",
+            registry=registry,
+        ).validate()
+
+
 def test_state_path_provenance_must_be_boolean(tmp_path: Path) -> None:
     with pytest.raises(InstallerModelError, match="state path provenance"):
         InstallOptions(
