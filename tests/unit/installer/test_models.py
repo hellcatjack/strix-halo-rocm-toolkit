@@ -66,6 +66,28 @@ def test_noninteractive_full_mode_defers_missing_plan_digests_to_confirm_stages(
     assert options.accepted_host_plan_digest is None
 
 
+@pytest.mark.parametrize("registry", ("auto", "swr", "ghcr"))
+def test_registry_choice_is_valid(registry: str, tmp_path: Path) -> None:
+    options = InstallOptions(
+        mode=InstallMode.CONTAINER,
+        project_dir=tmp_path / "project",
+        image_source="pull",
+        registry=registry,
+    ).validate()
+
+    assert options.registry == registry
+
+
+def test_unknown_registry_choice_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(InstallerModelError, match="registry"):
+        InstallOptions(
+            mode=InstallMode.CONTAINER,
+            project_dir=tmp_path / "project",
+            image_source="pull",
+            registry="nearest",
+        ).validate()
+
+
 def test_state_path_provenance_must_be_boolean(tmp_path: Path) -> None:
     with pytest.raises(InstallerModelError, match="state path provenance"):
         InstallOptions(

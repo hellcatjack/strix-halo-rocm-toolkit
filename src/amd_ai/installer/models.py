@@ -104,6 +104,7 @@ class InstallOptions:
     project_dir: Path | None = None
     project_name: str = "amd-ai-project"
     image_source: str | None = None
+    registry: str = "auto"
     target_user: str | None = None
     accepted_kernel_plan_digest: str | None = None
     accepted_host_plan_digest: str | None = None
@@ -167,6 +168,10 @@ class InstallOptions:
             raise InstallerModelError("project name is invalid")
         if self.image_source not in (None, "pull", "build"):
             raise InstallerModelError("image source must be pull or build")
+        if self.registry not in ("auto", "swr", "ghcr"):
+            raise InstallerModelError(
+                "registry must be auto, swr, or ghcr"
+            )
         if self.target_user is not None and (
             USER_PATTERN.fullmatch(self.target_user) is None
         ):

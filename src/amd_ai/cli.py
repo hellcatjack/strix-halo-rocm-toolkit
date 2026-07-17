@@ -138,6 +138,11 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--project-dir", type=Path)
     install.add_argument("--project-name", default="amd-ai-project")
     install.add_argument("--image-source", choices=("pull", "build"))
+    install.add_argument(
+        "--registry",
+        choices=("auto", "swr", "ghcr"),
+        default="auto",
+    )
     install.add_argument("--target-user")
     install.add_argument("--accept-kernel-plan-digest")
     install.add_argument("--accept-host-plan-digest")
@@ -483,6 +488,7 @@ def _install_command(args: argparse.Namespace) -> int:
         project_dir=args.project_dir,
         project_name=args.project_name,
         image_source=args.image_source,
+        registry=args.registry,
         target_user=args.target_user,
         accepted_kernel_plan_digest=args.accept_kernel_plan_digest,
         accepted_host_plan_digest=args.accept_host_plan_digest,

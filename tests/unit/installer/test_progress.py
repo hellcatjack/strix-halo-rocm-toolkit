@@ -53,6 +53,7 @@ def container_plan(tmp_path: Path) -> SessionPlan:
         state_path=tmp_path / "state.json",
         state_source="project",
         image_source="pull",
+        registry="auto",
         release_id="0.2.0",
         stages=CONTAINER_STAGE_ORDER,
         first_incomplete=InstallStage.IMAGE_PULL_OR_BUILD,
@@ -184,7 +185,10 @@ def test_default_reporter_prints_plan_stage_and_elapsed_time(
     assert f"项目={tmp_path / 'video-lab'}" in output
     assert "名称=video-lab" in output
     assert f"状态={tmp_path / 'state.json'}（per-project）" in output
-    assert "镜像来源=pull，stable release=0.2.0" in output
+    assert (
+        "镜像来源=pull，镜像仓库=auto（华为 SWR 优先，GHCR 回退），"
+        "stable release=0.2.0"
+    ) in output
     assert "共 8 个阶段，从 IMAGE_PULL_OR_BUILD 继续" in output
     assert "START    [4/8] 获取或构建 stable 镜像" in output
     assert "PASS     [4/8] 获取或构建 stable 镜像，用时 02:14" in output

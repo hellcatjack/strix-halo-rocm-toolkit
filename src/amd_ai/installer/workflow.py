@@ -281,6 +281,7 @@ class InstallerWorkflow:
                 state_path=self.options.state_path,
                 state_source=self._state_source,
                 image_source=self.options.image_source or "pull",
+                registry=self.options.registry,
                 release_id=state.release_id,
                 stages=order,
                 first_incomplete=first_incomplete,

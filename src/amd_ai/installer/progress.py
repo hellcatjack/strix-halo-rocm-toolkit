@@ -16,6 +16,7 @@ from types import MappingProxyType
 from typing import Protocol, TextIO
 
 from amd_ai.installer.models import InstallMode, InstallStage
+from amd_ai.installer.registry import registry_plan_label
 from amd_ai.installer.state import project_identity_key
 from amd_ai.runner import CommandResult, CommandStream
 
@@ -144,6 +145,7 @@ class SessionPlan:
     state_path: Path
     state_source: str
     image_source: str
+    registry: str
     release_id: str | None
     stages: tuple[InstallStage, ...]
     first_incomplete: InstallStage | None
@@ -413,7 +415,9 @@ class InstallerProgress:
         release_id = plan.release_id or "待解析"
         self._emit(
             "PLAN",
-            f"镜像来源={plan.image_source}，stable release={release_id}",
+            f"镜像来源={plan.image_source}，"
+            f"镜像仓库={registry_plan_label(plan.registry)}，"
+            f"stable release={release_id}",
         )
         if plan.first_incomplete is None:
             summary = f"共 {len(plan.stages)} 个阶段，已经全部完成"

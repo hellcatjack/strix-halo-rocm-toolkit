@@ -38,6 +38,16 @@ def test_install_noninteractive_arguments_parse() -> None:
     assert args.project_dir == Path("/srv/comfy-lab")
 
 
+def test_install_registry_defaults_to_auto_and_accepts_explicit_swr() -> None:
+    default = cli.build_parser().parse_args(["install"])
+    explicit = cli.build_parser().parse_args(
+        ["install", "--registry", "swr"]
+    )
+
+    assert default.registry == "auto"
+    assert explicit.registry == "swr"
+
+
 def test_install_progress_modes_are_mutually_exclusive() -> None:
     verbose = cli.build_parser().parse_args(["install", "--verbose"])
     quiet = cli.build_parser().parse_args(["install", "--quiet"])
@@ -101,6 +111,8 @@ def test_install_dispatch_constructs_workflow_once(
             str(tmp_path / "project"),
             "--image-source",
             "pull",
+            "--registry",
+            "ghcr",
             "--source-root",
             str(Path.cwd()),
             "--state-path",
@@ -112,6 +124,7 @@ def test_install_dispatch_constructs_workflow_once(
     assert captured["actions"] == "actions"
     assert captured["installer_source_revision"] == "a" * 40
     assert captured["options"].state_path_explicit is True
+    assert captured["options"].registry == "ghcr"
 
 
 @pytest.mark.parametrize(
