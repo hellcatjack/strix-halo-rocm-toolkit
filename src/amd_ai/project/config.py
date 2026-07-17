@@ -17,13 +17,17 @@ PROJECT_KEYS = frozenset(
         "base_profile",
         "image",
         "base_image",
+        "base_manifest_digest",
         "base_digest",
         "command",
         "debug",
         "shm_size_gib",
     }
 )
-REQUIRED_PROJECT_KEYS = PROJECT_KEYS - {"shm_size_gib"}
+REQUIRED_PROJECT_KEYS = PROJECT_KEYS - {
+    "base_manifest_digest",
+    "shm_size_gib",
+}
 MOUNT_KEYS = frozenset({"source", "target", "read_only"})
 RESERVED_ENVIRONMENT = frozenset(
     {
@@ -74,6 +78,7 @@ class ProjectConfig:
     base_profile: str
     image: str
     base_image: str
+    base_manifest_digest: str | None
     base_digest: str
     command: tuple[str, ...]
     debug: bool
@@ -113,9 +118,25 @@ def load_project_config(path: str | Path) -> ProjectConfig:
             "project image must not start with '-' or contain whitespace or NUL"
         )
     base_image = _matching_string(project, "base_image", IMAGE_ID_PATTERN)
+    base_manifest_digest = project.get("base_manifest_digest")
+    if base_manifest_digest is not None:
+        base_manifest_digest = _matching_string(
+            project,
+            "base_manifest_digest",
+            IMAGE_ID_PATTERN,
+        )
     base_digest = _matching_string(project, "base_digest", IMAGE_ID_PATTERN)
-    if base_image != base_digest:
-        raise ConfigError("base_image and base_digest must match")
+    if base_manifest_digest is None and base_image != base_digest:
+        raise ConfigError(
+            "different base image and config IDs require a manifest binding"
+        )
+    if base_manifest_digest is not None and base_image not in {
+        base_manifest_digest,
+        base_digest,
+    }:
+        raise ConfigError(
+            "base image does not match the manifest/config identity pair"
+        )
 
     raw_command = project["command"]
     if (
@@ -146,6 +167,7 @@ def load_project_config(path: str | Path) -> ProjectConfig:
         base_profile=base_profile,
         image=image,
         base_image=base_image,
+        base_manifest_digest=base_manifest_digest,
         base_digest=base_digest,
         command=tuple(raw_command),
         debug=debug,

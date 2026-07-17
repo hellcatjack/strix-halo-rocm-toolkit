@@ -153,6 +153,32 @@ def test_pull_failure_is_distinct_from_pulled_identity_failure(release) -> None:
         pull_and_verify_release(release, docker=drifted)
 
 
+def test_containerd_store_manifest_id_uses_manifest_config_descriptor(
+    release,
+) -> None:
+    docker = FakeReleaseDocker.for_release(release)
+    for image in (release.base, release.torch):
+        docker.records[image.reference]["Id"] = image.manifest_digest
+
+    result = pull_and_verify_release(release, docker=docker)
+
+    assert result.base.config_digest == release.base.config_digest
+    assert result.torch.config_digest == release.torch.config_digest
+    assert docker.manifest_config_calls == [
+        release.base.reference,
+        release.torch.reference,
+    ]
+
+
+def test_containerd_store_rejects_manifest_config_descriptor_drift(release) -> None:
+    docker = FakeReleaseDocker.for_release(release)
+    docker.records[release.base.reference]["Id"] = release.base.manifest_digest
+    docker.manifest_config_digests[release.base.reference] = "sha256:" + "8" * 64
+
+    with pytest.raises(ReleaseIdentityError, match="config digest"):
+        pull_and_verify_release(release, docker=docker)
+
+
 @pytest.mark.parametrize("damage", ("config", "label", "artifact", "kind"))
 def test_verify_release_image_rejects_identity_damage(
     release, damage: str

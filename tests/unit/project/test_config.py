@@ -85,12 +85,27 @@ def test_unknown_project_key_or_reserved_environment_is_rejected(
         load_project_config(path)
 
 
-def test_parent_ids_must_match(tmp_path):
+def test_local_parent_id_and_config_digest_may_differ(tmp_path):
+    text = base_config().replace("b" * 64, "c" * 64, 1).replace(
+        'base_digest="sha256:',
+        'base_manifest_digest="sha256:' + "c" * 64 + '"\nbase_digest="sha256:',
+    )
+    path = tmp_path / "amd-ai-project.toml"
+    path.write_text(text, encoding="utf-8")
+
+    config = load_project_config(path)
+
+    assert config.base_image == "sha256:" + "c" * 64
+    assert config.base_manifest_digest == "sha256:" + "c" * 64
+    assert config.base_digest == "sha256:" + "b" * 64
+
+
+def test_different_parent_ids_require_manifest_binding(tmp_path):
     text = base_config().replace("b" * 64, "c" * 64, 1)
     path = tmp_path / "amd-ai-project.toml"
     path.write_text(text, encoding="utf-8")
 
-    with pytest.raises(ConfigError, match="must match"):
+    with pytest.raises(ConfigError, match="manifest"):
         load_project_config(path)
 
 

@@ -71,8 +71,8 @@ class SystemRepairExecutor:
         if release != self.release:
             raise RepairExecutionError("repair release differs from executor manifest")
         pull_and_verify_release(release, docker=self.registry)
-        self.registry.tag(release.base.config_digest, ROCM_PYTHON_TAG)
-        self.registry.tag(release.torch.config_digest, STABLE_TORCH_TAG)
+        self.registry.tag_reference(release.base.reference, ROCM_PYTHON_TAG)
+        self.registry.tag_reference(release.torch.reference, STABLE_TORCH_TAG)
 
     def remove_image_id(self, image_id: str) -> None:
         remove_exact_project_image(

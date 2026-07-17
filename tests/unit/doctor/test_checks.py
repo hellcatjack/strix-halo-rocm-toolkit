@@ -63,6 +63,48 @@ def test_platform_classification_is_stable_and_read_only(
     assert backend.mutations == []
 
 
+def test_platform_accepts_containerd_manifest_ids_after_release_verification() -> None:
+    release = load_stable_release(FIXTURE)
+    backend = FakeDoctorBackend(release)
+    backend.images[release.base.reference] = replace(
+        backend.images[release.base.reference],
+        config_digest=release.base.manifest_digest,
+    )
+    backend.images[release.torch.reference] = replace(
+        backend.images[release.torch.reference],
+        config_digest=release.torch.manifest_digest,
+    )
+    backend.friendly["rocm-python:7.2.1-py3.12"] = release.base.manifest_digest
+    backend.friendly[
+        "rocm-pytorch:7.2.1-py3.12-torch2.9.1"
+    ] = release.torch.manifest_digest
+
+    report = doctor_platform(manifest_path=FIXTURE, backend=backend)
+
+    assert "IMAGE.DIGEST_DRIFT" not in {
+        item.code for item in report.diagnostics
+    }
+
+
+def test_doctor_release_descriptor_lookup_uses_anonymous_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = SubprocessDoctorBackend(("sudo", "-n", "docker"))
+    reference = "ghcr.io/example/image@sha256:" + "a" * 64
+    expected = "sha256:" + "b" * 64
+    calls: list[str] = []
+    monkeypatch.setattr(
+        backend.registry,
+        "authless_manifest_config_digest",
+        lambda value: calls.append(value) or expected,
+    )
+
+    observed = backend.registry.manifest_config_digest(reference)
+
+    assert observed == expected
+    assert calls == [reference]
+
+
 @pytest.mark.parametrize(
     ("state", "expected_code"),
     (

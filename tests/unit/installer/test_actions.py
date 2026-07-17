@@ -5,6 +5,7 @@ import json
 import subprocess
 from collections import namedtuple
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -166,14 +167,63 @@ def test_local_image_builds_receive_command_observer(
     monkeypatch.setattr(actions, "build_rocm_python", build_base)
     monkeypatch.setattr(actions, "build_rocm_pytorch", build_torch)
 
+    class Runner:
+        def run(self, args, *, check=True, input_text=None):
+            del check, input_text
+            call = tuple(args)
+            digest = "a" if call[-1] == "base" else "b"
+            return CommandResult(call, 0, "sha256:" + digest * 64 + "\n", "")
+
     ProductionInstallerActions(
-        command_observer=observer
+        command_observer=observer,
+        runner=Runner(),
     ).build_local_images(
         source_root=tmp_path,
         installer_source_revision="d" * 40,
     )
 
     assert captured == [("base", observer), ("torch", observer)]
+
+
+def test_local_build_result_uses_backend_local_ids_as_parent_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_config = "sha256:" + "a" * 64
+    torch_config = "sha256:" + "b" * 64
+    base_local = "sha256:" + "c" * 64
+    torch_local = "sha256:" + "d" * 64
+    monkeypatch.setattr(
+        actions,
+        "validate_local_build_source",
+        lambda source_root, *, expected_revision: Path(source_root),
+    )
+    monkeypatch.setattr(
+        actions,
+        "build_rocm_python",
+        lambda **kwargs: ("base:stable", base_config),
+    )
+    monkeypatch.setattr(
+        actions,
+        "build_rocm_pytorch",
+        lambda **kwargs: ("torch:stable", torch_config),
+    )
+
+    class Runner:
+        def run(self, args, *, check=True, input_text=None):
+            del check, input_text
+            call = tuple(args)
+            values = {"base:stable": base_local, "torch:stable": torch_local}
+            return CommandResult(call, 0, values[call[-1]] + "\n", "")
+
+    result = ProductionInstallerActions(runner=Runner()).build_local_images(
+        source_root=tmp_path,
+        installer_source_revision="d" * 40,
+    )
+
+    assert result.base_reference == base_local
+    assert result.base_config_digest == base_config
+    assert result.torch_reference == torch_local
+    assert result.torch_config_digest == torch_config
 
 
 def test_runtime_image_check_receives_command_observer(
@@ -284,6 +334,48 @@ def test_image_disk_estimate_uses_missing_remote_layer_bytes(
     assert estimate.available_bytes == 100 * 1024**3
 
 
+def test_missing_layer_estimate_reuses_containerd_manifest_images() -> None:
+    release = load_stable_release(RELEASE_FIXTURE)
+
+    class Runner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        def run(self, args, *, check=True, input_text=None):
+            del check, input_text
+            call = tuple(args)
+            self.calls.append(call)
+            for image in (release.base, release.torch):
+                if call[-1] == image.reference and call[1:4] == (
+                    "image",
+                    "inspect",
+                    "--format",
+                ):
+                    return CommandResult(call, 0, image.manifest_digest + "\n", "")
+            raise AssertionError(f"unexpected command: {call}")
+
+    runner = Runner()
+
+    missing = actions._missing_release_layer_bytes(
+        release, runner, ("docker",)
+    )
+
+    assert missing == 0
+    assert len(runner.calls) == 2
+
+
+def test_missing_layer_parser_accepts_oci_verbose_record() -> None:
+    digest = "sha256:" + "a" * 64
+    payload = {
+        "OCIManifest": {
+            "schemaVersion": 2,
+            "layers": [{"digest": digest, "size": 1234}],
+        }
+    }
+
+    assert actions._manifest_layers(payload) == ((digest, 1234),)
+
+
 def test_project_disk_estimate_counts_resolved_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -334,6 +426,70 @@ def test_selected_parent_alias_is_bound_only_after_exact_config_check() -> None:
     )
 
     assert ("docker", "tag", reference, actions.STABLE_TORCH_TAG) in runner.calls
+
+
+def test_selected_parent_alias_accepts_containerd_manifest_image_id() -> None:
+    expected_config = "sha256:" + "a" * 64
+    manifest = "sha256:" + "b" * 64
+    reference = "ghcr.io/example/torch@" + manifest
+
+    class Runner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        def run(self, args, *, check=True, input_text=None):
+            del check, input_text
+            call = tuple(args)
+            self.calls.append(call)
+            if call[1:4] == ("image", "inspect", "--format"):
+                return CommandResult(call, 0, manifest + "\n", "")
+            return CommandResult(call, 0, "", "")
+
+    runner = Runner()
+
+    bind_selected_parent(
+        reference=reference,
+        config_digest=expected_config,
+        runner=runner,
+        docker_prefix=("docker",),
+    )
+
+    assert ("docker", "tag", reference, actions.STABLE_TORCH_TAG) in runner.calls
+
+
+def test_selected_parent_accepts_local_build_manifest_image_id() -> None:
+    expected_config = "sha256:" + "a" * 64
+    local_image_id = "sha256:" + "b" * 64
+
+    class Runner:
+        def run(self, args, *, check=True, input_text=None):
+            del check, input_text
+            call = tuple(args)
+            if call[1:4] == ("image", "inspect", "--format"):
+                return CommandResult(call, 0, local_image_id + "\n", "")
+            return CommandResult(call, 0, "", "")
+
+    bind_selected_parent(
+        reference=local_image_id,
+        config_digest=expected_config,
+        runner=Runner(),
+        docker_prefix=("docker",),
+    )
+
+
+def test_existing_project_parent_must_match_verified_manifest_config_pair() -> None:
+    config = SimpleNamespace(
+        base_image="sha256:" + "c" * 64,
+        base_manifest_digest="sha256:" + "a" * 64,
+        base_digest="sha256:" + "b" * 64,
+    )
+
+    with pytest.raises(ActionError, match="identity"):
+        actions._validate_selected_parent_config(
+            config,
+            reference="ghcr.io/example/torch@sha256:" + "a" * 64,
+            config_digest="sha256:" + "b" * 64,
+        )
 
 
 def test_selected_parent_alias_rejects_config_drift_before_tagging() -> None:

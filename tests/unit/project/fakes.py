@@ -49,6 +49,7 @@ def project_config(
         base_profile="stable",
         image="amd-ai-project/demo:runtime",
         base_image=parent,
+        base_manifest_digest=parent,
         base_digest=parent,
         command=("python", "app.py"),
         debug=debug,

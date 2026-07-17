@@ -171,6 +171,9 @@ class PublishRegistry(Protocol):
     def authless_pull(self, reference: str) -> None:
         pass
 
+    def authless_manifest_config_digest(self, reference: str) -> str:
+        pass
+
     def inspect(self, reference: str) -> Mapping[str, object]:
         pass
 
@@ -194,6 +197,18 @@ class DockerPublishRegistry:
         _require_image_id(image_id, "publication")
         self._completed(("tag", image_id, target))
 
+    def tag_reference(self, source: str, target: str) -> None:
+        if REPO_DIGEST_PATTERN.fullmatch(source) is None:
+            raise PublishError("tag source must be an exact image reference")
+        if (
+            not target
+            or target.startswith("-")
+            or "\0" in target
+            or any(character.isspace() for character in target)
+        ):
+            raise PublishError("tag target is invalid")
+        self._completed(("tag", source, target))
+
     def push(self, target: str) -> None:
         self._completed(("push", target))
 
@@ -201,12 +216,30 @@ class DockerPublishRegistry:
         self._completed(("pull", reference))
 
     def authless_pull(self, reference: str) -> None:
+        self._authless_completed(("pull", reference))
+
+    def manifest_config_digest(self, reference: str) -> str:
+        result = self._completed(
+            ("manifest", "inspect", "--verbose", reference)
+        )
+        return _manifest_config_digest(result.stdout)
+
+    def authless_manifest_config_digest(self, reference: str) -> str:
+        result = self._authless_completed(
+            ("manifest", "inspect", "--verbose", reference)
+        )
+        return _manifest_config_digest(result.stdout)
+
+    def _authless_completed(
+        self,
+        args: tuple[str, ...],
+    ) -> CommandResult:
         with tempfile.TemporaryDirectory(prefix="amd-ai-authless-") as directory:
             config = Path(directory)
             config.chmod(0o700)
             if any(config.iterdir()):
                 raise PublishError("temporary authless Docker config is not empty")
-            self._completed(("--config", str(config), "pull", reference))
+            return self._completed(("--config", str(config), *args))
 
     def inspect(self, reference: str) -> Mapping[str, object]:
         result = self._completed(("image", "inspect", reference))
@@ -242,11 +275,11 @@ class DockerPublishRegistry:
         package = _package_from_tag(target)
         self.pull(target)
         record = self.inspect(target)
-        config_digest = record.get("Id")
-        if not isinstance(config_digest, str) or IMAGE_ID_PATTERN.fullmatch(
-            config_digest
+        local_image_id = record.get("Id")
+        if not isinstance(local_image_id, str) or IMAGE_ID_PATTERN.fullmatch(
+            local_image_id
         ) is None:
-            raise PublishError("pushed image has no valid config ID")
+            raise PublishError("pushed image has no valid local ID")
         raw_repo_digests = record.get("RepoDigests")
         if not isinstance(raw_repo_digests, list) or any(
             not isinstance(value, str) for value in raw_repo_digests
@@ -276,6 +309,11 @@ class DockerPublishRegistry:
             raise PublishError("cannot parse raw registry manifest") from error
         if not isinstance(raw_manifest, dict):
             raise PublishError("raw registry manifest must be an object")
+        config_digest = _manifest_config_digest_from_record(raw_manifest)
+        if local_image_id not in {config_digest, manifest_digest}:
+            raise PublishError(
+                "pushed image local ID differs from its manifest and config"
+            )
         paths = (
             BASE_ARTIFACT_PATHS
             if package == BASE_PACKAGE
@@ -306,6 +344,28 @@ class DockerPublishRegistry:
                 f"Docker publication command failed ({args[0]}): {evidence}"
             )
         return result
+
+
+class AnonymousDockerRegistry(DockerPublishRegistry):
+    def pull(self, reference: str) -> None:
+        self.authless_pull(reference)
+
+    def manifest_config_digest(self, reference: str) -> str:
+        return self.authless_manifest_config_digest(reference)
+
+
+class _AnonymousVerificationRegistry:
+    def __init__(self, registry: PublishRegistry) -> None:
+        self.registry = registry
+
+    def inspect(self, reference: str) -> Mapping[str, object]:
+        return self.registry.inspect(reference)
+
+    def manifest_config_digest(self, reference: str) -> str:
+        return self.registry.authless_manifest_config_digest(reference)
+
+    def hash_file(self, reference: str, path: str) -> str:
+        return self.registry.hash_file(reference, path)
 
 
 def validate_publish_inputs(
@@ -577,6 +637,7 @@ def publish_stable_release(
 ) -> StableRelease:
     release = observed or publish_images(candidate, registry=registry)
     _require_release_matches_candidate(release, candidate)
+    anonymous_registry = _AnonymousVerificationRegistry(registry)
     for image, kind in ((release.base, "base"), (release.torch, "torch")):
         try:
             registry.authless_pull(image.reference)
@@ -591,7 +652,7 @@ def publish_stable_release(
                 release,
                 image,
                 kind=kind,
-                docker=registry,
+                docker=anonymous_registry,
             )
         except Exception as error:
             if isinstance(error, PublishError):
@@ -642,10 +703,16 @@ def _require_release_matches_candidate(
             )
     if candidate.base_local_id is None:
         raise PublishError("base local image ID is required for stable publication")
-    if release.base.config_digest != candidate.base_local_id:
-        raise PublishError("observed base config differs from current local image")
-    if release.torch.config_digest != candidate.torch_local_id:
-        raise PublishError("observed Torch config differs from current local image")
+    if candidate.base_local_id not in {
+        release.base.config_digest,
+        release.base.manifest_digest,
+    }:
+        raise PublishError("observed base identity differs from current local image")
+    if candidate.torch_local_id not in {
+        release.torch.config_digest,
+        release.torch.manifest_digest,
+    }:
+        raise PublishError("observed Torch identity differs from current local image")
     if (release.base.image, release.torch.image) != (
         BASE_PACKAGE,
         TORCH_PACKAGE,
@@ -679,8 +746,11 @@ def _validate_registry_observation(
         or IMAGE_ID_PATTERN.fullmatch(observation.manifest_digest) is None
     ):
         raise PublishError(f"observed {kind} registry manifest digest is invalid")
-    if observation.config_digest != local_id:
-        raise PublishError(f"observed {kind} config ID differs from local image")
+    if local_id not in {
+        observation.config_digest,
+        observation.manifest_digest,
+    }:
+        raise PublishError(f"observed {kind} identity differs from local image")
     if observation.manifest_digest == observation.config_digest:
         raise PublishError(f"observed {kind} manifest and config IDs are ambiguous")
 
@@ -881,6 +951,36 @@ def _load_json_object(path: Path, label: str) -> tuple[bytes, dict[str, Any]]:
     if not isinstance(payload, dict):
         raise PublishError(f"{label} must be a JSON object")
     return content, payload
+
+
+def _manifest_config_digest(raw: str) -> str:
+    try:
+        payload = json.loads(raw, object_pairs_hook=_unique_object)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise PublishError("cannot parse Docker manifest inspection") from error
+    if not isinstance(payload, dict):
+        raise PublishError("Docker manifest inspection is not an object")
+    return _manifest_config_digest_from_record(payload)
+
+
+def _manifest_config_digest_from_record(payload: Mapping[str, object]) -> str:
+    wrappers = [
+        payload[name]
+        for name in ("SchemaV2Manifest", "OCIManifest")
+        if name in payload
+    ]
+    if len(wrappers) > 1:
+        raise PublishError("Docker manifest record is ambiguous")
+    manifest = wrappers[0] if wrappers else payload
+    if not isinstance(manifest, Mapping):
+        raise PublishError("Docker manifest record is invalid")
+    config = manifest.get("config")
+    if not isinstance(config, Mapping):
+        raise PublishError("Docker manifest config descriptor is missing")
+    digest = config.get("digest")
+    if not isinstance(digest, str) or IMAGE_ID_PATTERN.fullmatch(digest) is None:
+        raise PublishError("Docker manifest config digest is invalid")
+    return digest
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

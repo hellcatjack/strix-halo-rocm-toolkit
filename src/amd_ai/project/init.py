@@ -37,6 +37,8 @@ def initialize_project(
     destination: Path,
     base_profile: str,
     runner: Runner,
+    base_config_digest: str | None = None,
+    base_manifest_digest: str | None = None,
     docker_prefix: Sequence[str] = ("docker",),
     template_root: Path = TEMPLATE_ROOT,
     owner_uid: int | None = None,
@@ -48,6 +50,21 @@ def initialize_project(
         raise ProjectInitError(f"invalid base profile: {base_profile!r}")
     image = _resolve_base_image(base_profile, runner, docker_prefix)
     image_id = _inspect_image_id(image, runner, docker_prefix)
+    if base_config_digest is None and base_manifest_digest is None:
+        base_config_digest = image_id
+    elif (
+        base_config_digest is None
+        or base_manifest_digest is None
+        or IMAGE_ID_PATTERN.fullmatch(base_config_digest) is None
+        or IMAGE_ID_PATTERN.fullmatch(base_manifest_digest) is None
+    ):
+        raise ProjectInitError(
+            "base config and manifest digests must be supplied together"
+        )
+    elif image_id not in {base_config_digest, base_manifest_digest}:
+        raise ProjectInitError(
+            "local base image identity does not match its verified digests"
+        )
 
     destination = destination.resolve()
     created = not destination.exists()
@@ -75,7 +92,8 @@ def initialize_project(
             "base_profile": base_profile,
             "image": f"{name}:runtime",
             "base_image": image_id,
-            "base_digest": image_id,
+            "base_manifest_digest": base_manifest_digest or image_id,
+            "base_digest": base_config_digest,
         }
         for key, value in replacements.items():
             config_text = _replace_toml_string(config_text, key, value)

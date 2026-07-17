@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from amd_ai import cli
+from amd_ai.image.publish import AnonymousDockerRegistry
 
 
 def test_release_verify_loads_and_checks_manifest(monkeypatch) -> None:
@@ -29,6 +30,32 @@ def test_release_verify_loads_and_checks_manifest(monkeypatch) -> None:
     assert captured["manifest_path"] == Path(
         "tests/fixtures/releases/stable.json"
     )
+
+
+def test_release_verify_uses_anonymous_registry(monkeypatch) -> None:
+    captured = {}
+    monkeypatch.setattr(
+        cli.Docker,
+        "detect",
+        classmethod(
+            lambda cls: SimpleNamespace(prefix=("sudo", "-n", "docker"))
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "pull_and_verify_release",
+        lambda release, *, docker: captured.update(
+            release=release, docker=docker
+        ),
+    )
+
+    code = cli.verify_release_command(
+        manifest_path=Path("tests/fixtures/releases/stable.json")
+    )
+
+    assert code == 0
+    assert isinstance(captured["docker"], AnonymousDockerRegistry)
+    assert captured["docker"].docker_prefix == ("sudo", "-n", "docker")
 
 
 def test_release_publish_requires_all_evidence_paths() -> None:

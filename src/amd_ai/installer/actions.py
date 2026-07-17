@@ -32,7 +32,7 @@ from amd_ai.image.build import (
     build_rocm_pytorch,
     run_image_check,
 )
-from amd_ai.image.publish import DockerPublishRegistry
+from amd_ai.image.publish import AnonymousDockerRegistry
 from amd_ai.installer.models import (
     DiskSpaceEstimate,
     InstallOptions,
@@ -152,9 +152,8 @@ class ProjectInstallResult:
     build: ProjectBuildResult
 
 
-class AnonymousReleaseRegistry(DockerPublishRegistry):
-    def pull(self, reference: str) -> None:
-        self.authless_pull(reference)
+class AnonymousReleaseRegistry(AnonymousDockerRegistry):
+    pass
 
 
 class ProductionInstallerActions:
@@ -606,15 +605,21 @@ class ProductionInstallerActions:
             source_root,
             expected_revision=installer_source_revision,
         )
-        base_reference, base_digest = build_rocm_python(
+        base_tag, base_digest = build_rocm_python(
             repo_root=source,
             observer=self.command_observer,
         )
-        torch_reference, torch_digest = build_rocm_pytorch(
+        torch_tag, torch_digest = build_rocm_pytorch(
             profile_path=source / "profiles/torch/stable.env",
             allow_experimental=False,
             repo_root=source,
             observer=self.command_observer,
+        )
+        base_reference = _local_image_id(
+            base_tag, self.runner, self.docker_prefix
+        )
+        torch_reference = _local_image_id(
+            torch_tag, self.runner, self.docker_prefix
         )
         validate_local_build_source(
             source,
@@ -723,21 +728,32 @@ class ProductionInstallerActions:
         config_path = project_dir / "amd-ai-project.toml"
         if config_path.exists():
             config = load_project_config(config_path)
-            if config.base_digest != base_config_digest:
-                raise ActionError(
-                    "existing project parent config digest differs from selection"
-                )
+            _validate_selected_parent_config(
+                config,
+                reference=base_image_reference,
+                config_digest=base_config_digest,
+            )
         else:
+            base_manifest_digest = base_image_reference.rpartition("@")[2]
+            if DIGEST_PATTERN.fullmatch(base_manifest_digest) is None:
+                base_manifest_digest = base_image_reference
             create_project(
                 name=project_name,
                 destination=project_dir,
                 base_profile=base_profile,
+                base_config_digest=base_config_digest,
+                base_manifest_digest=base_manifest_digest,
                 runner=self.runner,
                 docker_prefix=self.docker_prefix,
                 owner_uid=owner_uid,
                 owner_gid=owner_gid,
             )
             config = load_project_config(config_path)
+            _validate_selected_parent_config(
+                config,
+                reference=base_image_reference,
+                config_digest=base_config_digest,
+            )
         build = build_or_reuse_project(
             config=config,
             runner=self.runner,
@@ -1101,6 +1117,9 @@ def bind_selected_parent(
         raise ActionError("selected parent image reference is invalid")
     if DIGEST_PATTERN.fullmatch(config_digest) is None:
         raise ActionError("selected parent config digest is invalid")
+    manifest_digest = reference.rpartition("@")[2]
+    if DIGEST_PATTERN.fullmatch(manifest_digest) is None:
+        manifest_digest = ""
     inspected = runner.run(
         [
             *docker_prefix,
@@ -1112,7 +1131,11 @@ def bind_selected_parent(
         ],
         check=False,
     )
-    if inspected.returncode != 0 or inspected.stdout.strip() != config_digest:
+    selected_id = inspected.stdout.strip()
+    if inspected.returncode != 0 or selected_id not in {
+        config_digest,
+        manifest_digest,
+    }:
         evidence = (
             inspected.stderr.strip()
             or inspected.stdout.strip()
@@ -1140,8 +1163,53 @@ def bind_selected_parent(
         ],
         check=False,
     )
-    if alias.returncode != 0 or alias.stdout.strip() != config_digest:
-        raise ActionError("selected parent alias does not preserve config digest")
+    if alias.returncode != 0 or alias.stdout.strip() != selected_id:
+        raise ActionError("selected parent alias does not preserve image identity")
+
+
+def _validate_selected_parent_config(
+    config: ProjectConfig,
+    *,
+    reference: str,
+    config_digest: str,
+) -> None:
+    manifest_digest = reference.rpartition("@")[2]
+    if DIGEST_PATTERN.fullmatch(manifest_digest) is None:
+        manifest_digest = reference
+    if (
+        DIGEST_PATTERN.fullmatch(manifest_digest) is None
+        or config.base_digest != config_digest
+        or config.base_manifest_digest not in {None, manifest_digest}
+        or config.base_image not in {config_digest, manifest_digest}
+    ):
+        raise ActionError(
+            "project parent identity differs from the verified selection"
+        )
+
+
+def _local_image_id(
+    reference: str,
+    runner: Runner,
+    docker_prefix: Sequence[str],
+) -> str:
+    result = runner.run(
+        [
+            *docker_prefix,
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            reference,
+        ],
+        check=False,
+    )
+    image_id = result.stdout.strip()
+    if result.returncode != 0 or DIGEST_PATTERN.fullmatch(image_id) is None:
+        evidence = result.stderr.strip() or image_id or "image is missing"
+        raise ActionError(
+            f"cannot resolve local image identity for {reference}: {evidence}"
+        )
+    return image_id
 
 
 def _user_identity(target_user: str | None) -> tuple[int, int]:
@@ -1207,7 +1275,10 @@ def _missing_release_layer_bytes(
             ],
             check=False,
         )
-        if local.returncode == 0 and local.stdout.strip() == image.config_digest:
+        if local.returncode == 0 and local.stdout.strip() in {
+            image.config_digest,
+            image.manifest_digest,
+        }:
             continue
         manifest = runner.run(
             [*docker_prefix, "manifest", "inspect", "--verbose", image.reference],
@@ -1241,7 +1312,14 @@ def _missing_release_layer_bytes(
 def _manifest_layers(payload: object) -> tuple[tuple[str, int], ...]:
     if not isinstance(payload, dict):
         raise ActionError("remote image manifest is not an object")
-    manifest = payload.get("SchemaV2Manifest", payload)
+    wrappers = [
+        payload[name]
+        for name in ("SchemaV2Manifest", "OCIManifest")
+        if name in payload
+    ]
+    if len(wrappers) > 1:
+        raise ActionError("remote image manifest body is ambiguous")
+    manifest = wrappers[0] if wrappers else payload
     if not isinstance(manifest, dict):
         raise ActionError("remote image manifest body is invalid")
     raw_layers = manifest.get("layers")

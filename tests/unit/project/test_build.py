@@ -1,3 +1,5 @@
+from dataclasses import replace
+import json
 from pathlib import Path
 
 import pytest
@@ -7,6 +9,7 @@ from amd_ai.project.build import (
     ParentImageMetadata,
     ProjectBuildError,
     build_context_fingerprint,
+    inspect_parent_image,
     project_manifest_argv,
     project_build_argv,
     project_parent_alias,
@@ -16,6 +19,7 @@ from amd_ai.project.build import (
 )
 from amd_ai.runner import CommandResult
 from tests.unit.project.fakes import FakeRunner
+from tests.unit.project.fakes import project_config
 
 
 def test_fingerprint_changes_with_lock_not_ignored_models(tmp_path):
@@ -64,6 +68,55 @@ def test_build_uses_content_addressed_parent_alias_and_labels():
     assert "org.amd-ai.base.digest=" + parent in argv
     assert "--load" in argv
     assert argv.count("--progress=plain") == 1
+
+
+def test_build_allows_containerd_manifest_parent_with_config_digest_label():
+    local_parent = "sha256:" + "a" * 64
+    config_digest = "sha256:" + "b" * 64
+
+    argv = project_build_argv(
+        context=Path("projects/demo"),
+        image="demo:runtime",
+        base_image=local_parent,
+        base_digest=config_digest,
+        profile_id="rocm-7.2.1-py3.12-torch-2.9.1",
+        profile_status="verified",
+        fingerprint="f" * 64,
+    )
+
+    assert f"BASE_IMAGE={project_parent_alias(local_parent)}" in argv
+    assert "org.amd-ai.base.digest=" + config_digest in argv
+
+
+def test_parent_inspection_matches_local_id_not_config_digest(tmp_path):
+    local_parent = "sha256:" + "a" * 64
+    config_digest = "sha256:" + "b" * 64
+    config = replace(
+        project_config(tmp_path / "project"),
+        base_image=local_parent,
+        base_digest=config_digest,
+    )
+    command = ("docker", "image", "inspect", local_parent)
+    record = {
+        "Id": local_parent,
+        "RootFS": {"Layers": ["sha256:" + "c" * 64]},
+        "Config": {
+            "Labels": {
+                "org.amd-ai.profile.id": "stable",
+                "org.amd-ai.profile.status": "verified",
+                "org.amd-ai.rocm.version": "7.2.1",
+                "org.amd-ai.python.version": "3.12",
+                "org.amd-ai.torch.version": "2.9.1",
+            }
+        },
+    }
+    runner = FakeRunner(
+        {command: CommandResult(command, 0, json.dumps([record]), "")}
+    )
+
+    metadata = inspect_parent_image(config, runner)
+
+    assert metadata.image_id == local_parent
 
 
 def test_dockerignore_must_preserve_mandatory_storage_exclusions(tmp_path):

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from amd_ai.image import publish
 from amd_ai.image.build import IMAGE_SOURCE
 from amd_ai.image.publish import (
+    AnonymousDockerRegistry,
     DockerPublishRegistry,
     PublishError,
     validate_publish_inputs,
@@ -35,6 +38,9 @@ class FakeRegistry:
         self.push_error: Exception | None = None
         self.authless_error: Exception | None = None
         self.authless_pull_calls: list[str] = []
+        self.manifest_calls: list[str] = []
+        self.authless_manifest_calls: list[str] = []
+        self.exact_inspect_uses_manifest = False
         self.observations = {
             "ghcr.io/hellcatjack/strix-halo-rocm-python:0.2.0": (
                 RegistryImageObservation(
@@ -96,11 +102,26 @@ class FakeRegistry:
                     "org.amd-ai.torch.version": "2.9.1",
                 }
             )
+        image_id = observation.config_digest
+        if (
+            reference == observation.manifest_digest
+            or self.exact_inspect_uses_manifest
+            and "@sha256:" in reference
+        ):
+            image_id = observation.manifest_digest
         return {
-            "Id": observation.config_digest,
+            "Id": image_id,
             "RepoDigests": [reference],
             "Config": {"Labels": labels},
         }
+
+    def manifest_config_digest(self, reference: str) -> str:
+        self.manifest_calls.append(reference)
+        return self._by_reference(reference).config_digest
+
+    def authless_manifest_config_digest(self, reference: str) -> str:
+        self.authless_manifest_calls.append(reference)
+        return self._by_reference(reference).config_digest
 
     def hash_file(self, reference: str, path: str) -> str:
         observation = self._by_reference(reference)
@@ -119,6 +140,7 @@ class FakeRegistry:
                 f"{observation.image}@{observation.manifest_digest}"
                 == reference
                 or observation.config_digest == reference
+                or observation.manifest_digest == reference
             ):
                 return observation
         raise KeyError(reference)
@@ -292,6 +314,34 @@ def test_publish_rejects_incomplete_registry_identity(
         publish_images(candidate, registry=registry)
 
 
+def test_publish_accepts_containerd_local_manifest_ids(
+    candidate, tmp_path: Path
+) -> None:
+    registry = FakeRegistry.for_candidate(candidate)
+    containerd_candidate = replace(
+        candidate,
+        base_local_id=registry.observations[
+            publish.BASE_PACKAGE + ":0.2.0"
+        ].manifest_digest,
+        torch_local_id=registry.observations[
+            publish.TORCH_PACKAGE + ":0.2.0"
+        ].manifest_digest,
+    )
+    registry.candidate = containerd_candidate
+
+    release = publish_images(containerd_candidate, registry=registry)
+    published = publish_stable_release(
+        containerd_candidate,
+        registry=registry,
+        output=tmp_path / "stable.json",
+        observed=release,
+    )
+
+    assert release.base.config_digest == candidate.base_local_id
+    assert release.torch.config_digest == candidate.torch_local_id
+    assert published == release
+
+
 def test_manifest_is_written_only_after_two_authless_pulls(
     candidate, tmp_path: Path
 ) -> None:
@@ -308,6 +358,25 @@ def test_manifest_is_written_only_after_two_authless_pulls(
     ]
     assert output.is_file()
     assert load_stable_release(output) == release
+
+
+def test_publish_final_manifest_descriptor_check_is_anonymous(
+    candidate, tmp_path: Path
+) -> None:
+    registry = FakeRegistry.for_candidate(candidate)
+    registry.exact_inspect_uses_manifest = True
+
+    release = publish_stable_release(
+        candidate,
+        registry=registry,
+        output=tmp_path / "stable.json",
+    )
+
+    assert registry.authless_manifest_calls == [
+        release.base.reference,
+        release.torch.reference,
+    ]
+    assert registry.manifest_calls == []
 
 
 def test_failed_authless_pull_leaves_existing_manifest_unchanged(
@@ -354,6 +423,84 @@ def test_authless_pull_passes_empty_config_to_sudo_docker(
     assert runner.config_was_empty is True
 
 
+def test_authless_manifest_inspect_returns_config_descriptor_digest() -> None:
+    config_digest = "sha256:" + "b" * 64
+
+    class RecordingRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+            self.config_was_empty = False
+
+        def run(self, args, *, check=True, input_text=None):
+            del check, input_text
+            command = tuple(args)
+            config = Path(command[command.index("--config") + 1])
+            self.config_was_empty = config.is_dir() and not tuple(
+                config.iterdir()
+            )
+            self.calls.append(command)
+            payload = {
+                "Ref": command[-1],
+                "SchemaV2Manifest": {
+                    "schemaVersion": 2,
+                    "config": {"digest": config_digest},
+                },
+            }
+            return CommandResult(command, 0, json.dumps(payload), "")
+
+    runner = RecordingRunner()
+    reference = "ghcr.io/hellcatjack/example@sha256:" + "a" * 64
+    registry = DockerPublishRegistry(
+        ("sudo", "-n", "docker"), runner=runner
+    )
+
+    observed = registry.authless_manifest_config_digest(reference)
+
+    assert observed == config_digest
+    command = runner.calls[0]
+    assert command[:4] == ("sudo", "-n", "docker", "--config")
+    assert command[-4:] == ("manifest", "inspect", "--verbose", reference)
+    assert runner.config_was_empty is True
+
+
+def test_anonymous_registry_routes_pull_and_manifest_through_empty_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = AnonymousDockerRegistry()
+    reference = "ghcr.io/example/image@sha256:" + "a" * 64
+    expected = "sha256:" + "b" * 64
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        registry,
+        "authless_pull",
+        lambda value: calls.append(("pull", value)),
+    )
+    monkeypatch.setattr(
+        registry,
+        "authless_manifest_config_digest",
+        lambda value: calls.append(("manifest", value)) or expected,
+    )
+
+    registry.pull(reference)
+    observed = registry.manifest_config_digest(reference)
+
+    assert observed == expected
+    assert calls == [("pull", reference), ("manifest", reference)]
+
+
+def test_manifest_parser_accepts_oci_verbose_record() -> None:
+    config_digest = "sha256:" + "b" * 64
+    payload = {
+        "Ref": "ghcr.io/example/image@sha256:" + "a" * 64,
+        "OCIManifest": {
+            "schemaVersion": 2,
+            "config": {"digest": config_digest},
+        },
+    }
+
+    assert publish._manifest_config_digest(json.dumps(payload)) == config_digest
+
+
 def test_registry_pull_and_inspect_use_injected_runner() -> None:
     record = {
         "Id": "sha256:" + "b" * 64,
@@ -383,6 +530,63 @@ def test_registry_pull_and_inspect_use_injected_runner() -> None:
         ("docker", "pull", reference),
         ("docker", "image", "inspect", reference),
     ]
+
+
+def test_registry_tags_verified_exact_reference_with_injected_runner() -> None:
+    source = "ghcr.io/example/image@sha256:" + "a" * 64
+    target = "image:stable"
+
+    class RecordingRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        def run(self, args, *, check=True, input_text=None):
+            del check, input_text
+            command = tuple(args)
+            self.calls.append(command)
+            return CommandResult(command, 0, "", "")
+
+    runner = RecordingRunner()
+    registry = DockerPublishRegistry(runner=runner)
+
+    registry.tag_reference(source, target)
+
+    assert runner.calls == [("docker", "tag", source, target)]
+    with pytest.raises(PublishError, match="exact"):
+        registry.tag_reference("ghcr.io/example/image:latest", target)
+
+
+def test_registry_observation_uses_manifest_config_on_containerd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = DockerPublishRegistry()
+    target = publish.BASE_PACKAGE + ":0.3.2"
+    manifest_digest = "sha256:" + "a" * 64
+    config_digest = "sha256:" + "b" * 64
+    exact = publish.BASE_PACKAGE + "@" + manifest_digest
+    monkeypatch.setattr(registry, "pull", lambda value: None)
+    monkeypatch.setattr(
+        registry,
+        "inspect",
+        lambda value: {"Id": manifest_digest, "RepoDigests": [exact]},
+    )
+    monkeypatch.setattr(
+        registry,
+        "_completed",
+        lambda args: CommandResult(
+            tuple(args), 0, json.dumps(_raw_manifest(config_digest)), ""
+        ),
+    )
+    monkeypatch.setattr(
+        registry,
+        "hash_file",
+        lambda reference, path: "sha256:" + "c" * 64,
+    )
+
+    observation = registry.observe(target)
+
+    assert observation.manifest_digest == manifest_digest
+    assert observation.config_digest == config_digest
 
 
 def write_publish_evidence(

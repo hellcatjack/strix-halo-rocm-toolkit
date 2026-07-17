@@ -92,6 +92,9 @@ class ReleaseDocker(Protocol):
     def inspect(self, reference: str) -> Mapping[str, object]:
         pass
 
+    def manifest_config_digest(self, reference: str) -> str:
+        pass
+
     def hash_file(self, reference: str, path: str) -> str:
         pass
 
@@ -243,7 +246,22 @@ def verify_release_image(
         raise ReleaseIdentityError(
             f"release {kind} image inspect record is invalid"
         )
-    config_digest = record.get("Id")
+    local_image_id = record.get("Id")
+    if local_image_id == image.config_digest:
+        config_digest = local_image_id
+    elif local_image_id == image.manifest_digest:
+        try:
+            config_digest = docker.manifest_config_digest(image.reference)
+        except Exception as error:
+            raise ReleaseIdentityError(
+                "cannot inspect exact release manifest config descriptor "
+                f"{image.reference}: {error}"
+            ) from error
+    else:
+        raise ReleaseIdentityError(
+            f"release {kind} image ID does not match the config or manifest: "
+            f"{local_image_id}"
+        )
     if config_digest != image.config_digest:
         raise ReleaseIdentityError(
             f"release {kind} config digest does not match: {config_digest}"

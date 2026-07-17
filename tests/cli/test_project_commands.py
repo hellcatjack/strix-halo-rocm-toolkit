@@ -20,11 +20,37 @@ def test_project_init_creates_digest_pinned_directory(tmp_path, monkeypatch):
     image = "rocm-pytorch:7.2.1-py3.12-torch2.9.1"
     inspect = ("docker", "image", "inspect", "--format", "{{.Id}}", image)
     image_id = "sha256:" + "a" * 64
+    config_digest = "sha256:" + "b" * 64
+    exact_reference = "ghcr.io/example/torch@sha256:" + "a" * 64
     runner = FakeRunner(
         {inspect: CommandResult(inspect, 0, image_id + "\n", "")}
     )
+    release = SimpleNamespace(
+        torch=SimpleNamespace(
+            reference=exact_reference,
+            config_digest=config_digest,
+            manifest_digest=image_id,
+        )
+    )
+    verified = []
+    bound = []
     monkeypatch.setattr(cli.Docker, "detect", classmethod(lambda cls: FakeDocker()))
     monkeypatch.setattr(cli, "SubprocessRunner", lambda: runner)
+    monkeypatch.setattr(cli, "load_stable_release", lambda path: release)
+    monkeypatch.setattr(
+        cli,
+        "verify_release_image",
+        lambda release, image, *, kind, docker: verified.append(
+            (image.reference, kind, docker)
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli,
+        "bind_selected_parent",
+        lambda **kwargs: bound.append(kwargs),
+        raising=False,
+    )
     destination = tmp_path / "demo"
 
     code = cli.main(
@@ -34,6 +60,10 @@ def test_project_init_creates_digest_pinned_directory(tmp_path, monkeypatch):
     assert code == 0
     config = (destination / "amd-ai-project.toml").read_text(encoding="utf-8")
     assert f'base_image = "{image_id}"' in config
+    assert f'base_digest = "{config_digest}"' in config
+    assert verified[0][0:2] == (exact_reference, "torch")
+    assert bound[0]["reference"] == exact_reference
+    assert bound[0]["config_digest"] == config_digest
     assert (destination / "requirements.lock").read_text(encoding="utf-8") == ""
 
 

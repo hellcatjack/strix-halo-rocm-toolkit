@@ -314,6 +314,57 @@ def test_build_metadata_returns_the_exact_config_digest(tmp_path):
     assert build._validate_build_metadata(metadata) == digest
 
 
+def test_loaded_containerd_image_matches_build_manifest_metadata(tmp_path):
+    config_digest = "sha256:" + "a" * 64
+    manifest_digest = "sha256:" + "b" * 64
+    metadata = tmp_path / "metadata.json"
+    metadata.write_text(
+        json.dumps(
+            {
+                "containerimage.config.digest": config_digest,
+                "containerimage.digest": manifest_digest,
+                "buildx.build.provenance": {
+                    "buildType": "https://mobyproject.org/buildkit@v1",
+                    "builder": {},
+                    "invocation": {},
+                    "materials": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    observed = build._validate_loaded_build_image(metadata, manifest_digest)
+
+    assert observed == config_digest
+
+
+def test_loaded_image_rejects_id_outside_build_metadata(tmp_path):
+    config_digest = "sha256:" + "a" * 64
+    manifest_digest = "sha256:" + "b" * 64
+    metadata = tmp_path / "metadata.json"
+    metadata.write_text(
+        json.dumps(
+            {
+                "containerimage.config.digest": config_digest,
+                "containerimage.digest": manifest_digest,
+                "buildx.build.provenance": {
+                    "buildType": "https://mobyproject.org/buildkit@v1",
+                    "builder": {},
+                    "invocation": {},
+                    "materials": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(build.BuildError, match="metadata"):
+        build._validate_loaded_build_image(
+            metadata, "sha256:" + "c" * 64
+        )
+
+
 def test_project_base_ids_are_protected_from_prune(tmp_path):
     project = tmp_path / "video" / "amd-ai-project.toml"
     project.parent.mkdir()

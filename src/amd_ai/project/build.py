@@ -130,8 +130,6 @@ def project_build_argv(
     fingerprint: str,
     docker_prefix: Sequence[str] = ("docker",),
 ) -> tuple[str, ...]:
-    if base_image != base_digest:
-        raise ProjectBuildError("base image and digest must match")
     alias = project_parent_alias(base_image)
     if FINGERPRINT_PATTERN.fullmatch(fingerprint) is None:
         raise ProjectBuildError("project fingerprint must be a lowercase SHA-256")
@@ -274,8 +272,8 @@ def inspect_parent_image(
     record = _inspect_image(config.base_image, runner, docker_prefix, required=True)
     assert record is not None
     image_id = _image_id(record, config.base_image)
-    if image_id != config.base_digest:
-        raise ProjectBuildError("resolved parent image does not match the configured digest")
+    if image_id != config.base_image:
+        raise ProjectBuildError("resolved parent image does not match the configured ID")
     labels = _labels(record, config.base_image)
     profile_id = labels.get("org.amd-ai.profile.id", "")
     if not profile_id:

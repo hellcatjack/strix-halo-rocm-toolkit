@@ -1000,10 +1000,10 @@ class InstallerWorkflow:
                 {
                     "release_id": "local",
                     "base_image_reference": output.base_reference,
-                    "base_manifest_digest": output.base_config_digest,
+                    "base_manifest_digest": output.base_reference,
                     "base_config_digest": output.base_config_digest,
                     "torch_image_reference": output.torch_reference,
-                    "torch_manifest_digest": output.torch_config_digest,
+                    "torch_manifest_digest": output.torch_reference,
                     "torch_config_digest": output.torch_config_digest,
                 }
             )

@@ -16,7 +16,7 @@ from amd_ai.doctor.models import (
     DoctorReport,
 )
 from amd_ai.image.build import Docker
-from amd_ai.image.publish import DockerPublishRegistry, PublishError
+from amd_ai.image.publish import AnonymousDockerRegistry, PublishError
 from amd_ai.installer.models import ReleaseImage, StableRelease
 from amd_ai.installer.release import (
     ReleaseError,
@@ -137,7 +137,8 @@ def doctor_platform(
                 torch_static_valid = False
             continue
         if (
-            inspection.config_digest != image.config_digest
+            inspection.config_digest
+            not in {image.config_digest, image.manifest_digest}
             or image.reference not in inspection.repo_digests
         ):
             diagnostics.append(
@@ -171,7 +172,10 @@ def doctor_platform(
         (TORCH_FRIENDLY_TAG, release.torch),
     ):
         friendly_id = backend.inspect_friendly(tag)
-        if friendly_id is not None and friendly_id != image.config_digest:
+        if friendly_id is not None and friendly_id not in {
+            image.config_digest,
+            image.manifest_digest,
+        }:
             diagnostics.append(
                 _diagnostic(
                     "IMAGE.DIGEST_DRIFT",
@@ -248,7 +252,16 @@ def doctor_project(
         )
 
     facts["project_config"] = str(config.path)
-    if config.base_digest != release.torch.config_digest:
+    if (
+        config.base_digest != release.torch.config_digest
+        or config.base_manifest_digest
+        not in {None, release.torch.manifest_digest}
+        or config.base_image
+        not in {
+            release.torch.config_digest,
+            release.torch.manifest_digest,
+        }
+    ):
         diagnostics.append(
             _diagnostic(
                 "IMAGE.DIGEST_DRIFT",
@@ -401,7 +414,7 @@ def _check_overlay(
 class SubprocessDoctorBackend:
     def __init__(self, docker_prefix: tuple[str, ...]) -> None:
         self.docker_prefix = docker_prefix
-        self.registry = DockerPublishRegistry(docker_prefix)
+        self.registry = AnonymousDockerRegistry(docker_prefix)
 
     @classmethod
     def detect(cls) -> SubprocessDoctorBackend:

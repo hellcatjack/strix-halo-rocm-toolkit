@@ -9,11 +9,12 @@
 | qualification report digest | 完整 gfx1151 报告 SHA-256 |
 | SBOM digest | SPDX JSON 摘要 |
 | OCI manifest digest | registry 内容寻址入口，也称 manifest digest |
-| Docker config ID | 解压后镜像配置身份，也称 config digest |
-| parent config digest | 项目配置锁定的 Torch 父层 config ID |
+| Docker local image ID | 本机 Docker 后端用于寻址镜像的不可变 ID；可能是 config 或 manifest digest |
+| OCI config digest | 解压后镜像配置身份，也称 config digest |
+| parent manifest/config pair | 项目配置锁定的 Torch 父层 manifest 与 config digest |
 | project image ID | 当前项目上下文派生的不可变本地 ID |
 
-manifest digest 与 config digest 不是同一值，不能互换。安装器按 `image@sha256:...` 拉取 OCI manifest，随后要求 Docker inspect 的 config ID、RepoDigests、OCI labels 和内嵌 profile/lock/manifest 摘要全部与 stable manifest 一致。
+manifest digest 与 config digest 不是同一值，不能互换。安装器按 `image@sha256:...` 拉取 OCI manifest，并接受 Docker inspect 根据存储后端返回该 manifest digest 或对应 config digest；两种情况都会继续核对固定 manifest 的 config descriptor、RepoDigests、OCI labels 和内嵌 profile/lock/manifest 摘要。
 
 默认 registry 是公开 GHCR。安装器使用临时空 Docker 配置执行 anonymous pull，证明部署不依赖维护者凭据；发布门禁还会在独立空认证目录中再次拉取两个 exact reference。
 

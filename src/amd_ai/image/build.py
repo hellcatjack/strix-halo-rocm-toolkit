@@ -357,11 +357,9 @@ def build_rocm_python(
         metadata_file=metadata.relative_to(repo_root),
     )
     _run_live(argv, cwd=repo_root, observer=observer)
-    metadata_digest = _validate_build_metadata(metadata)
     image_id = docker.image_id(ROCM_PYTHON_TAG)
     assert image_id is not None
-    if metadata_digest != image_id:
-        raise BuildError("base image ID does not match its BuildKit metadata")
+    config_digest = _validate_loaded_build_image(metadata, image_id)
     check = _run_docker_command(
         docker,
         (
@@ -379,7 +377,7 @@ def build_rocm_python(
     )
     if observer is None:
         print(check.stdout, end="")
-    return ROCM_PYTHON_TAG, image_id
+    return ROCM_PYTHON_TAG, config_digest
 
 
 def build_rocm_pytorch(
@@ -438,13 +436,11 @@ def build_rocm_pytorch(
         metadata_file=metadata.relative_to(repo_root),
     )
     _run_live(argv, cwd=repo_root, observer=observer)
-    metadata_digest = _validate_build_metadata(metadata)
     if docker.image_id(alias) != parent:
         raise BuildError("parent alias changed during the image build")
     image_id = docker.image_id(tag)
     assert image_id is not None
-    if metadata_digest != image_id:
-        raise BuildError("Torch image ID does not match its BuildKit metadata")
+    config_digest = _validate_loaded_build_image(metadata, image_id)
     _verify_profile_labels(docker, tag, profile)
     check = _run_docker_command(
         docker,
@@ -463,7 +459,7 @@ def build_rocm_pytorch(
     )
     if observer is None:
         print(check.stdout, end="")
-    return tag, image_id
+    return tag, config_digest
 
 
 def prune_images(
@@ -790,6 +786,24 @@ def _validate_build_metadata(path: Path) -> str:
         "materials",
     } <= provenance.keys():
         raise BuildError("BuildKit metadata has no max build provenance record")
+    return config_digest
+
+
+def _validate_loaded_build_image(path: Path, local_image_id: str) -> str:
+    config_digest = _validate_build_metadata(path)
+    if local_image_id == config_digest:
+        return config_digest
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise BuildError(f"invalid BuildKit metadata file {path}: {error}") from error
+    manifest_digest = payload.get("containerimage.digest")
+    if (
+        not isinstance(manifest_digest, str)
+        or IMAGE_ID_PATTERN.fullmatch(manifest_digest) is None
+        or local_image_id != manifest_digest
+    ):
+        raise BuildError("loaded image ID does not match its BuildKit metadata")
     return config_digest
 
 

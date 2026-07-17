@@ -162,13 +162,22 @@ def test_system_executor_parent_pull_uses_anonymous_registry(
             docker.pull(release.torch.reference),
         ),
     )
-    monkeypatch.setattr(executor.registry, "tag", lambda source, target: None)
+    tag_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        executor.registry,
+        "tag_reference",
+        lambda source, target: tag_calls.append((source, target)),
+    )
 
     executor.pull_and_verify(executor.release)
 
     assert authless_calls == [
         executor.release.base.reference,
         executor.release.torch.reference,
+    ]
+    assert tag_calls == [
+        (executor.release.base.reference, repair.ROCM_PYTHON_TAG),
+        (executor.release.torch.reference, repair.STABLE_TORCH_TAG),
     ]
 
 

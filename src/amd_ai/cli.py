@@ -46,6 +46,7 @@ from amd_ai.image.build import (
     STABLE_TORCH_TAG,
 )
 from amd_ai.image.publish import (
+    AnonymousDockerRegistry,
     DockerPublishRegistry,
     PublishError,
     observe_pushed_release,
@@ -55,7 +56,10 @@ from amd_ai.image.publish import (
     verify_publish_candidate_local_images,
     write_observed_release,
 )
-from amd_ai.installer.actions import ProductionInstallerActions
+from amd_ai.installer.actions import (
+    ProductionInstallerActions,
+    bind_selected_parent,
+)
 from amd_ai.installer.models import (
     InstallMode,
     InstallOptions,
@@ -75,6 +79,7 @@ from amd_ai.installer.release import (
     ReleaseError,
     load_stable_release,
     pull_and_verify_release,
+    verify_release_image,
 )
 from amd_ai.installer.workflow import InstallerWorkflow
 from amd_ai.overlay.models import (
@@ -675,12 +680,40 @@ def _image_build(args: argparse.Namespace) -> int:
 
 def _project_init(args: argparse.Namespace) -> int:
     docker = Docker.detect()
+    runner = SubprocessRunner()
+    base_config_digest = None
+    base_manifest_digest = None
+    if args.base_profile == "stable":
+        release = load_stable_release(
+            Path(__file__).resolve().parents[2]
+            / "profiles/releases/stable.json"
+        )
+        registry = AnonymousDockerRegistry(
+            docker.prefix,
+            runner=runner,
+        )
+        verify_release_image(
+            release,
+            release.torch,
+            kind="torch",
+            docker=registry,
+        )
+        bind_selected_parent(
+            reference=release.torch.reference,
+            config_digest=release.torch.config_digest,
+            runner=runner,
+            docker_prefix=docker.prefix,
+        )
+        base_config_digest = release.torch.config_digest
+        base_manifest_digest = release.torch.manifest_digest
     destination = args.directory or Path(args.name)
     project_dir = initialize_project(
         name=args.name,
         destination=destination,
         base_profile=args.base_profile,
-        runner=SubprocessRunner(),
+        runner=runner,
+        base_config_digest=base_config_digest,
+        base_manifest_digest=base_manifest_digest,
         docker_prefix=docker.prefix,
     )
     print(f"initialized {project_dir}")
@@ -731,7 +764,7 @@ def _gpu_release(args: argparse.Namespace) -> int:
 def verify_release_command(*, manifest_path: Path) -> int:
     release = load_stable_release(manifest_path)
     docker = Docker.detect()
-    registry = DockerPublishRegistry(docker.prefix)
+    registry = AnonymousDockerRegistry(docker.prefix)
     pull_and_verify_release(release, docker=registry)
     print(f"verified {release.base.reference}")
     print(f"verified {release.torch.reference}")

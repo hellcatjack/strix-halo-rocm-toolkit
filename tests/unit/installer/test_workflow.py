@@ -1841,6 +1841,48 @@ def test_pulled_identity_mismatch_never_offers_local_build(
     assert "build_local_images" not in actions.calls
 
 
+def test_v032_resumes_v031_containerd_identity_failure(
+    tmp_path: Path,
+) -> None:
+    options = full_options(tmp_path)
+    old_actions = FakeInstallerActions.full_no_reboot()
+    old_actions.pull_error = ReleaseIdentityError(
+        "containerd image ID exposed the manifest digest"
+    )
+    old_result = installer_workflow(
+        tmp_path,
+        actions=old_actions,
+        options=options,
+        prompts=FakePrompts(exact={"INSTALL-KERNEL": True, "APPLY": True}),
+        installer_version="0.3.1",
+        installer_source_revision="d" * 40,
+    ).run()
+
+    assert old_result.exit_code == 2
+    assert old_result.state is not None
+    assert old_result.state.current_stage is InstallStage.IMAGE_PULL_OR_BUILD
+
+    patch_actions = FakeInstallerActions.full_no_reboot()
+    patched = installer_workflow(
+        tmp_path,
+        actions=patch_actions,
+        options=options,
+        prompts=FakePrompts(),
+        installer_version="0.3.2",
+        installer_source_revision="e" * 40,
+    ).run()
+
+    assert patched.exit_code == 0
+    assert patched.state is not None
+    assert patched.state.installer_version == "0.3.2"
+    assert "host_apply" not in patch_actions.calls
+    assert patch_actions.calls[:3] == [
+        "kernel_verify",
+        "host_verify",
+        "pull_release",
+    ]
+
+
 def test_noninteractive_build_source_never_attempts_pull(
     tmp_path: Path,
 ) -> None:
@@ -1857,6 +1899,11 @@ def test_noninteractive_build_source_never_attempts_pull(
     assert result.exit_code == 0
     assert "pull_release" not in actions.calls
     assert "build_local_images" in actions.calls
+    assert result.state is not None
+    assert result.state.base_manifest_digest == "sha256:" + "6" * 64
+    assert result.state.base_config_digest == "sha256:" + "8" * 64
+    assert result.state.torch_manifest_digest == "sha256:" + "7" * 64
+    assert result.state.torch_config_digest == "sha256:" + "9" * 64
 
 
 def test_project_initialization_receives_selected_exact_parent_identity(

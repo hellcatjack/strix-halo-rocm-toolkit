@@ -34,6 +34,8 @@ class FakeReleaseDocker:
         self.hashes: dict[tuple[str, str], str] = {}
         self.pull_calls: list[str] = []
         self.inspect_calls: list[str] = []
+        self.manifest_config_calls: list[str] = []
+        self.manifest_config_digests: dict[str, str] = {}
         self.hash_calls: list[tuple[str, str]] = []
         self.pull_error: Exception | None = None
 
@@ -52,6 +54,10 @@ class FakeReleaseDocker:
     def inspect(self, reference: str) -> Mapping[str, object]:
         self.inspect_calls.append(reference)
         return self.records[reference]
+
+    def manifest_config_digest(self, reference: str) -> str:
+        self.manifest_config_calls.append(reference)
+        return self.manifest_config_digests[reference]
 
     def hash_file(self, reference: str, path: str) -> str:
         self.hash_calls.append((reference, path))
@@ -92,6 +98,7 @@ class FakeReleaseDocker:
             "RepoDigests": [image.reference],
             "Config": {"Labels": labels},
         }
+        self.manifest_config_digests[image.reference] = image.config_digest
         for name, path in paths.items():
             self.hashes[(image.reference, path)] = image.artifact_digests[name]
 
@@ -253,9 +260,9 @@ class FakeInstallerActions:
             (("build", "rocm-python"), ("build", "rocm-pytorch"))
         )
         return LocalBuildResult(
-            base_reference="rocm-python:7.2.1-py3.12",
+            base_reference="sha256:" + "6" * 64,
             base_config_digest="sha256:" + "8" * 64,
-            torch_reference="rocm-pytorch:7.2.1-py3.12-torch2.9.1",
+            torch_reference="sha256:" + "7" * 64,
             torch_config_digest="sha256:" + "9" * 64,
             source_revision="d" * 40,
         )
