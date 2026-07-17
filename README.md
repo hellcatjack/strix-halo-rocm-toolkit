@@ -14,8 +14,8 @@
 ### 1. 开始前确认
 
 - BIOS/UEFI 的 UMA Frame Buffer 使用主板允许的最小值，建议 512 MiB；
-- 当前用户具有 `sudo` 权限，网络可访问 GitHub；镜像网络默认访问华为云
-  SWR，获取失败时回退 GHCR；
+- 当前用户具有 `sudo` 权限；中国大陆优先访问华为 CodeArts，其他地区可访问
+  GitHub；镜像网络默认访问华为云 SWR，获取失败时回退 GHCR；
 - Docker 数据目录建议至少有 40 GiB 可用空间；
 - 宿主具有 `git` 和 `python3.12`。
 
@@ -30,7 +30,7 @@ sudo apt install -y git python3.12
 
 其他系统要求和旧 ROCm 残留处理见[安装前准备](#安装前准备)。
 
-### 2. 获取固定版本
+### 2. 获取工具包
 
 **宿主机：**
 
@@ -39,13 +39,23 @@ TOOLKIT="$HOME/src/strix-halo-rocm-toolkit"
 PROJECT="$HOME/ai-projects/video-lab"
 
 mkdir -p "$(dirname "$TOOLKIT")"
-git clone --branch v0.3.3 --depth 1 \
-  https://github.com/hellcatjack/strix-halo-rocm-toolkit.git \
+git clone --branch main --single-branch --depth 1 \
+  https://codehub.devcloud.cn-east-3.huaweicloud.com/24adbbc457d04a1e86e33004abb5ddc8/strix-halo-rocm-toolkit.git \
   "$TOOLKIT"
 cd "$TOOLKIT"
 ```
 
-不要通过 `curl | sudo bash` 执行安装器。固定 Git checkout 让安装来源和恢复状态可以审计。
+以上是中国大陆推荐的公开华为 CodeArts HTTPS 地址，匿名克隆不需要华为云
+凭据。其他地区也可以从 GitHub 获取同一份公开代码：
+
+```bash
+git clone --branch main --single-branch --depth 1 \
+  https://github.com/hellcatjack/strix-halo-rocm-toolkit.git \
+  "$TOOLKIT"
+```
+
+不要通过 `curl | sudo bash` 执行安装器。保留 Git checkout 让安装来源和恢复
+状态可以审计；同一个工作目录只选择一个代码源，不要在恢复安装期间切换远端。
 
 ### 3. 安装平台并创建第一个项目
 
@@ -271,8 +281,8 @@ sudo apt install -y git python3.12
 在任何写入前先执行只读检查：
 
 ```bash
-git clone --branch v0.3.3 --depth 1 \
-  https://github.com/hellcatjack/strix-halo-rocm-toolkit.git
+git clone --branch main --single-branch --depth 1 \
+  https://codehub.devcloud.cn-east-3.huaweicloud.com/24adbbc457d04a1e86e33004abb5ddc8/strix-halo-rocm-toolkit.git
 cd strix-halo-rocm-toolkit
 mkdir -p reports
 ./bin/host-preflight --json reports/preflight.json
