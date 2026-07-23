@@ -52,6 +52,7 @@ def test_readme_quick_start_is_ordered_complete_and_safe() -> None:
     for heading in required_headings:
         assert heading in text, f"README.md is missing {heading!r}"
 
+    assert text.count("## 快速开始\n") == 1
     quick_start = text.index("## 快速开始")
     contents = text.index("## 目录")
     rationale = text.index("## 项目解决什么问题")
@@ -62,21 +63,65 @@ def test_readme_quick_start_is_ordered_complete_and_safe() -> None:
         "--mode full",
         '--project-dir "$PROJECT"',
         "sudo reboot",
-        'strix-halo-rocm project run "$PROJECT"',
+        "ls -l /dev/kfd /dev/dri/render*",
+        "docker image inspect video-lab:runtime",
+        "docker run --rm -it",
         "assert torch.version.hip",
         "torch.cuda.is_available()",
         'torch.device("cuda:0")',
         "torch.cuda.synchronize()",
-        "pip install transformers safetensors",
-        "strix-halo-rocm project lock",
-        'strix-halo-rocm doctor "$PROJECT"',
+        "python -m pip install transformers safetensors",
         "**宿主机：**",
         "**项目容器内：**",
     )
     for step in required_steps:
         assert step in quick_text, f"quick start is missing {step!r}"
 
+    assert "strix-halo-rocm project run" not in quick_text
     assert re.search(r"(?m)^\s*sudo strix-halo-rocm(?:\s|$)", quick_text) is None
+
+    bash_blocks = re.findall(r"```bash\n(.*?)\n```", text, flags=re.DOTALL)
+    docker_blocks = [block for block in bash_blocks if "docker run --rm -it" in block]
+    assert len(docker_blocks) == 1, (
+        "README must contain one canonical direct-run command"
+    )
+    docker_block = docker_blocks[0]
+
+    required_arguments = (
+        "--device /dev/kfd",
+        "--device /dev/dri",
+        "--group-add \"$(stat -c '%g' /dev/kfd)\"",
+        "--group-add \"$(stat -c '%g' \"$RENDER_NODE\")\"",
+        "--user \"$(id -u):$(id -g)\"",
+        "--ipc=private",
+        "--shm-size=16g",
+        "PIP_TARGET=/workspace/.cache/python-site",
+        "PYTHONPATH=/workspace/.cache/python-site:/workspace",
+        '--mount "type=bind,src=$PROJECT,dst=/workspace"',
+        "--workdir /workspace",
+        "--entrypoint /bin/bash",
+        "video-lab:runtime",
+    )
+    for argument in required_arguments:
+        assert argument in docker_block, f"direct-run command is missing {argument!r}"
+
+    forbidden_arguments = (
+        "--privileged",
+        "--ipc=host",
+        "--cap-add",
+        "PIP_USER",
+        "PYTHONUSERBASE",
+    )
+    for argument in forbidden_arguments:
+        assert argument not in docker_block, f"direct-run command contains {argument!r}"
+
+    release = json.loads(Path("profiles/releases/stable.json").read_text())
+    swr_torch = (
+        "swr.cn-east-3.myhuaweicloud.com/hellcat-home/"
+        "strix-halo-rocm-pytorch@" + release["torch"]["manifest_digest"]
+    )
+    assert swr_torch in text
+    assert ".cache" in Path("templates/project/.dockerignore").read_text()
 
 
 def test_readme_bash_examples_are_valid_shell() -> None:

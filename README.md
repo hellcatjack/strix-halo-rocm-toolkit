@@ -9,7 +9,7 @@
 
 ## 快速开始
 
-本路径适用于 **Ubuntu 24.04.x AMD64 + AMD Ryzen AI Max+ 395 / Radeon 8060S**。完成后将得到一个已经通过真实 GPU 运算检查的独立项目容器，并可直接安装自己的 Python 依赖。
+本路径从一台全新的 **Ubuntu 24.04.x AMD64 + AMD Ryzen AI Max+ 395 / Radeon 8060S** 主机开始。完成后将得到项目派生镜像 `video-lab:runtime`，并只用标准 `docker run` 挂载一个业务目录、映射 GPU 和进入 Bash。
 
 ### 1. 开始前确认
 
@@ -104,25 +104,65 @@ cd "$TOOLKIT"
 
 不要删除安装状态，也不要切换为 `container` 模式。普通失败先读取 `CAUSE`、`LOG` 和 `RESUME`，修复原因后仍执行同一条命令；可信写入阶段会显示为 `SKIP`。full 模式的 `KERNEL_VERIFY` 和 `HOST_VERIFY` 是只读恢复关卡，每次恢复都会重新运行，防止用户在其他内核启动后复用旧检查结果。
 
-### 5. 启动项目 Docker
+### 5. 确认 GPU 设备和项目镜像
+
+安装器全部阶段通过后，确认宿主 GPU 设备节点和项目派生镜像都存在：
 
 **宿主机：**
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
-strix-halo-rocm --version
-strix-halo-rocm project run "$PROJECT"
+PROJECT="$HOME/ai-projects/video-lab"
+
+ls -l /dev/kfd /dev/dri/render*
+docker image inspect video-lab:runtime \
+  --format 'image={{join .RepoTags ","}} id={{.Id}}'
 ```
 
-如果当前用户不能直接访问 Docker，先运行 `sudo -v` 刷新凭据，再执行同一条 `project run`；不要使用 `sudo strix-halo-rocm`。
+必须看到 `/dev/kfd`、至少一个 `/dev/dri/renderD*`，以及
+`video-lab:runtime` 的镜像 ID。若 Docker 报权限错误，先注销并重新登录桌面或
+SSH，让安装器添加的 `docker` 组生效，再从本步骤继续；不要改用
+`sudo strix-halo-rocm`。
 
-`project run` 会按需构建项目镜像并映射 GPU 设备。进入 Bash 前，项目入口会自动校验 Torch manifest、项目 overlay、ROCm GPU 识别和真实 GPU 运算；任何一项失败都不会进入项目 shell。
+### 6. 使用标准 Docker run 启动
 
-如果自动检查失败，不要继续安装 Python 依赖。回到宿主机运行 `strix-halo-rocm doctor "$PROJECT"`，按报告修复 GPU、镜像或 overlay 问题后再启动项目。
+以下是本文唯一的完整直启命令。它只挂载 `$PROJECT` 到 `/workspace`，不会默认
+共享模型、Hugging Face 缓存或其他项目数据：
 
-### 6. 验证 PyTorch GPU
+**宿主机：**
 
-看到项目 Bash 提示符后运行以下探针。ROCm 版 PyTorch 仍使用 `torch.cuda` API；这里的 `cuda:0` 表示 PyTorch 的设备接口，不表示安装了 NVIDIA CUDA。
+```bash
+PROJECT="$(realpath "$HOME/ai-projects/video-lab")"
+RENDER_NODE="$(find /dev/dri -maxdepth 1 -type c -name 'renderD*' | sort | head -n 1)"
+
+if [[ ! -c /dev/kfd || -z "$RENDER_NODE" ]]; then
+  echo "未发现可用的 AMD GPU 设备节点，请先完成宿主机安装与重启。" >&2
+else
+  docker run --rm -it \
+    --device /dev/kfd \
+    --device /dev/dri \
+    --group-add "$(stat -c '%g' /dev/kfd)" \
+    --group-add "$(stat -c '%g' "$RENDER_NODE")" \
+    --user "$(id -u):$(id -g)" \
+    --ipc=private \
+    --shm-size=16g \
+    --env HOME=/workspace \
+    --env PIP_TARGET=/workspace/.cache/python-site \
+    --env PYTHONPATH=/workspace/.cache/python-site:/workspace \
+    --env PATH=/workspace/.cache/python-site/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    --mount "type=bind,src=$PROJECT,dst=/workspace" \
+    --workdir /workspace \
+    --entrypoint /bin/bash \
+    video-lab:runtime
+fi
+```
+
+看到容器中的 Bash 提示符即表示标准 Docker 启动成功。参数含义、公开父镜像
+替换方式和直启模式边界见[极简 Docker 直启](#极简-docker-直启)。
+
+### 7. 验证 GPU 并安装 Python 依赖
+
+ROCm 版 PyTorch 仍使用 `torch.cuda` API；这里的 `cuda:0` 是 PyTorch 设备
+接口，不表示安装了 NVIDIA CUDA。
 
 **项目容器内：**
 
@@ -143,40 +183,23 @@ result = left @ right
 torch.cuda.synchronize()
 print(f"GPU_OK device={result.device} mean={result.mean().item():.6f}")
 PY
+
+python -m pip install transformers safetensors
+python -m pip check
 ```
 
-必须看到非空 HIP 版本、Radeon GPU 名称和 `GPU_OK device=cuda:0`。仅能 `import torch` 不算 GPU 验证通过。
+必须看到非空 HIP 版本、Radeon GPU 名称和 `GPU_OK device=cuda:0`。普通包
+保存在业务目录的 `.cache/python-site`，删除并重新创建容器后仍然存在；项目
+模板已从 Docker 构建上下文排除 `.cache`。
 
-### 7. 开始构建 Python 环境
+直启模式允许 `pip` 覆盖任何 Python 包，包括 Torch。这里只安装普通业务
+依赖，不要把 `torch`、`torchvision`、`torchaudio` 或 `triton` 加入这条命令。
+需要启动前自动 GPU 检查、Torch 保护、overlay、依赖锁或修复能力时，改用
+[创建和运行项目](#创建和运行项目)中的托管工作流。
 
-GPU 验证通过后，可以直接试装普通项目依赖：
-
-**项目容器内：**
-
-```bash
-pip install transformers safetensors
-pip check
-```
-
-直接安装的依赖保存在当前项目的持久 overlay 中，退出临时容器后仍然存在。受保护的 `torch`、`torchvision`、`torchaudio` 和 `triton` 不能被项目安装覆盖；不要再创建一份包含 Torch 的 venv。确实需要其他 Torch 组合时，使用[自选 PyTorch 版本](#自选-pytorch-版本)创建完整父镜像 profile。
-
-试装稳定后，把实际直接依赖写入项目的 `requirements.in`，然后退出容器。以下仍以刚才的两个包为例：
-
-**仍在项目容器内：**
-
-```bash
-printf '%s\n' 'transformers' 'safetensors' > requirements.in
-exit
-```
-
-**宿主机：**
-
-```bash
-strix-halo-rocm project lock "$PROJECT"
-strix-halo-rocm project run "$PROJECT" --build
-```
-
-至此已经具备可运行的 ROCm 7.2.1 / PyTorch 2.9.1 GPU 容器、独立项目目录、受保护的 Torch 基线和可继续扩展的 Python 环境。依赖试装、卸载和固化的完整规则见[Python 依赖与受保护 pip](#python-依赖与受保护-pip)。
+至此已经从全新 Ubuntu 24.04 主机完成 ROCm 7.2.1 / PyTorch 2.9.1 平台安装、
+项目派生镜像创建、标准 Docker GPU 映射、真实矩阵运算验证和普通 Python 依赖
+安装。
 
 ## 目录
 
@@ -635,89 +658,44 @@ ghcr.io/hellcatjack/strix-halo-rocm-pytorch@sha256:dc0bb217474cfd4f602423bd3bf4f
 
 ## 极简 Docker 直启
 
-本节面向只需要在本机启动容器、挂载一个业务目录并直接使用 GPU 的用户。
-它不使用项目 overlay、受保护 pip、启动时 Torch 校验、自动修复或跨主机部署。
-需要这些能力时继续使用 [`strix-halo-rocm project run`](#创建和运行项目)。
+完整命令见[快速开始第 6 步](#6-使用标准-docker-run-启动)，真实 GPU 探针与
+普通依赖安装见[第 7 步](#7-验证-gpu-并安装-python-依赖)。本节只解释参数和
+适用边界，避免维护第二份可能漂移的启动命令。
 
-宿主必须已经存在 `/dev/kfd`、至少一个 `/dev/dri/renderD*`，并且当前用户
-可以执行 Docker。派生镜像还必须已经通过安装器或 `project run --build`
-构建完成。
+| 参数 | 作用 |
+| --- | --- |
+| `--device /dev/kfd` | 映射 ROCm 计算设备 |
+| `--device /dev/dri` | 映射 DRM render 设备目录 |
+| 两个 `--group-add` | 按宿主设备的数字 GID 授予访问权限，不依赖容器内组名 |
+| `--user` | 让容器以当前宿主 UID/GID 写业务目录 |
+| `--ipc=private`、`--shm-size=16g` | 保持私有 IPC，并为大型 AI 任务提供明确共享内存 |
+| `--mount`、`--workdir` | 只把业务目录挂载到 `/workspace` 并作为工作目录 |
+| `PIP_TARGET`、`PYTHONPATH` | 把普通 Python 包持久化到 `.cache/python-site` 并立即加入导入路径 |
+| `PATH` | 优先使用业务目录脚本、镜像 Python venv 和 ROCm 工具链 |
+| `--entrypoint /bin/bash` | 绕过项目策略入口，直接进入交互 Bash |
 
-### 直接进入项目派生镜像
+快速开始使用安装器生成的 `video-lab:runtime`，其中包含该项目构建时的业务
+依赖。只需要正式 ROCm/PyTorch 父环境时，把完整命令最后一行的镜像替换为：
 
-把 `PROJECT` 和 `IMAGE` 改成实际项目目录与派生镜像名：
-
-```bash
-PROJECT="$(realpath "$HOME/ai-projects/video-lab")"
-IMAGE="video-lab:runtime"
-RENDER_NODE="$(find /dev/dri -maxdepth 1 -type c -name 'renderD*' | sort | head -n 1)"
-
-test -c /dev/kfd
-test -n "$RENDER_NODE"
-
-docker run --rm -it \
-  --device /dev/kfd \
-  --device /dev/dri \
-  --group-add "$(stat -c '%g' /dev/kfd)" \
-  --group-add "$(stat -c '%g' "$RENDER_NODE")" \
-  --user "$(id -u):$(id -g)" \
-  --ipc=private \
-  --shm-size=16g \
-  --env HOME=/workspace \
-  --env PIP_TARGET=/workspace/.cache/python-site \
-  --env PYTHONPATH=/workspace/.cache/python-site:/workspace \
-  --env PATH=/workspace/.cache/python-site/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-  --mount "type=bind,src=$PROJECT,dst=/workspace" \
-  --workdir /workspace \
-  --entrypoint /bin/bash \
-  "$IMAGE"
+```text
+swr.cn-east-3.myhuaweicloud.com/hellcat-home/strix-halo-rocm-pytorch@sha256:dc0bb217474cfd4f602423bd3bf4fe8714b03e900cf3c6b4417b99e622ebcf8b
 ```
 
-`--entrypoint /bin/bash` 会绕过派生镜像的策略入口点，这是本模式的预期行为。
-容器不会自动检查 Torch、GPU 或项目状态，也不会阻止用户替换 Torch。
+该公开 SWR 引用锁定 stable manifest digest，匿名即可拉取；父镜像不包含项目
+派生镜像中的业务依赖。
 
-### 直接进入公开 PyTorch 父镜像
+直启模式有意不提供以下保证：
 
-使用同一条命令，只替换镜像变量：
+- 不初始化或切换项目 overlay；
+- 不验证项目镜像是否需要重建；
+- 不保护 Torch、TorchVision、TorchAudio 或 Triton；
+- 不在进入 Bash 前执行 GPU 运算门禁；
+- 不自动诊断、修复或生成跨主机部署状态。
 
-```bash
-IMAGE="swr.cn-east-3.myhuaweicloud.com/hellcat-home/strix-halo-rocm-pytorch@sha256:dc0bb217474cfd4f602423bd3bf4fe8714b03e900cf3c6b4417b99e622ebcf8b"
-```
-
-父镜像只预装 ROCm、Python 和锁定的 PyTorch 栈，不包含项目派生镜像中的
-业务依赖。
-
-### 安装普通 Python 包
-
-进入容器后直接执行：
-
-```bash
-pip install transformers safetensors
-```
-
-普通包写入业务目录的 `.cache/python-site`，重新创建容器后仍然存在。项目
-模板已经从 Docker 构建上下文排除 `.cache`。这些包可以覆盖镜像中的 Python
-包，包括 Torch；需要受保护基线时不要使用本模式。
-
-### 手工验证 GPU
-
-```bash
-python - <<'PY'
-import torch
-
-print("torch:", torch.__version__)
-print("hip:", torch.version.hip)
-print("available:", torch.cuda.is_available())
-
-x = torch.randn((1024, 1024), device="cuda")
-y = x @ x
-torch.cuda.synchronize()
-print("GPU_OK:", y.device)
-PY
-```
-
-成功时必须看到非空 HIP 版本、`available: True` 和 `GPU_OK: cuda:0`。
-这条命令不需要 `--privileged`、`--ipc=host` 或额外 capability。
+镜像本身保持不可变，但挂载目录中的 `.cache/python-site` 可以遮蔽镜像包。
+需要上述保证时使用[创建和运行项目](#创建和运行项目)中的
+`strix-halo-rocm project run`；直启命令不需要 `--privileged`、`--ipc=host`
+或额外 capability。
 
 ## 创建和运行项目
 
