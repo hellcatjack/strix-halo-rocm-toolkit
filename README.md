@@ -70,7 +70,8 @@ git clone --branch main --single-branch --depth 1 \
 
 完整模式将内核计划和平台计划分开审批。内核变更要求精确输入
 `INSTALL-KERNEL`，重启并通过桌面/GPU 检查后，平台准备要求精确输入
-`APPLY`；Docker 组授权会单独询问。省略 `--registry` 等价于
+`APPLY`；看到 `docker-group [yes/no]:` 时输入 `yes`，授权当前用户访问系统
+Docker daemon。该操作不会刷新已经打开的桌面或 SSH 会话。省略 `--registry` 等价于
 `--registry auto`：安装器先从公开华为云 SWR 匿名拉取固定 digest，仅在
 获取失败时回退 GHCR，并实时显示当前仓库、阶段、下载进度和私有日志路径。
 用户拉取这两个公开仓库都不需要 registry 凭据。
@@ -106,9 +107,31 @@ cd "$TOOLKIT"
 
 ### 5. 确认 GPU 设备和项目镜像
 
-安装器全部阶段通过后，确认宿主 GPU 设备节点和项目派生镜像都存在：
+安装器全部阶段通过后，先确认当前会话已经获得 Docker 组身份，socket 保持
+标准权限，并且无需 `sudo` 即可访问 daemon：
 
 **宿主机：**
+
+```bash
+id -nG
+getent group docker
+stat -Lc '%A %U %G %a %n' /var/run/docker.sock
+docker version --format 'server={{.Server.Version}}'
+```
+
+`id -nG` 必须包含 `docker`，socket 应显示为 `root docker 660`，最后一条命令
+必须输出服务端版本。若当前用户未出现在 `getent group docker` 中，执行：
+
+**宿主机：**
+
+```bash
+sudo usermod -aG docker "$USER"
+```
+
+随后完全注销桌面会话或断开 SSH，再重新登录；只关闭终端窗口不能保证刷新组
+身份。重新登录后再次执行上面的四项检查，全部通过后再确认 GPU 节点和镜像：
+
+**重新登录后的宿主机：**
 
 ```bash
 PROJECT="$HOME/ai-projects/video-lab"
@@ -119,9 +142,9 @@ docker image inspect video-lab:runtime \
 ```
 
 必须看到 `/dev/kfd`、至少一个 `/dev/dri/renderD*`，以及
-`video-lab:runtime` 的镜像 ID。若 Docker 报权限错误，先注销并重新登录桌面或
-SSH，让安装器添加的 `docker` 组生效，再从本步骤继续；不要改用
-`sudo strix-halo-rocm`。
+`video-lab:runtime` 的镜像 ID。若组和 socket 检查仍不符合预期，按
+[常见故障](#常见故障)中的 Docker API 权限项处理；不要跳过门禁继续运行容器，
+也不要改用 `sudo strix-halo-rocm`。
 
 ### 6. 使用标准 Docker run 启动
 
@@ -1044,7 +1067,7 @@ rm -rf "$HOME/.local/state/strix-halo-rocm-toolkit"
 | `release base config digest does not match` 且显示 manifest digest | `v0.3.1` 将 containerd image store 的 manifest ID 误当作 config ID；升级到 `v0.3.2` 或更新版本后重新执行原安装命令。已下载层会复用，不要删除安装状态、镜像或 `/var/lib/docker` |
 | `failed to resolve source metadata for docker.io/docker/dockerfile:1.7` | 旧项目模板会从 Docker Hub 获取外部 Dockerfile frontend，在中国网络可能超时。更新到当前 `main` 并重新执行完全相同的安装命令；`PROJECT_INIT` 会自动迁移哈希完全匹配的旧官方 Dockerfile，且不会重新下载已验证的 SWR 镜像。用户修改过的 Dockerfile 不会被覆盖，需自行删除外部 `# syntax` 和对应 `RUN --mount` |
 | `GPU.BIOS_VRAM_HIGH` | 在 BIOS/UEFI 将 UMA Frame Buffer 设为主板允许的最小值，建议 512 MiB；工具不会修改 GTT/TTM 或代替固件设置 |
-| Docker permission denied | 重新登录以刷新组成员关系，或运行 `sudo -v` 后让工具使用 `sudo docker` |
+| `permission denied while trying to connect to the Docker API` | 先执行快速开始第 5 步的四项检查。`getent` 中没有当前用户时执行 `sudo usermod -aG docker "$USER"`，然后完全重新登录；`getent` 有用户但 `id -nG` 没有 `docker` 时只需完全重新登录。若组身份正确但 socket 不是 `root:docker` 和 `0660`，执行 `sudo systemctl restart docker` 后重新检查。不要执行 `chmod 666 /var/run/docker.sock`；这会把 root 等价的 Docker API 暴露给所有本机用户。 |
 | 找不到 `/dev/kfd` | 直接在宿主运行 `host-preflight`；不要用未映射设备的普通容器报告判断宿主 |
 | 极简 Docker 直启时 `rocminfo` 或 Torch 无权访问 GPU | 确认命令同时包含 `/dev/kfd`、`/dev/dri` 和由 `stat -c '%g'` 得到的两个数字 `--group-add`；不要用固定的 `video`/`render` 组名代替宿主实际 GID |
 | 极简模式中的 `pip` 显示 protected pip、overlay 或 `--user` 错误 | 使用文档中的完整 `PATH`、`PIP_TARGET` 和 `PYTHONPATH` 参数重新创建容器；该组合会选择 `/opt/venv/bin/pip` 并写入业务目录 `.cache/python-site` |

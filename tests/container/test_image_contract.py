@@ -124,6 +124,41 @@ def test_readme_quick_start_is_ordered_complete_and_safe() -> None:
     assert ".cache" in Path("templates/project/.dockerignore").read_text()
 
 
+def test_readme_quick_start_gates_direct_docker_on_socket_access() -> None:
+    text = Path("README.md").read_text(encoding="utf-8")
+    quick_start = text.index("## 快速开始")
+    contents = text.index("## 目录")
+    quick_text = text[quick_start:contents]
+
+    required_guidance = (
+        "docker-group [yes/no]:",
+        "输入 `yes`",
+        "id -nG",
+        "getent group docker",
+        "stat -Lc '%A %U %G %a %n' /var/run/docker.sock",
+        "docker version --format 'server={{.Server.Version}}'",
+        'sudo usermod -aG docker "$USER"',
+        "完全注销桌面会话或断开 SSH",
+    )
+    for guidance in required_guidance:
+        assert guidance in quick_text, f"quick start is missing {guidance!r}"
+
+    docker_gate = quick_text.index("docker version --format")
+    image_inspect = quick_text.index("docker image inspect video-lab:runtime")
+    direct_run = quick_text.index("docker run --rm -it")
+    assert docker_gate < image_inspect < direct_run
+    assert "chmod 666 /var/run/docker.sock" not in quick_text
+
+
+def test_readme_docker_socket_recovery_preserves_standard_permissions() -> None:
+    text = Path("README.md").read_text(encoding="utf-8")
+
+    assert "permission denied while trying to connect to the Docker API" in text
+    assert "sudo systemctl restart docker" in text
+    assert "`root:docker` 和 `0660`" in text
+    assert "不要执行 `chmod 666 /var/run/docker.sock`" in text
+
+
 def test_readme_bash_examples_are_valid_shell() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
     blocks = re.findall(r"```bash\n(.*?)\n```", text, flags=re.DOTALL)
