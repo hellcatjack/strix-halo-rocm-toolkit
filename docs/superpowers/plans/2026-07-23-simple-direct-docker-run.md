@@ -4,7 +4,7 @@
 
 **Goal:** Add a copyable, local-only standard `docker run` workflow for the stable PyTorch parent image and existing project-derived images.
 
-**Architecture:** Documentation only. README will present one canonical Bash command that maps the Radeon devices and one business directory, bypasses the derived-image policy entrypoint, and persists ordinary pip user packages under that directory; managed `project run` remains documented as the protected alternative.
+**Architecture:** Documentation only. README will present one canonical Bash command that maps the Radeon devices and one business directory, bypasses the derived-image policy entrypoint, and persists ordinary pip user packages under the ignored `.cache` directory; managed `project run` remains documented as the protected alternative.
 
 **Tech Stack:** Markdown, Bash, Docker CLI, Python 3.12 standard library for documentation checks.
 
@@ -75,9 +75,9 @@ docker run --rm -it \
   --ipc=private \
   --shm-size=16g \
   --env HOME=/workspace \
-  --env PYTHONUSERBASE=/workspace/.python-user \
-  --env PIP_USER=1 \
-  --env PATH=/workspace/.python-user/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  --env PIP_TARGET=/workspace/.cache/python-site \
+  --env PYTHONPATH=/workspace/.cache/python-site:/workspace \
+  --env PATH=/workspace/.cache/python-site/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   --mount "type=bind,src=$PROJECT,dst=/workspace" \
   --workdir /workspace \
   --entrypoint /bin/bash \
@@ -106,8 +106,9 @@ IMAGE="swr.cn-east-3.myhuaweicloud.com/hellcat-home/strix-halo-rocm-pytorch@sha2
 pip install transformers safetensors
 ```
 
-普通包写入业务目录的 `.python-user`，重新创建容器后仍然存在。该目录可以
-覆盖镜像中的 Python 包，包括 Torch；需要受保护基线时不要使用本模式。
+普通包写入业务目录的 `.cache/python-site`，重新创建容器后仍然存在。项目
+模板已经从 Docker 构建上下文排除 `.cache`。这些包可以覆盖镜像中的 Python
+包，包括 Torch；需要受保护基线时不要使用本模式。
 
 ### 手工验证 GPU
 
@@ -136,7 +137,7 @@ Add these rows to the existing troubleshooting table:
 
 ```markdown
 | 极简 Docker 直启时 `rocminfo` 或 Torch 无权访问 GPU | 确认命令同时包含 `/dev/kfd`、`/dev/dri` 和由 `stat -c '%g'` 得到的两个数字 `--group-add`；不要用固定的 `video`/`render` 组名代替宿主实际 GID |
-| 极简模式中的 `pip` 显示 protected pip 或 overlay 错误 | 使用文档中的完整 `PATH`、`PYTHONUSERBASE` 和 `PIP_USER` 参数重新创建容器；该组合会选择 `/opt/venv/bin/pip` 并写入业务目录 `.python-user` |
+| 极简模式中的 `pip` 显示 protected pip、overlay 或 `--user` 错误 | 使用文档中的完整 `PATH`、`PIP_TARGET` 和 `PYTHONPATH` 参数重新创建容器；该组合会选择 `/opt/venv/bin/pip` 并写入业务目录 `.cache/python-site` |
 | 极简模式创建的文件无法由宿主修改 | 保留 `--user "$(id -u):$(id -g)"`，并确认业务目录允许当前宿主用户写入 |
 ```
 
@@ -218,10 +219,12 @@ for required in (
     "--group-add",
     '--user "$(id -u):$(id -g)"',
     "--shm-size=16g",
+    "--env PIP_TARGET=/workspace/.cache/python-site",
+    "--env PYTHONPATH=/workspace/.cache/python-site:/workspace",
     "--entrypoint /bin/bash",
 ):
     assert required in section, required
-for forbidden in ("--privileged", "--ipc=host", "--cap-add"):
+for forbidden in ("--privileged", "--ipc=host", "--cap-add", "PIP_USER"):
     assert forbidden not in section.split("这条命令不需要", 1)[0], forbidden
 PY
 ```

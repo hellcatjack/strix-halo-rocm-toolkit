@@ -188,6 +188,7 @@ strix-halo-rocm project run "$PROJECT" --build
 - [安装模式与自动化](#安装模式与自动化)
 - [安装进度与私有日志](#安装进度与私有日志)
 - [安装后验证](#安装后验证)
+- [极简 Docker 直启](#极简-docker-直启)
 - [创建和运行项目](#创建和运行项目)
 - [Python 依赖与受保护 pip](#python-依赖与受保护-pip)
 - [模型、缓存和数据挂载](#模型缓存和数据挂载)
@@ -632,6 +633,92 @@ ghcr.io/hellcatjack/strix-halo-rocm-pytorch@sha256:dc0bb217474cfd4f602423bd3bf4f
 从 SWR 回退 GHCR；任何 digest、label、RepoDigest 或内嵌锁不一致都会立即
 阻断。`doctor` 与 `repair` 可同样使用 `--registry auto|swr|ghcr`。
 
+## 极简 Docker 直启
+
+本节面向只需要在本机启动容器、挂载一个业务目录并直接使用 GPU 的用户。
+它不使用项目 overlay、受保护 pip、启动时 Torch 校验、自动修复或跨主机部署。
+需要这些能力时继续使用 [`strix-halo-rocm project run`](#创建和运行项目)。
+
+宿主必须已经存在 `/dev/kfd`、至少一个 `/dev/dri/renderD*`，并且当前用户
+可以执行 Docker。派生镜像还必须已经通过安装器或 `project run --build`
+构建完成。
+
+### 直接进入项目派生镜像
+
+把 `PROJECT` 和 `IMAGE` 改成实际项目目录与派生镜像名：
+
+```bash
+PROJECT="$(realpath "$HOME/ai-projects/video-lab")"
+IMAGE="video-lab:runtime"
+RENDER_NODE="$(find /dev/dri -maxdepth 1 -type c -name 'renderD*' | sort | head -n 1)"
+
+test -c /dev/kfd
+test -n "$RENDER_NODE"
+
+docker run --rm -it \
+  --device /dev/kfd \
+  --device /dev/dri \
+  --group-add "$(stat -c '%g' /dev/kfd)" \
+  --group-add "$(stat -c '%g' "$RENDER_NODE")" \
+  --user "$(id -u):$(id -g)" \
+  --ipc=private \
+  --shm-size=16g \
+  --env HOME=/workspace \
+  --env PIP_TARGET=/workspace/.cache/python-site \
+  --env PYTHONPATH=/workspace/.cache/python-site:/workspace \
+  --env PATH=/workspace/.cache/python-site/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  --mount "type=bind,src=$PROJECT,dst=/workspace" \
+  --workdir /workspace \
+  --entrypoint /bin/bash \
+  "$IMAGE"
+```
+
+`--entrypoint /bin/bash` 会绕过派生镜像的策略入口点，这是本模式的预期行为。
+容器不会自动检查 Torch、GPU 或项目状态，也不会阻止用户替换 Torch。
+
+### 直接进入公开 PyTorch 父镜像
+
+使用同一条命令，只替换镜像变量：
+
+```bash
+IMAGE="swr.cn-east-3.myhuaweicloud.com/hellcat-home/strix-halo-rocm-pytorch@sha256:dc0bb217474cfd4f602423bd3bf4fe8714b03e900cf3c6b4417b99e622ebcf8b"
+```
+
+父镜像只预装 ROCm、Python 和锁定的 PyTorch 栈，不包含项目派生镜像中的
+业务依赖。
+
+### 安装普通 Python 包
+
+进入容器后直接执行：
+
+```bash
+pip install transformers safetensors
+```
+
+普通包写入业务目录的 `.cache/python-site`，重新创建容器后仍然存在。项目
+模板已经从 Docker 构建上下文排除 `.cache`。这些包可以覆盖镜像中的 Python
+包，包括 Torch；需要受保护基线时不要使用本模式。
+
+### 手工验证 GPU
+
+```bash
+python - <<'PY'
+import torch
+
+print("torch:", torch.__version__)
+print("hip:", torch.version.hip)
+print("available:", torch.cuda.is_available())
+
+x = torch.randn((1024, 1024), device="cuda")
+y = x @ x
+torch.cuda.synchronize()
+print("GPU_OK:", y.device)
+PY
+```
+
+成功时必须看到非空 HIP 版本、`available: True` 和 `GPU_OK: cuda:0`。
+这条命令不需要 `--privileged`、`--ipc=host` 或额外 capability。
+
 ## 创建和运行项目
 
 安装器可以创建第一个项目。继续创建其他独立项目时：
@@ -981,6 +1068,9 @@ rm -rf "$HOME/.local/state/strix-halo-rocm-toolkit"
 | `GPU.BIOS_VRAM_HIGH` | 在 BIOS/UEFI 将 UMA Frame Buffer 设为主板允许的最小值，建议 512 MiB；工具不会修改 GTT/TTM 或代替固件设置 |
 | Docker permission denied | 重新登录以刷新组成员关系，或运行 `sudo -v` 后让工具使用 `sudo docker` |
 | 找不到 `/dev/kfd` | 直接在宿主运行 `host-preflight`；不要用未映射设备的普通容器报告判断宿主 |
+| 极简 Docker 直启时 `rocminfo` 或 Torch 无权访问 GPU | 确认命令同时包含 `/dev/kfd`、`/dev/dri` 和由 `stat -c '%g'` 得到的两个数字 `--group-add`；不要用固定的 `video`/`render` 组名代替宿主实际 GID |
+| 极简模式中的 `pip` 显示 protected pip、overlay 或 `--user` 错误 | 使用文档中的完整 `PATH`、`PIP_TARGET` 和 `PYTHONPATH` 参数重新创建容器；该组合会选择 `/opt/venv/bin/pip` 并写入业务目录 `.cache/python-site` |
+| 极简模式创建的文件无法由宿主修改 | 保留 `--user "$(id -u):$(id -g)"`，并确认业务目录允许当前宿主用户写入 |
 | `HOST.UNSUPPORTED_OS` | 该发行版只支持只读采集，不能强制套用 Ubuntu 写入适配器 |
 | `HOST.UPSTREAM_UNVERIFIED` | 新 OEM 6.17 patch 尚未进入已测清单；记录警告并继续，后续 GPU runtime 探针仍为强制项，正式发布前还需完整硬件门禁 |
 | `GPU.RUNTIME_FAILED` | 运行 `host-verify`、检查设备 GID 和 `sudo dmesg`；CPU fallback 不算通过 |

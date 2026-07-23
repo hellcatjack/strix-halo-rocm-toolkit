@@ -37,7 +37,7 @@ will:
 - use private IPC and 16 GiB shared memory;
 - bind the business directory read-write at `/workspace`;
 - use `/workspace` as both the working directory and home directory;
-- place user-installed Python packages under `/workspace/.python-user`;
+- place installed Python packages under `/workspace/.cache/python-site`;
 - bypass `/usr/local/bin/project-entrypoint` with `/bin/bash`;
 - avoid privileged mode, host IPC, extra capabilities, and relaxed seccomp.
 
@@ -60,9 +60,9 @@ docker run --rm -it \
   --ipc=private \
   --shm-size=16g \
   --env HOME=/workspace \
-  --env PYTHONUSERBASE=/workspace/.python-user \
-  --env PIP_USER=1 \
-  --env PATH=/workspace/.python-user/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  --env PIP_TARGET=/workspace/.cache/python-site \
+  --env PYTHONPATH=/workspace/.cache/python-site:/workspace \
+  --env PATH=/workspace/.cache/python-site/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   --mount "type=bind,src=$PROJECT,dst=/workspace" \
   --workdir /workspace \
   --entrypoint /bin/bash \
@@ -79,17 +79,21 @@ IMAGE="swr.cn-east-3.myhuaweicloud.com/hellcat-home/strix-halo-rocm-pytorch@sha2
 
 The command intentionally removes `/opt/amd-ai/bin` from `PATH`, so the plain
 pip installed in `/opt/venv` is selected instead of the protected pip wrapper.
-`PIP_USER=1` and `PYTHONUSERBASE=/workspace/.python-user` make a normal command
-such as the following persist packages inside the single business-directory
-mount:
+`PIP_TARGET=/workspace/.cache/python-site` and the matching `PYTHONPATH` make a
+normal command such as the following persist packages inside the single
+business-directory mount. A venv does not support ordinary `pip --user`, so
+this mode deliberately uses pip's target directory instead. The generated
+project `.dockerignore` already excludes `.cache`, so these packages do not
+enter later image builds:
 
 ```bash
 pip install transformers
 ```
 
-This mode permits packages in `.python-user` to shadow or replace the effective
-Torch stack. That behavior is explicitly accepted for this simple mode. Users
-who need the verified Torch baseline must use the managed project workflow.
+This mode permits packages in `.cache/python-site` to shadow or replace the
+effective Torch stack. That behavior is explicitly accepted for this simple
+mode. Users who need the verified Torch baseline must use the managed project
+workflow.
 
 ## GPU Verification
 
